@@ -653,10 +653,105 @@ class InventoryTests(unittest.TestCase):
             adapter_mod.declared_inventory(self.root, "f" * 40)
 
 
+class SavedServiceTypeTests(AdapterFixture):
+    def _type(self, body):
+        path = self.base / "saved.service"
+        path.write_text(body)
+        return self.adapter._saved_service_type(path)
+
+    def test_whitespace_around_equals_counts_as_a_duplicate_type(self):
+        with self.assertRaisesRegex(dc.Refused, "at most one Type"):
+            self._type("[Service]\nType=oneshot\nType = simple\nExecStart=/bin/x\n")
+
+    def test_continuation_swallows_a_type_inside_environment(self):
+        body = ("[Service]\nEnvironment=LABEL=value \\\nType=oneshot\n"
+                "ExecStart=/usr/bin/env python3 /w.py\n")
+        self.assertEqual(self._type(body), "simple")
+
+    def test_comment_inside_a_continuation_does_not_end_it(self):
+        body = ("[Service]\nEnvironment=LABEL=value \\\n# comment\nType=oneshot\n"
+                "ExecStart=/usr/bin/env python3 /w.py\n")
+        self.assertEqual(self._type(body), "simple")
+
+    def test_unicode_line_separator_stays_inside_a_comment(self):
+        body = ("[Service]\n# note\u2028Type=exec\nType=oneshot\n"
+                "ExecStart=/bin/x\n")
+        self.assertEqual(self._type(body), "oneshot")
+
+    def test_implicit_exec_through_credentials_refuses(self):
+        for key in ("SetCredential", "LoadCredential", "ImportCredential"):
+            with self.subTest(key=key), \
+                    self.assertRaisesRegex(dc.Refused, "implies Type=exec"):
+                self._type("[Service]\nExecStart=/bin/x\n" + key + "=a:b\n")
+
+    def test_utf8_bom_before_the_first_section_is_ignored(self):
+        self.assertEqual(
+            self._type("\ufeff[Service]\nType=oneshot\nExecStart=/bin/x\n"), "oneshot")
+
+    def test_unicode_whitespace_before_a_key_is_not_systemd_whitespace(self):
+        # systemd strips ASCII space/tab only, so an NBSP-prefixed Type is an unknown
+        # key and the unit defaults to simple; honouring it would admit oneshot.
+        body = "[Service]\n\u00a0Type=oneshot\nExecStart=/bin/x\n"
+        self.assertEqual(self._type(body), "simple")
+        self.assertEqual(
+            self._type("[Service]\n\t Type = oneshot \nExecStart=/bin/x\n"), "oneshot")
+
+    def test_saved_simple_under_pinned_oneshot_refuses_when_inactive(self):
+        # The post-start check follows the saved bytes, not the pinned template.
+        service = self.unit_dir / "crq-tick.service"
+        text = service.read_text()
+        self.assertIn("Type=oneshot", text)
+        _write(service, text.replace("Type=oneshot", "Type=simple").encode(), 0o600)
+        self.fake.active["crq-tick.service"] = "active"
+        current = self.make_adapter()
+        snapshot = current.snapshot("crq-tick.service")
+        current.validate_snapshot("crq-tick.service", snapshot)
+        current.stop_and_drain("crq-tick.service")
+        current.restore("crq-tick.service", snapshot)
+        self.fake.post_start_state["crq-tick.service"] = "inactive"
+        with self.assertRaisesRegex(dc.Refused, "restored simple service is not active"):
+            current.restore_activation("crq-tick.service", snapshot)
+
+    def test_standalone_comment_ending_in_a_backslash_does_not_continue(self):
+        body = "[Service]\n# note \\\nType=oneshot\nExecStart=/bin/x\n"
+        self.assertEqual(self._type(body), "oneshot")
+
+    def test_even_trailing_backslashes_do_not_continue(self):
+        body = "[Service]\nEnvironment=LABEL=value\\\\\nType=oneshot\nExecStart=/bin/x\n"
+        self.assertEqual(self._type(body), "oneshot")
+
+    def test_missing_type_with_execstart_defaults_to_simple(self):
+        self.assertEqual(self._type("[Service]\nExecStart=/bin/x\n"), "simple")
+
+    def test_missing_type_with_busname_is_refused(self):
+        with self.assertRaisesRegex(dc.Refused, "does not default to simple"):
+            self._type("[Service]\nBusName=a.b\nExecStart=/bin/x\n")
+
+    def test_explicit_oneshot_is_kept(self):
+        self.assertEqual(self._type("[Service]\nType = oneshot\nExecStart=/bin/x\n"),
+                         "oneshot")
+
+
 class AdapterTests(AdapterFixture):
     def test_preflight_refuses_same_runtime(self):
         with self.assertRaisesRegex(dc.Refused, "already selects"):
             self.adapter.preflight("crq-tick.service", "python")
+
+    def test_preflight_refuses_a_saved_type_restore_cannot_follow(self):
+        path = self.unit_dir / "crq-tick.service"
+        text = path.read_text()
+        self.assertIn("Type=oneshot", text)
+        path.write_text(text.replace("Type=oneshot", "Type=exec"))
+        before = _tree(self.unit_dir)
+        with self.assertRaisesRegex(dc.Refused, "Type is unsupported: exec"):
+            self.adapter.preflight("crq-tick.service", NODE_RUNTIME)
+        self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_snapshot_refuses_a_saved_type_restore_cannot_follow(self):
+        path = self.unit_dir / "crq-tick.service"
+        path.write_text(path.read_text().replace("Type=oneshot", "Type=exec"))
+        with self.assertRaisesRegex(dc.Refused, "Type is unsupported: exec"):
+            self.adapter.snapshot("crq-tick.service")
 
     def test_preflight_node_from_python_succeeds(self):
         prior = self.adapter.preflight("crq-tick.service", NODE_RUNTIME)
@@ -1472,6 +1567,154 @@ class AdapterTests(AdapterFixture):
         recovery.restore_activation("crq-tick.service", snapshot)
         self.assertEqual(self.fake.active["crq-tick.service"], "active")
         self.assertEqual(self.fake.active["crq-tick.timer"], "active")
+
+    def test_restore_activation_uses_the_saved_service_start_timeout(self):
+        service = self.unit_dir / "crq-tick.service"
+        prior = self.python_service("crq-tick.service")
+        text = prior["bytes"].decode("utf-8")
+        self.assertIn("TimeoutStartSec=10min", text)
+        _write(service, text.replace(
+            "TimeoutStartSec=10min", "TimeoutStartSec=20min").encode(), 0o600)
+        self.fake.active["crq-tick.service"] = "active"
+        current = self.make_adapter()
+        snapshot = current.snapshot("crq-tick.service")
+        recovery = self.make_adapter()
+        recovery.validate_snapshot("crq-tick.service", snapshot)
+        recovery.stop_and_drain("crq-tick.service")
+        recovery.restore("crq-tick.service", snapshot)
+        # 700 s exceeds the pinned 10-minute bound plus the margin (660 s) but
+        # is inside the saved 20-minute bound plus the margin (1,260 s), so the
+        # restore start must be bounded by the saved unit, not the template.
+        self.fake.service_start_delay = 700
+        recovery.restore_activation("crq-tick.service", snapshot)
+        self.assertEqual(self.fake.active["crq-tick.service"], "active")
+        self.assertEqual(self.fake.active["crq-tick.timer"], "active")
+
+    def _recovery_with_timeout_line(self, line):
+        service = self.unit_dir / "crq-tick.service"
+        text = self.python_service("crq-tick.service")["bytes"].decode("utf-8")
+        _write(service, text.replace("TimeoutStartSec=10min", line).encode(), 0o600)
+        self.fake.active["crq-tick.service"] = "active"
+        current = self.make_adapter()
+        snapshot = current.snapshot("crq-tick.service")
+        recovery = self.make_adapter()
+        recovery.validate_snapshot("crq-tick.service", snapshot)
+        recovery.stop_and_drain("crq-tick.service")
+        recovery.restore("crq-tick.service", snapshot)
+        return recovery, snapshot
+
+    def test_restore_start_timeout_accepts_whitespace_before_equals(self):
+        recovery, snapshot = self._recovery_with_timeout_line("TimeoutStartSec =20min")
+        self.fake.service_start_delay = 700
+        recovery.restore_activation("crq-tick.service", snapshot)
+        self.assertEqual(self.fake.active["crq-tick.service"], "active")
+
+    def test_unsupported_saved_timeout_falls_back_to_the_pinned_bound(self):
+        for line in ("TimeoutStartSec=bogus", "TimeoutStartSec=infinity",
+                     "TimeoutStartSec=" + "9" * 309 + "s"):
+            with self.subTest(line=line):
+                self.setUp()
+                recovery, snapshot = self._recovery_with_timeout_line(line)
+                self.fake.service_start_delay = 120
+                recovery.restore_activation("crq-tick.service", snapshot)
+                self.assertEqual(self.fake.active["crq-tick.service"], "active")
+
+    def test_last_timeout_assignment_wins_across_both_keys(self):
+        for lines in ("TimeoutStartSec=5min\nTimeoutStartSec=20min",
+                      "TimeoutStartSec=1min\nTimeoutSec=20min",
+                      "# c \\\nTimeoutStartSec=20min"):
+            with self.subTest(lines=lines):
+                self.setUp()
+                recovery, snapshot = self._recovery_with_timeout_line(lines)
+                self.fake.service_start_delay = 700
+                recovery.restore_activation("crq-tick.service", snapshot)
+                self.assertEqual(self.fake.active["crq-tick.service"], "active")
+
+    def test_restore_start_command_timeout_is_recorded_for_fallbacks(self):
+        for line, expected in (("TimeoutStartSec=192h", 660),
+                               ("TimeoutStartSec=infinity", 660),
+                               ("TimeoutStartSec=20min30s", 1290),
+                               ("TimeoutStartSec=20min 30s", 1290),
+                               ("TimeoutStartSec=20min\nTimeoutSec=bogus", 1260),
+                               ("TimeoutStartSec=" + "9" * 5000, 660)):
+            with self.subTest(line=line):
+                self.setUp()
+                recovery, snapshot = self._recovery_with_timeout_line(line)
+                seen = []
+                original = self.fake.run
+
+                def record(*args, timeout=60, _original=original, **kwargs):
+                    if "start" in args:
+                        seen.append(timeout)
+                    return _original(*args, timeout=timeout, **kwargs)
+
+                self.fake.run = record
+                recovery.restore_activation("crq-tick.service", snapshot)
+                self.assertIn(expected, seen)
+
+    def test_u2028_in_a_comment_is_not_an_assignment(self):
+        recovery, snapshot = self._recovery_with_timeout_line(
+            "TimeoutStartSec=20min\n# note\u2028TimeoutStartSec=1s")
+        self.fake.service_start_delay = 700
+        recovery.restore_activation("crq-tick.service", snapshot)
+        self.assertEqual(self.fake.active["crq-tick.service"], "active")
+
+    def test_duration_without_spaces_and_oversized_digits(self):
+        self.assertEqual(adapter_mod._duration_seconds("20min30s"), 1230)
+        self.assertEqual(adapter_mod._duration_seconds("20min 30s"), 1230)
+        self.assertIsNone(adapter_mod._duration_seconds("9" * 5000))
+
+    def test_all_systemd_time_span_units_are_accepted(self):
+        for text, expected in (("2d", 172800), ("1w", 604800), ("1day", 86400),
+                               ("2days", 172800), ("5sec", 5), ("3seconds", 3),
+                               ("2hr", 7200), ("2hours", 7200), ("5minutes", 300),
+                               ("1month", 2629800), ("1M", 2629800),
+                               ("1y", 31557600), ("1year", 31557600),
+                               ("1500msec", 1), ("2000000usec", 2),
+                               ("2000000us", 2), ("1d 2h", 93600)):
+            with self.subTest(text=text):
+                self.assertEqual(adapter_mod._duration_seconds(text), expected)
+        self.assertIsNone(adapter_mod._duration_seconds("5mins"))
+        self.assertIsNone(adapter_mod._duration_seconds("5H"))
+
+    def test_saved_timeout_in_days_is_honored(self):
+        recovery, snapshot = self._recovery_with_timeout_line("TimeoutStartSec=2d")
+        self.fake.service_start_delay = 700
+        recovery.restore_activation("crq-tick.service", snapshot)
+        self.assertEqual(self.fake.active["crq-tick.service"], "active")
+
+    def test_minute_unit_m_is_accepted(self):
+        self.assertEqual(adapter_mod._duration_seconds("5m"), 300)
+        self.assertIsNone(adapter_mod._duration_seconds("9" * 309 + "s"))
+
+    def test_comment_inside_a_timeout_continuation_is_ignored(self):
+        recovery, snapshot = self._recovery_with_timeout_line(
+            "TimeoutStartSec=10min \\\n# note\n10min")
+        self.fake.service_start_delay = 700
+        recovery.restore_activation("crq-tick.service", snapshot)
+        self.assertEqual(self.fake.active["crq-tick.service"], "active")
+
+    def test_inactive_snapshot_ignores_an_unsupported_start_timeout(self):
+        service = self.unit_dir / "crq-tick.service"
+        text = self.python_service("crq-tick.service")["bytes"].decode("utf-8")
+        _write(service, text.replace(
+            "TimeoutStartSec=10min", "TimeoutStartSec=bogus").encode(), 0o600)
+        self.fake.active["crq-tick.service"] = "inactive"
+        current = self.make_adapter()
+        snapshot = current.snapshot("crq-tick.service")
+        recovery = self.make_adapter()
+        recovery.validate_snapshot("crq-tick.service", snapshot)
+        recovery.stop_and_drain("crq-tick.service")
+        recovery.restore("crq-tick.service", snapshot)
+        recovery.restore_activation("crq-tick.service", snapshot)
+        self.assertEqual(self.fake.active["crq-tick.service"], "inactive")
+        self.assertFalse(service.is_symlink())
+
+    def test_space_separated_time_span_is_summed(self):
+        self.assertEqual(adapter_mod._duration_seconds("5min 20s"), 320)
+        self.assertEqual(adapter_mod._duration_seconds("1h 30min"), 5400)
+        self.assertIsNone(adapter_mod._duration_seconds("5min bogus"))
+        self.assertIsNone(adapter_mod._duration_seconds(""))
 
     def test_forward_and_recovery_for_both_runtimes(self):
         cases = [

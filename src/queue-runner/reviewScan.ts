@@ -2,7 +2,7 @@
 import { parseDenylistPatterns } from '../ops/dev/denylist.js';
 import { pythonSplitlines } from '../policy/crq/repairGates.js';
 import { atomicJsonText } from '../policy/crq/pythonJson.js';
-import type { ReviewScanDecision } from './reviewPreparation.js';
+import { ReviewScanRefusal, type ReviewScanDecision } from './reviewPreparation.js';
 
 const universal = [
   'class:token-ssh-plumbing',
@@ -18,6 +18,89 @@ const allow = [
   /(^|\/)\.DS_Store$/,
   /^policy\/denylist\/patterns\.yml$/,
 ];
+/** Git's C-quote letter escapes (quote.c); every other unusual byte is `\NNN` octal. */
+const gitQuoteEscapes: Record<string, number> = {
+  a: 0x07,
+  b: 0x08,
+  f: 0x0c,
+  n: 0x0a,
+  r: 0x0d,
+  t: 0x09,
+  v: 0x0b,
+  '\\': 0x5c,
+  '"': 0x22,
+};
+const utf8 = new TextEncoder();
+
+/**
+ * Decode git's C-quoted pathname form (`core.quotePath`): git wraps a header
+ * path carrying a tab, quote, backslash or non-ASCII byte in double quotes and
+ * escapes `\\`, `\"`, the C control letters, and every other unusual byte as
+ * `\NNN` octal. The quoted text is not the path, so a path-scoped rule would
+ * test the escapes instead of the name and miss the file's lines. A quoted
+ * form that does not decode cleanly throws: a path the scan cannot name is
+ * content it cannot attribute.
+ */
+function decodeGitPath(raw: string): string {
+  if (raw.length < 2 || !raw.startsWith('"') || !raw.endsWith('"')) return raw;
+  const inner = raw.slice(1, -1);
+  const bytes: number[] = [];
+  let index = 0;
+  while (index < inner.length) {
+    const ch = inner[index] as string;
+    if (ch !== '\\') {
+      const code = inner.codePointAt(index) as number;
+      // Literal non-ASCII inside the quotes is git's core.quotePath=false
+      // form; re-encode it so literal UTF-8 and octal escapes mix losslessly.
+      if (code > 0x7f) {
+        const point = String.fromCodePoint(code);
+        for (const b of utf8.encode(point)) bytes.push(b);
+        index += point.length;
+        continue;
+      }
+      bytes.push(code);
+      index += 1;
+      continue;
+    }
+    const next = inner[index + 1];
+    const letter = next === undefined ? undefined : gitQuoteEscapes[next];
+    if (letter !== undefined) {
+      bytes.push(letter);
+      index += 2;
+      continue;
+    }
+    const octal = /^\\([0-7]{3})/.exec(inner.slice(index));
+    if (octal === null) throw new ReviewScanRefusal('undecodable review scan path');
+    bytes.push(parseInt(octal[1] as string, 8));
+    index += 4;
+  }
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array(bytes));
+  } catch {
+    throw new ReviewScanRefusal('undecodable review scan path');
+  }
+}
+
+/** Drop the pinned `a/` or `b/` diff prefix from a decoded path. */
+function withoutDiffPrefix(value: string): string {
+  return value.startsWith('a/') || value.startsWith('b/') ? value.slice(2) : value;
+}
+
+/**
+ * The b-side path of a `diff --git` header. Git quotes a name that needs it,
+ * so a quoted b-side field is decoded before the prefix strip — the separator
+ * is the last space from which a whole quoted string runs to end of line,
+ * which keeps spaces inside the quotes intact. The unquoted form stays as it
+ * was: git leaves spaces bare there, and the greedy a-side ends at the last
+ * ` b/` boundary.
+ */
+function diffGitPath(line: string): string | null {
+  const rest = line.slice('diff --git '.length);
+  const quoted = /^.* ("(?:[^"\\]|\\.)*")$/s.exec(rest);
+  if (quoted !== null) return withoutDiffPrefix(decodeGitPath(quoted[1] as string));
+  return /^a\/(.*) b\/(.*)$/s.exec(rest)?.[2] ?? null;
+}
+
 export interface ReviewScannerEffects {
   /** Compile all rules, then return strictly ordered [line, rule] matches, or throw. */
   match(input: {
@@ -67,29 +150,58 @@ export async function scanReviewDiff(
   const candidates: { path: string; text: string; diffLine: number }[] = [];
   let path: string | null = null;
   let header = false;
-  const lines = pythonSplitlines(input.diff);
-  for (const [index, line] of lines.entries()) {
-    if (line.startsWith('diff --git')) {
-      path = /^diff --git a\/(.*) b\/(.*)$/.exec(line)?.[2] ?? null;
+  const handle = (line: string, diffLine: number, physicalStart = true): void => {
+    // Only a physical patch record can open a file section; a logical fragment
+    // split out of hunk content (after U+2028 and similar) is never a header.
+    if (physicalStart && line.startsWith('diff --git')) {
+      path = diffGitPath(line);
       header = true;
-      continue;
+      return;
     }
     if (line.startsWith('@@')) {
       header = false;
-      continue;
+      return;
     }
     if (header) {
       if (line.startsWith('+++ ') || line.startsWith('--- ')) {
-        const next = line.slice(4);
-        if (next !== '/dev/null')
-          path = next.startsWith('a/') || next.startsWith('b/') ? next.slice(2) : next;
+        // Git appends one literal tab to an unquoted label that holds a space;
+        // drop only that, never a filename's own spaces or escaped tabs.
+        const raw = line.slice(4);
+        const next = raw.endsWith('\t') ? raw.slice(0, -1) : raw;
+        if (next !== '/dev/null') path = withoutDiffPrefix(decodeGitPath(next));
       }
-      continue;
+      return;
     }
-    if (!line || (line[0] !== '+' && line[0] !== '-') || path === null) continue;
+    if (!line || (line[0] !== '+' && line[0] !== '-') || path === null) return;
     const currentPath = path;
-    if (allow.some((p) => p.test(currentPath))) continue;
-    candidates.push({ path, text: line.slice(1), diffLine: index + 1 });
+    if (allow.some((p) => p.test(currentPath))) return;
+    candidates.push({ path, text: line.slice(1), diffLine });
+  };
+  // Headers and file labels split on physical patch lines only, so a literal
+  // U+2028 in a filename survives until the path is decoded and matched.
+  // Hunk content keeps Python splitlines and its line numbering.
+  const physical = input.diff.split(/\r\n|\n|\r/);
+  let counted = 0;
+  for (const [index, piece] of physical.entries()) {
+    const last = index === physical.length - 1;
+    // A piece ending in a logical-only terminator (U+2028, ...) keeps the empty
+    // logical line its physical LF then closes, as Python splitlines does.
+    const gap =
+      last || piece === ''
+        ? 0
+        : pythonSplitlines(`${piece}\n`).length - pythonSplitlines(piece).length;
+    if (header || piece.startsWith('diff --git')) {
+      handle(piece, counted + 1);
+      counted += (piece === '' ? (last ? 0 : 1) : pythonSplitlines(piece).length) + gap;
+    } else if (piece === '') {
+      if (!last) counted += 1;
+    } else {
+      for (const [at, sub] of pythonSplitlines(piece).entries()) {
+        counted += 1;
+        handle(sub, counted, at === 0);
+      }
+      counted += gap;
+    }
   }
   try {
     const matches = await effects.match({ rules, lines: candidates });

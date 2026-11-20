@@ -307,6 +307,31 @@ fs.writeFileSync(p,String(Number(fs.existsSync(p)?fs.readFileSync(p,'utf8'):0)+1
       }
     },
   );
+  test('an exhausted unit wall budget refuses before the baseline worktree is added', async () => {
+    let exhausted = false;
+    let headReads = 0;
+    const worktreeAdds: string[][] = [];
+    const f = await fixture(undefined, '', {
+      unitWallMs: 120_000,
+      remainingWallMs: () => (exhausted ? 0 : 20_000),
+      gitHook: async (args, run) => {
+        if (args.includes('worktree') && args.includes('add')) worktreeAdds.push(args);
+        const result = await run(args);
+        // Read 1 is initialize(); read 2 is the baseline head, the last git
+        // call before the worktree add (see the T14 note in the journal test).
+        if (args.includes('rev-parse') && args.includes('HEAD') && ++headReads === 2)
+          exhausted = true;
+        return result;
+      },
+    });
+    try {
+      await f.engine.fix(finding(), 1);
+      expect(worktreeAdds).toHaveLength(0);
+      expect(f.calls()).toBe(0);
+    } finally {
+      await f.cleanup();
+    }
+  });
   test('unresponsive diagnostic scan is bounded', async () => {
     const f = await fixture(undefined, `process.exitCode=2;`, {
       configure: (config) => {

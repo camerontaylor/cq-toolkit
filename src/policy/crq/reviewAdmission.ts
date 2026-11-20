@@ -11,7 +11,7 @@
  * one entry.
  */
 import { JsonNumber, JsonObject, type JsonValue } from './jsonValue.js';
-import { withObjectKeys } from './queueDoc.js';
+import { withObjectKeys, withoutObjectKey } from './queueDoc.js';
 import { receiptJsonDigest } from './pythonJson.js';
 
 /** Item states that still hold the request as an observer. */
@@ -220,6 +220,13 @@ export function reviewStatus(queue: JsonObject, requestId: string): JsonObject {
   }
   const reason = fields.waitReason ?? fields.lastError;
   if (reason !== null) result = withObjectKeys(result, [['reason', reason]]);
+  // A persisted failed receipt verification keeps the recovery cue on replay.
+  if (item.get('receipt_unavailable') === true) {
+    result = withObjectKeys(result, [
+      ['next_action', 'resubmit'],
+      ['reason', 'receipt-unavailable'],
+    ]);
+  }
   return result;
 }
 
@@ -287,8 +294,14 @@ export function admit(
     const reversed = [...equivalent].reverse();
     item =
       reversed.find((candidate) => adequate(candidate) && input.verifyReceipt(candidate)) ?? null;
-    if (item !== null) action = 'reused';
-    else {
+    if (item !== null) {
+      action = 'reused';
+      // The receipt verifies again, so an earlier receipt-unavailable mark is stale.
+      if (item.has('receipt_unavailable')) {
+        item = withoutObjectKey(item, 'receipt_unavailable');
+        queue = replaceItem(queue, item);
+      }
+    } else {
       item = reversed.find((candidate) => ACTIVE_STATES.has(itemFields(candidate).state)) ?? null;
       if (item !== null) action = 'joined';
       else if (equivalent.length > 0) {
@@ -352,13 +365,13 @@ export function admit(
     queue = replaceItem(queue, item);
   }
 
-  let result = reviewStatus(queue, input.requestId);
   if (action === 'observed' && adequate(item) && !input.verifyReceipt(item)) {
-    result = withObjectKeys(result, [
-      ['next_action', 'resubmit'],
-      ['reason', 'receipt-unavailable'],
-    ]);
+    // adequate() trusts the stored receipt id, so persist the failed
+    // verification for later status() and retry() responses.
+    item = withObjectKeys(item, [['receipt_unavailable', true]]);
+    queue = replaceItem(queue, item);
   }
+  let result = reviewStatus(queue, input.requestId);
   if (result.get('action') !== 'no-changes') result = withObjectKeys(result, [['action', action]]);
   return { queue, result };
 }

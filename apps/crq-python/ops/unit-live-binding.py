@@ -94,7 +94,8 @@ MAX_PIDS = 4096
 ARG_RE = re.compile(r"[A-Za-z0-9_.@:/-]+")
 PROPERTY_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*")
 PID_RE = re.compile(r"[0-9]+")
-CRQ_NAME_RE = re.compile(r"crq-[A-Za-z0-9_.@:-]+")
+# ``\xHH`` is systemd's C-style escape inside a unit name.
+CRQ_NAME_RE = re.compile(r"crq-(?:[A-Za-z0-9_.@:-]|\\x[0-9A-Fa-f]{2})+")
 DEPENDENCY_RE = re.compile(
     r"(?P<directive>Wants|Requires|Requisite|BindsTo|PartOf|Conflicts|"
     r"WantedBy|RequiredBy|Also|Upholds|OnFailure|OnSuccess|Triggers|"
@@ -110,6 +111,42 @@ UNIT_SUFFIXES = {".service", ".timer", ".path"}
 SCANNED_SUFFIXES = {".conf", ".device", ".automount", ".mount",
                     ".path", ".scope", ".service", ".slice", ".socket",
                     ".swap", ".target", ".timer"}
+
+
+def _also_words(value):
+    """Split an ``Also=`` value the way systemd's ``config_parse_also`` does.
+
+    ``config_parse_also`` (systemd v257 src/shared/install.c) tokenises with
+    ``extract_first_word(&rvalue, &word, NULL, 0)``: words are separated by
+    whitespace, and a backslash escapes whatever character follows it, so the
+    backslash is dropped and the character kept, whitespace included
+    (src/basic/extract-word.c). ``crq-slot\\.service`` therefore names
+    ``crq-slot.service``, a run of N backslashes becomes N // 2, and
+    ``crq-a\\ b`` is one word. A trailing lone backslash makes the call fail
+    with ``-EINVAL``, so the unit's ``[Install]`` section does not parse;
+    return ``None`` and let the caller refuse to vouch for it.
+
+    Specifiers are expanded after tokenising, as ``install_name_printf``
+    does, so callers expand each returned word, not the raw value.
+    """
+    words = []
+    word = None
+    chars = iter(value)
+    for char in chars:
+        if char == "\\":
+            escaped = next(chars, None)
+            if escaped is None:
+                return None
+            word = (word or "") + escaped
+        elif char in " \t\n\r":
+            if word is not None:
+                words.append(word)
+                word = None
+        else:
+            word = (word or "") + char
+    if word is not None:
+        words.append(word)
+    return words
 
 
 def _expand_instance(path, value):
@@ -690,9 +727,53 @@ class SubprocessSystemd:
                             match = DEPENDENCY_RE.match(stripped)
                             if match is None:
                                 continue
-                            value = _expand_instance(path,
-                                                     match.group("value"))
-                            for name in CRQ_NAME_RE.findall(value):
+                            directive = match.group("directive")
+                            if directive == "Also":
+                                words = _also_words(match.group("value"))
+                                if words is None:
+                                    # systemd rejects the value outright, so
+                                    # the scan cannot say which units it
+                                    # would have named.
+                                    if source_declared \
+                                            or "crq-" in match.group("value"):
+                                        foreign.append(
+                                            "%s:%d: Also has a trailing "
+                                            "backslash systemd rejects"
+                                            % (path, number))
+                                    continue
+                                names = [_expand_instance(path, word)
+                                         for word in words]
+                            else:
+                                names = _expand_instance(
+                                    path, match.group("value")).split()
+                            for name in names:
+                                # systemd removes quote characters wherever
+                                # they sit in an argument (``crq-"slot".target``
+                                # names crq-slot.target) before it names the
+                                # unit.
+                                name = name.replace('"', "").replace("'", "")
+                                # A specifier left after instance expansion
+                                # (``%p``, ``%n``) expands to a name the scan
+                                # cannot predict, so discovery cannot vouch
+                                # that it stays inside the expected set.
+                                # ``%%`` is a literal percent sign.
+                                if "%" in name.replace("%%", "") \
+                                        and (source_declared
+                                             or "crq-" in name):
+                                    foreign.append(
+                                        "%s:%d: %s has an unresolved "
+                                        "specifier in %s"
+                                        % (path, number,
+                                           match.group("directive"), name))
+                                    continue
+                                # Each whitespace-separated argument is one
+                                # complete unit name. A CRQ name embedded in
+                                # a longer argument such as
+                                # ``backup-crq-tick.service`` names a
+                                # different unit, so only an argument that is
+                                # wholly a CRQ name is a CRQ reference.
+                                if CRQ_NAME_RE.fullmatch(name) is None:
+                                    continue
                                 # An undeclared source is foreign only when it
                                 # names an expected unit; a declared source is
                                 # foreign when it names a unit outside the set.
@@ -842,7 +923,7 @@ class SubprocessSystemd:
                 foreign.append("unexpected installed entry: " + str(entry))
             is_dir, probe_failure = _directory_probe(entry)
             if probe_failure is not None \
-                    and name.endswith((".d", ".wants", ".requires")):
+                    and name.endswith((".d", ".wants", ".requires", ".upholds")):
                 error = error or probe_failure
                 continue
             # systemd v257 resolves a symlinked .wants/.requires directory and
@@ -862,7 +943,20 @@ class SubprocessSystemd:
             if name.endswith(".d") and self._inherited_dropin_applies(
                     name[:-2], units):
                 foreign.append("undeclared drop-in directory: " + str(entry))
-            if is_dir and name.endswith((".wants", ".requires")):
+            # systemd v257 also reads ``*.upholds`` enablement directories: a
+            # link there makes the upstream unit restart the named one when it
+            # becomes inactive, which is an incoming dependency edge like
+            # ``*.wants``/``*.requires`` and must be checked the same way.
+            if name.endswith((".wants", ".requires", ".upholds")) \
+                    and entry.is_symlink() \
+                    and os.path.realpath(entry) != os.devnull:
+                # systemd traverses a symlinked enablement directory, but
+                # the children are not inspected through the link here, so
+                # discovery cannot vouch for the topology.
+                foreign.append("symlinked enablement directory: "
+                               + str(entry))
+                continue
+            if is_dir and name.endswith((".wants", ".requires", ".upholds")):
                 try:
                     children = list(entry.iterdir())
                 except OSError as exc:
@@ -870,6 +964,11 @@ class SubprocessSystemd:
                                       + str(exc)[:160])
                     continue
                 for child in sorted(children):
+                    if child.is_symlink() \
+                            and os.path.realpath(child) == os.devnull:
+                        # systemd ignores a /dev/null mask in an
+                        # enablement directory.
+                        continue
                     if child.name.startswith(prefix) \
                             and str(child) not in declared_set:
                         foreign.append("unexpected enablement link: "

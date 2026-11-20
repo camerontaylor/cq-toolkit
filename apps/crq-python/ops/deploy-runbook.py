@@ -441,10 +441,17 @@ class Hold:
         self.acquired = True
 
     def owns(self):
+        return self.ownership() is True
+
+    def ownership(self):
+        """True when the marker holds this run's token, False when it verifiably
+        does not (absent or foreign), None when a read failure leaves it unknown."""
         try:
             return self.path.read_bytes() == self.token
-        except OSError:
+        except FileNotFoundError:
             return False
+        except OSError:
+            return None
 
     def release(self):
         require(self.owns(),
@@ -861,10 +868,25 @@ class Run:
                 if result["drained"]:
                     break
                 if self.clock() >= deadline:
-                    durable_write(Path(self.run_dir) / record_name,
-                                  {"polls": polls,
-                                   "drained": False,
-                                   "deadline_s": self.args.drain_deadline_s})
+                    try:
+                        durable_write(Path(self.run_dir) / record_name,
+                                      {"polls": polls,
+                                       "drained": False,
+                                       "deadline_s": self.args.drain_deadline_s})
+                    except OSError as exc:
+                        # A diagnostic that cannot be recorded must not
+                        # replace the FailStop: live work may still be
+                        # running against this checkout, and an escaping
+                        # I/O error would reach recovery as an ordinary
+                        # refusal that restarts the triggers and releases
+                        # admission.
+                        try:
+                            self.narrate("drain.json could not be written ("
+                                         + repr(exc)[:200] + ")")
+                        except OSError:
+                            # Narration shares the failing filesystem; it
+                            # must not replace the FailStop either.
+                            pass
                     raise FailStop(
                         "queue drain expired after "
                         + str(self.args.drain_deadline_s)
@@ -947,9 +969,15 @@ class Run:
                 "target " + self.target[:12] + " changes rendered unit "
                 "templates this flow cannot reconcile: it installs no unit "
                 "files, verifies none with the user manager, and rollback "
-                "cannot restore the prior definitions. The owner must "
-                "install and verify the changed unit definitions against "
-                "this target first: " + ", ".join(changed))
+                "cannot restore the prior definitions. This runbook cannot "
+                "deploy a template-changing target from the current "
+                "checkout: installing the unit files changes neither Git "
+                "tree, so a retry finds the same delta and refuses again. "
+                "Complete the template change through the separate owner "
+                "ceremony documented in apps/crq-python/ops/HOST-DEPLOY.md "
+                "(\"Owner procedure for any template-changing target\": "
+                "prepare --units-output into the user manager); changed "
+                "templates: " + ", ".join(changed))
 
     def verify_after_switch(self):
         """The three facts a switch must not change: queue bytes, runtime
@@ -1154,11 +1182,25 @@ class Run:
         self.narrate("rolled back to " + self.prior_sha[:12]
                      + "; triggers restored")
 
+    def admission_held(self):
+        """Whether admission is held by this run right now (None: marker
+        unreadable, so ownership is unknown).
+
+        A failed rollback reacquires admission and can fail again before
+        releasing it, leaving the hold retained while ``released`` is still
+        True: ``released`` records the earlier health-window release (and
+        selects the rollback digest baseline), so the recovery record must
+        report the current admission state separately."""
+        if self.hold is None:
+            return False
+        return self.hold.ownership()
+
     def document(self, outcome, **extra):
         return {
             "operation": "deploy",
             "outcome": outcome,
             "released": self.released,
+            "admission_held": self.admission_held(),
             "target": self.target,
             "prior_sha": self.prior_sha,
             "tag": self.args.tag,

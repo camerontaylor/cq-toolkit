@@ -10,13 +10,16 @@ import os
 from pathlib import Path
 import random
 import re
+import shutil
 import signal
 import sys
+import tempfile
 import time
+import traceback
 from zoneinfo import ZoneInfo
 from crq_repair import DetectorUnavailable, atomic, command, git, hack_detector, utc, verify
 from crq_repair.drivers import cq, codex, paseo
-from crq_repair.retain import retain
+from crq_repair.retain import UnsupportedUntracked, retain, untracked_directories
 from crq_repair.bounded import drain_job, drain_order, require_canonical_delivery, select_job, source_snapshot
 
 ROOT = Path(__file__).resolve().parent
@@ -193,8 +196,20 @@ def fallback_roles(config, role):
                      if role['driver'] == 'cq' and model != role['model']]
 
 
+def role_provider(role):
+    """The cooldown key for a role: the model's provider prefix, or the driver's
+    real provider when the model is unprefixed (codex gpt-5.1 and gpt-5.2 are
+    both OpenAI and must share one cooldown)."""
+    prefix, sep, _ = role['model'].partition('/')
+    # A Paseo 'codex/...' model and the codex driver are the same OpenAI account.
+    aliases = {'codex': 'openai'}
+    if sep:
+        return aliases.get(prefix, prefix)
+    return aliases.get(role['driver'], role['driver'])
+
+
 def provider_ready(role):
-    provider = role['model'].split('/', 1)[0]
+    provider = role_provider(role)
     keys = {'zai': ('ZAI_API_KEY',), 'opencode-go': ('OPENCODE_GO_API_KEY', 'OPENCODE_GO_BASE_URL'),
             'deepseek': ('DEEPSEEK_API_KEY',)}
     return all(os.environ.get(key) for key in keys.get(provider, ()))
@@ -219,13 +234,20 @@ def valid_cooldown_stamp(stamp):
 
 def provider_cooldowns():
     path = ROOT / 'state/repair/provider-cooldowns.json'
-    if not path.exists():
+    try:
+        path.stat()
+    except FileNotFoundError:
         return {}
+    except OSError as exc:
+        # Path.exists() would read an unstatable file as absent, i.e. no cooldown.
+        raise CooldownStateError('provider-cooldowns.json cannot be inspected: ' + str(exc)[:200]) from exc
     # Corrupt state must not silently spend against a known exhausted provider:
     # validate the complete document and reject every invalid timestamp before a
     # caller compares one with utc().
     try:
         state = json.loads(path.read_text())
+    except OSError as exc:
+        raise CooldownStateError('provider-cooldowns.json is unreadable: ' + str(exc)[:200]) from exc
     except ValueError as exc:
         raise CooldownStateError('provider-cooldowns.json is not valid JSON: ' + str(exc)[:200]) from exc
     if not isinstance(state, dict) or not all(valid_cooldown_stamp(stamp) for stamp in state.values()):
@@ -270,7 +292,7 @@ def dispatch_paused(config):
         now = utc()
         roles = [candidate for role in config['repair']['roles'].values()
                  for candidate in fallback_roles(config, role) if provider_ready(candidate)]
-        if any(state.get(role['model'].split('/', 1)[0], '') <= now for role in roles):
+        if any(state.get(role_provider(role), '') <= now for role in roles):
             return None
     return paused()
 
@@ -292,7 +314,7 @@ def dispatch(config, role, job, wt, directory, judge=False):
     previous_directory = None
     with correlation(job, judge):
         for candidate in fallback_roles(config, role):
-            provider = candidate['model'].split('/', 1)[0]
+            provider = role_provider(candidate)
             if provider in seen or not provider_ready(candidate):
                 continue
             seen.add(provider)
@@ -305,17 +327,58 @@ def dispatch(config, role, job, wt, directory, judge=False):
             if remaining < 0.001:
                 return {'stop': 'budget', 'summary': 'repair dispatch wall-clock deadline reached'}
             if attempted and not judge:
-                retain(wt, baseline, previous_directory)
+                try:
+                    retain(wt, baseline, previous_directory)
+                except UnsupportedUntracked:
+                    # A throttled fixer can leave an unignored nested repository
+                    # in the tree: retain() refuses to archive an untracked
+                    # entry that is not a regular file or symlink, and the
+                    # doubled -f below is what removes nested repositories.
+                    # Moving each such repository into the provider's evidence
+                    # directory preserves its contents unarchived, so the
+                    # capture retry succeeds and the cleanup can run; any other
+                    # unsupported entry still fails closed without a reset.
+                    nested = untracked_directories(wt)
+                    if not nested:
+                        raise
+                    # A rate-limit deferral re-runs this rung against the same
+                    # evidence directory, so every capture gets its own fresh
+                    # subdirectory: shutil.move treats an existing destination
+                    # directory as a container, which would nest or collide.
+                    holder = previous_directory / 'retained-nested'
+                    holder.mkdir(parents=True, exist_ok=True)
+                    capture = Path(tempfile.mkdtemp(prefix='capture-', dir=holder))
+                    for name in nested:
+                        target = capture / name
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.move(os.fspath(Path(wt) / name), os.fspath(target))
+                    retain(wt, baseline, previous_directory)
+                # Each fallback fixer gets a fresh checkout at the baseline:
+                # -x also removes ignored files, and the doubled -f removes
+                # nested git repositories, so nothing a throttled fixer left
+                # behind can reach the next provider's context. retain() above
+                # archived only the tracked and non-ignored state; ignored
+                # output (build output, caches) is deliberately discarded here
+                # and is not recoverable, but a nested repository retain()
+                # cannot archive was moved into the provider's evidence
+                # directory above, so its contents stay recoverable.
                 git(wt, 'reset', '--hard', baseline)
-                git(wt, 'clean', '-fd')
+                git(wt, 'clean', '-ffdx')
                 # Retention and reset consume the shared budget; remeasure so
                 # the next provider never starts past the deadline.
                 remaining = deadline - time.monotonic()
                 if remaining < 0.001:
                     return {'stop': 'budget', 'summary': 'repair dispatch wall-clock deadline reached'}
-            attempted = True
+            # A prior provider's run (and this cleanup) consumed wall clock:
+            # recheck immediately before the paid launch so a fallback whose
+            # window would now reach the blackout defers without spending.
+            # The stop is the typed clock condition, not rate-limit: no
+            # provider refused, so no drain-wide rate-limit pause is written.
             bounded_config = copy.deepcopy(config)
             bounded_config['repair']['budget']['wall_clock_min'] = remaining / 60
+            if attempted and blocked(bounded_config['repair']):
+                return {'stop': 'blackout', 'summary': 'GLM peak blackout; fallback launch deferred'}
+            attempted = True
             previous_directory = directory / provider
             report = _dispatch(bounded_config, candidate, job, wt, previous_directory, judge)
             report.update(driver=candidate['driver'], model=candidate['model'])
@@ -326,6 +389,27 @@ def dispatch(config, role, job, wt, directory, judge=False):
         return {'stop': 'configuration', 'summary': 'no configured repair provider is available'}
     end = dt.datetime.fromisoformat(min(waits).replace('Z', '+00:00'))
     return {'stop': 'rate-limit', 'retry_after_ms': max(1000, (end - dt.datetime.now(dt.timezone.utc)).total_seconds() * 1000)}
+
+
+def review_diff_sections(diff):
+    """Split a review diff into (path, text) per 'diff --git' section.
+
+    Text before the first header keeps the generic review-diff.txt path. A
+    header without a ' b/' separator (for example a git-quoted non-ASCII path)
+    is scanned under the whole header line, which still contains the real
+    path. An empty diff is one empty section so the scan still runs once."""
+    sections, path, lines = [], 'review-diff.txt', []
+    for line in str(diff).splitlines():
+        if line.startswith('diff --git '):
+            if lines:
+                sections.append((path, '\n'.join(lines)))
+            _, _, tail = line.rpartition(' b/')
+            path = tail.strip() or 'review-diff.txt'
+            lines = []
+        lines.append(line)
+    if lines or not sections:
+        sections.append((path, '\n'.join(lines)))
+    return sections
 
 
 def _dispatch(config, role, job, wt, directory, judge=False):
@@ -341,6 +425,14 @@ def _dispatch(config, role, job, wt, directory, judge=False):
     if not triage_context_safe(c, {'current_path': snapshot.get('path') or 'source-snapshot.txt', 'source': snapshot.get('source', '')},
                                directory / 'source-snapshot-scan.json'):
         raise ValueError('source snapshot secret scan rejected; refusing dispatch')
+    # The review diff rides in the job and is serialized into the judge prompt;
+    # it gets the identical scan before any driver or provider call.
+    # Each file section is scanned under its own path so path-gated rules
+    # (key-material-env) apply exactly as they do for the source snapshot.
+    for index, (section_path, section) in enumerate(review_diff_sections(job.get('review_diff', ''))):
+        if not triage_context_safe(c, {'current_path': section_path, 'source': section},
+                                   directory / ('review-diff-scan-' + str(index) + '.json')):
+            raise ValueError('review diff secret scan rejected; refusing dispatch')
     job['source_snapshot'] = snapshot
     atomic(directory / 'source-snapshot.json', snapshot)
     # The admission checks sample the clock before worktree retention and the
@@ -697,6 +789,23 @@ def pending(job_id):
     return bool(prior.get('retry_after'))
 
 
+def unreadable_result(job_id):
+    """True when a result.json exists but cannot be classified as pending.
+
+    The malformed artifact stays untouched for tick reconciliation (harvest
+    fails the prepared run and retains it), so the drain only excludes the job
+    from dispatch: a missing result is still pending and a valid terminal
+    result is still not."""
+    path = ROOT / 'state/repair' / job_id / 'result.json'
+    if not path.exists():
+        return False
+    try:
+        json.loads(path.read_text()).get('retry_after')
+    except (OSError, ValueError, AttributeError):
+        return True
+    return False
+
+
 def mark_stale(job, reason):
     """Terminal, spend-free verdict for a superseded job; the tick harvests it."""
     directory = ROOT / 'state/repair' / job['job']
@@ -788,14 +897,16 @@ def triage_phase(config, dry_run=False):
     if role.get('driver') != 'cq':
         raise ValueError('triage requires cq structured judge bridge')
     def judge(row, context, remaining):
+        # phase() measured `remaining` before this call; the context scan below
+        # can outlive it, so pin the deadline at entry and recompute the
+        # provider budget immediately before dispatch.
+        deadline = time.monotonic() + remaining
         job = {'job': 'crq-triage-' + row['finding']['id'], 'run': row['review_id'],
                'triage_context': context}
         directory = state / 'repair/triage' / row['finding']['id']
         directory.mkdir(parents=True, exist_ok=True)
         if not triage_context_scan(c, context, directory / 'context-scan.json'):
             return {'stop': 'ok', 'verdict': 'unsure', 'context_scan_refused': True, 'reason': 'triage context secret scan rejected'}
-        bounded_config = copy.deepcopy(config)
-        bounded_config['repair']['budget']['wall_clock_min'] = remaining / 60
         selected = options.get('escalation_role', config['repair']['roles']['judge_critical']) if row.get('_escalate') else role
         if runner_disabled():
             # A handover can start while the phase runs; phase() keeps deferred
@@ -816,6 +927,11 @@ def triage_phase(config, dry_run=False):
             # pause defers this judgment instead of reaching the provider.
             return {'stop': 'deferred', 'errorClass': 'rate-limit',
                     'reason': 'provider dispatch paused until ' + until + '; triage judge deferred'}
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return {'stop': 'deadline', 'reason': 'phase deadline elapsed before triage provider dispatch'}
+        bounded_config = copy.deepcopy(config)
+        bounded_config['repair']['budget']['wall_clock_min'] = remaining / 60
         return dispatch(bounded_config, selected, job, config['clone'],
                         state / 'repair/triage' / row['finding']['id'], judge=True)
     def transport(key, request):
@@ -830,7 +946,9 @@ def triage_phase(config, dry_run=False):
     result = phase(inbox, repo, tip, judge, transport, utc(),
                    maximum=max(0, min(6, int(options.get('max_per_pass', 6)))),
                    seconds=config['repair']['budget']['wall_clock_min'] * 60, dry_run=dry_run)
-    write_result(result)
+    # The report returns to the caller instead of stdout: the drain folds it
+    # into its one JSON result and the triage dry-run returns it directly, so
+    # stdout stays exactly one JSON artifact.
     if result.get('stopped') == 'rate-limit' and not dry_run:
         rate_limit_pause(result.get('stop_report', {}), 'backfill-triage')
     return result
@@ -838,7 +956,8 @@ def triage_phase(config, dry_run=False):
 
 def drain(config):
     """Automatic inbox drain, minor-only items after critical/major items. Items use isolated worker
-    processes up to the configured cap, with serial findings within each item."""
+    processes up to the configured cap, with serial findings within each item. Returns the pass's
+    JSON result (None only on a narrated early exit), with the triage report inside when triage ran."""
     # Admission before any fetch, triage or write: a handed-over host must cost
     # nothing and leave the queue and inbox exactly as they are.
     if runner_disabled():
@@ -861,12 +980,18 @@ def drain(config):
     if runner_disabled():
         narrate(RUNNER_DISABLED + ': pass stopped before triage')
         return
+    triage = None
     try:
-        triage_phase(config)
+        triage = triage_phase(config)
     except Exception as exc:  # backfill deferral must not starve existing repair jobs
         narrate('backfill triage deferred: ' + str(exc)[:300])
+    # The triage report rides inside the drain's result, so a caller parsing
+    # stdout reads exactly one JSON value even on a pass triage ran.
+    result = {'status': 'drained'}
+    if triage is not None:
+        result['triage'] = triage
     if dispatch_paused(config):
-        return
+        return result
     groups = {}  # item -> job ids, items in order of their oldest job
     for job_id in drain_order(ROOT):
         try:
@@ -879,15 +1004,86 @@ def drain(config):
     # Classify against the queue before sorting. Skipped, stale and completed
     # jobs cannot promote a minor-only item; stable sort retains inbox order.
     queue_path = ROOT / 'state/queue.json'
-    queue = json.loads(queue_path.read_text()) if queue_path.exists() else {'items': []}
+    try:
+        queue = json.loads(queue_path.read_text()) if queue_path.exists() else {'items': []}
+    except (OSError, ValueError) as exc:
+        # An unreadable queue must still yield one JSON artifact: keep the
+        # completed triage report and let run() exit non-zero. Nothing was
+        # admitted yet, so no spend or child is left behind.
+        narrate('repair drain failed: queue unreadable: ' + str(exc)[:300])
+        result['status'] = 'error'
+        result['error'] = 'queue unreadable: ' + str(exc)[:300]
+        return result
+    groups = hold_backfill_groups(groups, lambda item: dispatchable(config, queue, item, groups[item]))
     def priority(item):
         for job_id in groups[item]:
             status, job, _ = drain_job(ROOT, config, queue, job_id)
             if (status == 'run' and job and job.get('item') == item
-                    and pending(job_id) and job.get('finding', {}).get('severity') in ('critical', 'major')):
+                    and not unreadable_result(job_id) and pending(job_id)
+                    and job.get('finding', {}).get('severity') in ('critical', 'major')):
                 return 0
         return 1
     drain_items(config, groups, sorted(groups, key=priority))
+    return result
+
+
+BACKLOG_MAX_AGE_SECONDS = 3600
+
+
+def dispatchable(config, queue, item, job_ids):
+    """True when drain_item would run a repair for this group: a job of the
+    item is runnable, pending and has a readable result. Only such a group can
+    spend repair and end in a fix PR. Any other group costs drain_item nothing
+    but its existing stale marking and skip narration."""
+    for job_id in job_ids:
+        status, job, _ = drain_job(ROOT, config, queue, job_id)
+        if (status == 'run' and job and job.get('item') == item
+                and not unreadable_result(job_id) and pending(job_id)):
+            return True
+    return False
+
+
+def hold_backfill_groups(groups, dispatchable=lambda item: True):
+    """Soft budget: admit at most limit - open dispatchable backfill groups.
+
+    The drain never calls GitHub, so it reads the file the tick wrote. A
+    missing, unreadable, stale or future-dated file, or open >= limit, holds
+    every backfill group. Otherwise the first limit - open dispatchable groups
+    in drain order run; a group that cannot dispatch (its jobs are published,
+    completed or not queued) takes no slot and passes to drain_item as before.
+    Held jobs stay in the inbox: nothing is failed, marked stale or counted
+    as a retry.
+    """
+    held = [item for item in groups if item.startswith('backfill-finding-')]
+    if not held:
+        return groups
+    open_count = limit = None
+    try:
+        data = json.loads((ROOT / 'state/repair/fix-pr-backlog.json').read_text())
+        at = dt.datetime.fromisoformat(str(data['at']).replace('Z', '+00:00'))
+        age = (dt.datetime.now(dt.timezone.utc) - at).total_seconds()
+        if (0 <= age <= BACKLOG_MAX_AGE_SECONDS and not isinstance(data['open'], bool)
+                and not isinstance(data['limit'], bool)
+                and isinstance(data['open'], int) and isinstance(data['limit'], int)):
+            open_count, limit = data['open'], data['limit']
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    budget = 0 if open_count is None else max(0, limit - open_count)
+    if budget == 0:
+        drop = set(held)
+    else:
+        drop = set()
+        for item in held:
+            if not dispatchable(item):
+                continue
+            if budget > 0:
+                budget -= 1
+            else:
+                drop.add(item)
+    if drop:
+        shown = 'unknown' if open_count is None else str(open_count)
+        narrate('backfill repair held: %s open fix PRs, limit %s' % (shown, 'unknown' if limit is None else limit))
+    return {item: ids for item, ids in groups.items() if item not in drop}
 
 
 def drain_item(config, item, job_ids):
@@ -906,6 +1102,7 @@ def drain_item(config, item, job_ids):
     queue_path = ROOT / 'state/queue.json'
     queue = json.loads(queue_path.read_text()) if queue_path.exists() else {'items': []}
     jobs = []
+    held_runs = set()
     for job_id in job_ids:
         status, job, reason = drain_job(ROOT, config, queue, job_id)
         if not job or job.get('item') != item:
@@ -916,9 +1113,23 @@ def drain_item(config, item, job_ids):
             # It stays in its run's chain; process() returns the terminal result.
             jobs.append(job)
         elif status == 'run':
-            jobs.append(job)
+            if unreadable_result(job_id):
+                # A malformed result.json is tick-owned evidence: harvest fails
+                # the run and retains it, so the job is excluded from dispatch
+                # here and in the priority sort instead of crashing the drain.
+                narrate('repair ' + job_id + ': skipped: unreadable result.json preserved for tick reconciliation')
+                # Later jobs of the same run chain from this job's possible
+                # FIXED commit; without its result they would start from a
+                # base that omits it, so the whole run waits for the tick.
+                held_runs.add(job['run'])
+            else:
+                jobs.append(job)
         elif reason != 'no queued tick-owned repair run':
             narrate('repair ' + job_id + ': skipped: ' + reason)
+    if held_runs:
+        for run in sorted(held_runs):
+            narrate('repair run ' + str(run) + ': held: a job has an unreadable result.json')
+        jobs = [job for job in jobs if job['run'] not in held_runs]
     if not any(pending(job['job']) for job in jobs):
         return None
     try:
@@ -1297,8 +1508,7 @@ class UsageArgumentParser(argparse.ArgumentParser):
 
 
 def run(argv=None):
-    """Returns (exit code, result). A None result means the path already wrote its own JSON
-    (the triage dry-run does so only when triage ran; otherwise it reports no-triage)."""
+    """Returns (exit code, result); main writes result as the one JSON artifact on stdout."""
     parser = UsageArgumentParser(description='Drain eligible repair inbox jobs, or repair one explicit prepared job')
     parser.add_argument('--triage-dry-run', action='store_true')
     parser.add_argument('--job')
@@ -1309,7 +1519,7 @@ def run(argv=None):
         args = parser.parse_args(argv)
     except UsageError as exc:
         narrate('repair dispatch refused: ' + str(exc))
-        return 2, {'status': 'usage-error', 'reason': str(exc)}
+        return 2, {'error': {'kind': 'usage', 'subcommand': None, 'message': str(exc), 'exitCode': 2}}
     # CLI admission before the lock, the state directory and every alternate
     # path (--recover-job, --job): a handed-over host must not write or spend.
     if runner_disabled():
@@ -1328,16 +1538,26 @@ def run(argv=None):
     # Mode validation before any alternate path runs: recovery selects exactly
     # one job and never combines with --job/--source-sha/--finding-sha256 or
     # --triage-dry-run.
-    if args.recover_job and (any(supplied) or args.triage_dry_run):
+    # Presence, not truthiness: `--recover-job ''` was still supplied.
+    if args.recover_job is not None and (any(supplied) or args.triage_dry_run):
         narrate('repair dispatch refused: recovery selects exactly one job')
         return 2, {'status': 'refused', 'reason': 'recovery selects exactly one job'}
+    if args.recover_job is not None and not args.recover_job.strip():
+        # An empty recovery selector must refuse, never fall through to the drain.
+        narrate('repair dispatch refused: --recover-job must not be empty')
+        return 2, {'status': 'refused', 'reason': '--recover-job must not be empty'}
+    if args.triage_dry_run and any(supplied):
+        # The dry run selects no job; a selector beside it would be ignored.
+        narrate('repair dispatch refused: --triage-dry-run takes no job selector')
+        return 2, {'status': 'refused', 'reason': '--triage-dry-run takes no job selector'}
     if args.triage_dry_run:
-        # triage_phase writes its own JSON result only when triage is configured
-        # and has a rollout; otherwise it returns None having written nothing,
-        # so report that explicitly to keep one JSON artifact per exit.
-        if triage_phase(config, dry_run=True) is None:
+        # triage_phase returns its report only when triage is configured and
+        # has a rollout; otherwise it returns None having written nothing, so
+        # report that explicitly to keep one JSON artifact per exit.
+        result = triage_phase(config, dry_run=True)
+        if result is None:
             return 0, {'status': 'no-triage', 'reason': 'triage is not configured for this state directory'}
-        return 0, None
+        return 0, result
     if any(supplied) and not all(supplied):
         narrate('repair dispatch refused: --job, --source-sha and --finding-sha256 go together')
         return 2, {'status': 'refused', 'reason': '--job, --source-sha and --finding-sha256 go together'}
@@ -1394,15 +1614,25 @@ def run(argv=None):
             job = select_job(ROOT, config, args.job, args.source_sha, args.finding_sha256)
             outcome = process_item(config, [job])
             return 0, explicit_job_result(job, outcome)
-        drain(config)
-        return 0, {'status': 'drained'}
+        result = drain(config)
+        if result is None:
+            result = {'status': 'drained'}
+        return (1 if result.get('status') == 'error' else 0), result
 
 
 
 
 def main(argv=None):
     """Every CLI path ends in exactly one JSON artifact on stdout."""
-    code, result = run(argv)
+    try:
+        code, result = run(argv)
+    except Exception as exc:
+        # An operational failure (a wrong finding digest, corrupt state) still owes
+        # the caller its one JSON artifact: exit 1, never a bare traceback.
+        narrate('repair dispatch failed: ' + str(exc)[:300])
+        narrate(traceback.format_exc())
+        write_result({'error': {'kind': 'failed', 'subcommand': None, 'message': str(exc)[:200], 'exitCode': 1}})
+        return 1
     if result is not None:
         write_result(result)
     return code

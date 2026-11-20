@@ -2,13 +2,15 @@
 
 Test tooling only. Usage: python3 -I queueTransportOracle.py <apps/crq-python dir>
 Reads {"policy", "principal", "queue", "forge": {"<pr>": metadata}, "frames": [step],
-"busy": bool, "reconcile": {"after", "before", "prs", "merge"} | null} on stdin. A step is
+"busy": bool, "runner_repo": str, "reconcile": {"after", "before", "prs", "merge"} | null} on stdin. A step is
 a frame string ("$RID" is replaced by the last attached receipt id) or
 {"attach_receipt": doc}, which publishes doc (its source taken from the first queue
 item) and marks that item done. It writes {"responses": [{"ok": true, "b64": ...} |
-{"ok": false, "error": ...}], "queue": <final queue>, "receipts": {id: b64},
+{"ok": false, "error": ...}], "queue": <final queue>, "queue_text": <the bytes crq's atomic writer would store>, "receipts": {id: b64},
 "wrapper": <reconcile wrapper text> | null, "wrapperKey": ...}. The runner and forge
 are in-memory and the clock is fixed; no network, git or child process is used.
+`runner_repo` (default: the policy repository) is the repository the runner serves; a
+mismatch takes the same activation gate as capability_dispatcher.queue_main.
 `busy` makes every lock and read slot unavailable (the typed `busy` answer).
 """
 import base64
@@ -48,6 +50,26 @@ def build_wrapper(spec, state_dir):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
     return key, text, interval
+
+
+def gated(raw, runner, case, verify, receipts):
+    """capability_dispatcher.queue_main's gates, then the transport."""
+    policy = case["policy"]
+    principal = case["principal"]
+    compatible = case.get("runner_repo", policy.get("repo")) == policy.get("repo")
+    op = queue_transport.decode(raw)["op"]
+    if op == "retry-capability":
+        if policy.get("enabled") is True and not compatible:
+            policy = {**policy, "enabled": False}
+        return queue_transport.handle(raw, None, principal=principal, policy=policy,
+                                      verify_source=None, receipt_root=None)
+    queue_transport.authorize(queue_transport.decode(raw), principal, policy)
+    if policy.get("enabled") is not True or not compatible:
+        return queue_transport.handle(raw, None, principal=principal,
+                                      policy={**policy, "enabled": False},
+                                      verify_source=None, receipt_root=None)
+    return queue_transport.handle(raw, runner, principal=principal, policy=policy,
+                                  verify_source=verify, receipt_root=receipts)
 
 
 def main():
@@ -105,13 +127,13 @@ def main():
                 continue
             frame = step.replace("$RID", last["rid"] or "")
             try:
-                out = queue_transport.handle(
-                    frame.encode(), runner, principal=case["principal"],
-                    policy=case["policy"], verify_source=verify, receipt_root=receipts)
+                out = gated(frame.encode(), runner, case, verify, receipts)
                 responses.append({"ok": True, "b64": base64.b64encode(out).decode()})
             except Exception as exc:  # the capability maps every raise to one refusal
                 responses.append({"ok": False, "error": type(exc).__name__})
-    print(json.dumps({"responses": responses, "queue": state["queue"], "receipts": published,
+    queue_text = json.dumps(state["queue"], indent=2) + "\n"
+    print(json.dumps({"responses": responses, "queue": state["queue"], "queue_text": queue_text,
+                      "receipts": published,
                       "wrapper": wrapper_out["text"], "wrapperKey": wrapper_out["key"]}))
 
 

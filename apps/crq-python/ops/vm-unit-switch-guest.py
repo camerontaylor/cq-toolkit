@@ -347,6 +347,46 @@ def remove_drain_runs():
         shutil.rmtree(STATE / "runs" / run_id, ignore_errors=True)
 
 
+def run_cleanup_steps(actions):
+    """Run every cleanup action even when an earlier one raises.
+
+    Each action runs independently; the first error is re-raised only after
+    all actions have run, so a process cleanup failure stays visible but
+    cannot skip queue restoration or run-metadata cleanup.
+    """
+    results = []
+    first = None
+    for action in actions:
+        try:
+            results.append(action())
+        except Exception as exc:
+            if first is None:
+                first = exc
+    if first is not None:
+        raise first
+    return results
+
+
+def finish_cleanup(cleanup, process_actions, restore_actions):
+    """Stop processes, then always restore the queue and run metadata.
+
+    Process-stop results go into ``cleanup``; a stop failure is re-raised only
+    after the restore actions have run, and it wins over a restore failure.
+    """
+    first = None
+    try:
+        cleanup.extend(run_cleanup_steps(process_actions))
+    except Exception as exc:
+        first = exc
+    try:
+        run_cleanup_steps(restore_actions)
+    except Exception as exc:
+        if first is None:
+            first = exc
+    if first is not None:
+        raise first
+
+
 def drain_observation():
     """The actual controller drain_check bound to the actual runner liveness."""
     dc = load_controller()
@@ -552,18 +592,55 @@ def check_preserved_expected(expected_state, label):
             "record_count": len(records())}
 
 
+COMPLETIONS_READ_ATTEMPTS = 5
+COMPLETIONS_RETRY_SECONDS = 0.2
+
+
 def completions():
+    """Parse the completion log; retry while an unterminated final line may still be appending.
+
+    A line that fails to parse is only retried when it is the final line and the file lacks a
+    trailing newline (a write in flight). Anything else, or a persistent partial line, raises:
+    a partial line is never accepted as complete evidence.
+    """
     if not COMPLETIONS.exists():
         return []
-    entries = []
-    for number, line in enumerate(COMPLETIONS.read_text().splitlines(), 1):
-        if not line.strip():
-            continue
-        try:
-            entries.append(json.loads(line))
-        except ValueError as exc:
-            raise RuntimeError("completion log line %d is not JSON" % number) from exc
-    return entries
+    for attempt in range(COMPLETIONS_READ_ATTEMPTS):
+        text = COMPLETIONS.read_text()
+        lines = text.splitlines()
+        entries = []
+        partial_tail = False
+        for number, line in enumerate(lines, 1):
+            if not line.strip():
+                continue
+            try:
+                entries.append(json.loads(line))
+            except ValueError as exc:
+                if number == len(lines) and not text.endswith("\n"):
+                    partial_tail = True
+                    break
+                raise RuntimeError(
+                    "completion log line %d is not JSON" % number) from exc
+        if entries and text.strip() and not text.endswith("\n"):
+            # Valid JSON without its newline is still an unfinished append.
+            partial_tail = True
+        if not partial_tail:
+            return entries
+        if attempt + 1 < COMPLETIONS_READ_ATTEMPTS:
+            time.sleep(COMPLETIONS_RETRY_SECONDS)
+    raise RuntimeError("completion log line %d is not JSON" % len(lines))
+
+
+def wait_unit_exited(timeout=30):
+    """Wait until no fixture invocation is running, so the completion log is final."""
+    deadline = time.monotonic() + timeout
+    while True:
+        state = show(UNIT, ["ActiveState"]).get("ActiveState", "")
+        if state not in ("active", "activating", "deactivating", "reloading"):
+            return
+        require(time.monotonic() < deadline,
+                "fixture unit still running after %ds" % timeout)
+        time.sleep(0.2)
 
 
 def metadata_state():
@@ -683,7 +760,7 @@ def prepare_history():
         "prior_runtime": PYTHON_RUNTIME,
         "outcome": "completed",
         "at": "2026-01-01T00:00:00Z",
-        "snapshot": {"proof": "historical"},
+        "snapshot": {"proof": "historical", "runtime": PYTHON_RUNTIME},
         "state": {
             "prior_head": "0" * 40,
             "prior_config_sha256": None,
@@ -774,7 +851,19 @@ def completion_baseline(entries):
             "invocations": set(item.get("invocation") for item in entries)}
 
 
-def validate_completed(record, runtime, prior, baseline):
+def completion_logged(item, log_entries):
+    """Journal completion evidence must match a real fixture log entry."""
+    return any(isinstance(entry, dict)
+               and type(entry.get("sequence")) is int
+               and entry.get("sequence") == item.get("sequence")
+               and entry.get("invocation") == item.get("invocation")
+               and entry.get("unit") == UNIT
+               and entry.get("runtime") == item.get("runtime")
+               and entry.get("success") is True
+               for entry in log_entries)
+
+
+def validate_completed(record, runtime, prior, baseline, log_entries):
     require(record["outcome"] == "completed", "switch did not complete")
     require(record["phase"] == "activation_pending",
             "completed record has the wrong phase")
@@ -799,6 +888,8 @@ def validate_completed(record, runtime, prior, baseline):
     require(all(item.get("unit") == UNIT and item.get("runtime") == runtime
                 and item.get("success") is True for item in evidence),
             "completion evidence is not unit/runtime bound")
+    require(all(completion_logged(item, log_entries) for item in evidence),
+            "completion evidence is absent from the fixture completion log")
     return {"sequences": sequences, "invocations": invocations}
 
 
@@ -819,10 +910,12 @@ def switch_phase(runtime):
     require(len(created) == 1, "switch did not create exactly one journal record")
     record_path = created[0]
     record = json.loads(record_path.read_text())
-    evidence = validate_completed(record, runtime, prior, completions_baseline)
     systemctl("stop", TIMER)
     systemctl("reset-failed", TIMER)
     time.sleep(0.5)
+    wait_unit_exited()
+    evidence = validate_completed(record, runtime, prior, completions_baseline,
+                                  completions())
     after = snapshot()
     check_preserved("switch")
     installed = load_adapter().GuestFixtureAdapter(
@@ -942,10 +1035,13 @@ def drain_refuse_phase(args):
                                         "after": unrelated_after}},
         }
     finally:
-        cleanup.append(stop_process(seeded["process"]))
-        cleanup.append(stop_process(unrelated))
-        restore_queue(saved_queue)
-        remove_drain_runs()
+        finish_cleanup(cleanup, [
+            lambda: stop_process(seeded["process"]),
+            lambda: stop_process(unrelated),
+        ], [
+            lambda: restore_queue(saved_queue),
+            remove_drain_runs,
+        ])
     require(state_hashes() == saved["state"],
             "drain refusal cleanup did not restore the baseline queue")
     result["cleanup"] = cleanup
@@ -990,14 +1086,16 @@ def drain_harvest_phase(args):
         require(len(node_records) == 1,
                 "harvest switch did not create exactly one record")
         node_record = json.loads(node_records[0].read_text())
-        node_completions = validate_completed(
-            node_record, NODE_RUNTIME, PYTHON_RUNTIME, node_baseline)
         # Match switch_phase's post-switch baseline: the proof adapter starts
         # the fixture timer on release, and the timer must not keep triggering
         # a oneshot service into the next phase's snapshot.
         systemctl("stop", TIMER)
         systemctl("reset-failed", TIMER)
         time.sleep(0.5)
+        wait_unit_exited()
+        node_completions = validate_completed(
+            node_record, NODE_RUNTIME, PYTHON_RUNTIME, node_baseline,
+            completions())
         require(sha256_file(STATE / "queue.json") == seeded_sha,
                 "harvest switch changed the seeded queue bytes")
         require(process_state(unrelated.pid)["alive"],
@@ -1015,11 +1113,13 @@ def drain_harvest_phase(args):
         require(len(python_records) == 1,
                 "harvest return switch did not create exactly one record")
         python_record = json.loads(python_records[0].read_text())
-        python_completions = validate_completed(
-            python_record, PYTHON_RUNTIME, NODE_RUNTIME, python_baseline)
         systemctl("stop", TIMER)
         systemctl("reset-failed", TIMER)
         time.sleep(0.5)
+        wait_unit_exited()
+        python_completions = validate_completed(
+            python_record, PYTHON_RUNTIME, NODE_RUNTIME, python_baseline,
+            completions())
         require(sha256_file(STATE / "queue.json") == seeded_sha,
                 "harvest return switch changed the seeded queue bytes")
         require(process_state(unrelated.pid)["alive"],
@@ -1058,9 +1158,12 @@ def drain_harvest_phase(args):
             "preserved": preserved,
         }
     finally:
-        cleanup.append(stop_process(unrelated))
-        restore_queue(saved_queue)
-        remove_drain_runs()
+        finish_cleanup(cleanup, [
+            lambda: stop_process(unrelated),
+        ], [
+            lambda: restore_queue(saved_queue),
+            remove_drain_runs,
+        ])
     require(state_hashes() == saved["state"],
             "harvest proof cleanup did not restore the baseline queue")
     result["cleanup"] = cleanup
@@ -1156,10 +1259,13 @@ def recover_drain_refuse_phase(args):
                                         "after": unrelated_after}},
         }
     finally:
-        cleanup.append(stop_process(seeded["process"]))
-        cleanup.append(stop_process(unrelated))
-        restore_queue(saved_queue)
-        remove_drain_runs()
+        finish_cleanup(cleanup, [
+            lambda: stop_process(seeded["process"]),
+            lambda: stop_process(unrelated),
+        ], [
+            lambda: restore_queue(saved_queue),
+            remove_drain_runs,
+        ])
     require(state_hashes() == saved["state"],
             "recovery drain proof cleanup did not restore the baseline queue")
     result["cleanup"] = cleanup
