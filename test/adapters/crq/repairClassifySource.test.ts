@@ -14,12 +14,18 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node
 import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   fileRepairClassifyJob,
+  osErrorText,
   type RunGitSync,
 } from '../../../src/adapters/crq/repairClassifySource.js';
-import { JsonObject, parseJsonValue, type JsonValue } from '../../../src/policy/crq/jsonValue.js';
+import {
+  JsonNumber,
+  JsonObject,
+  parseJsonValue,
+  type JsonValue,
+} from '../../../src/policy/crq/jsonValue.js';
 import { pythonJsonText } from '../../../src/policy/crq/pythonJson.js';
 
 const fixture = obj(
@@ -243,5 +249,181 @@ describe('fileRepairClassifyJob filesystem facts', () => {
         str(entry.get('job_id')),
       ),
     ).rejects.toThrow('git rev-parse failed');
+  });
+});
+
+function caseNamed(name: string): JsonObject {
+  const entry = drainCases.find((candidate) => candidate.get('name') === name);
+  if (entry === undefined) throw new Error(`missing fixture case ${name}`);
+  return entry;
+}
+
+const spawnFailure = (code: string): Error =>
+  Object.assign(new Error(`spawnSync git ${code}`), { code });
+
+describe('fileRepairClassifyJob git execution failures', () => {
+  // Python's `command()` raises when git cannot run or times out, so the drain
+  // errors and the job stays queued; only a completed non-zero exit is the
+  // ordinary "absent" observation that may become a terminal stale result.
+  const failing = [
+    'prepared-run', // rev-parse origin/main, then <sha>:<path> (checkedBlob)
+    'legacy-default-source-changed', // pin blob, then origin/main blob
+    'legacy-open-pr-head-on-default', // pin blob, then merge-base --is-ancestor
+    'legacy-open-pr-branch-other-same-blob', // branch head, then head blob
+  ];
+  for (const name of failing) {
+    const entry = caseNamed(name);
+    const reads = arr(entry.get('git_reads')).map((read) => str(read));
+    for (const [index, read] of reads.entries()) {
+      for (const code of ['ENOENT', 'EAGAIN', 'ETIMEDOUT']) {
+        it(`rejects ${name} when git read ${String(index)} (${read.slice(0, 24)}) fails with ${code}`, async () => {
+          materialize(entry);
+          const { run } = fixtureGit(entry);
+          let seen = 0;
+          const guarded: RunGitSync = (args) => {
+            const at = seen;
+            seen += 1;
+            if (at === index) return { status: null, stdout: '', error: spawnFailure(code) };
+            return run(args);
+          };
+          await expect(
+            fileRepairClassifyJob({ stateRoot: state, clone: '/clone', runGitSync: guarded })(
+              obj(entry.get('queue')),
+              str(entry.get('job_id')),
+            ),
+          ).rejects.toThrow(/could not run/u);
+        });
+      }
+    }
+  }
+
+  it('rejects a branch-gone probe that failed to run, where a clean miss is stale', async () => {
+    const entry = caseNamed('legacy-open-pr-branch-gone');
+    materialize(entry);
+    const clean = fixtureGit(entry);
+    const ok = await fileRepairClassifyJob({
+      stateRoot: state,
+      clone: '/clone',
+      runGitSync: clean.run,
+    })(obj(entry.get('queue')), str(entry.get('job_id')));
+    expect(ok).toMatchObject({
+      status: 'stale',
+      reason: 'PR branch is gone from origin (closed or deleted)',
+    });
+    const { run } = fixtureGit(entry);
+    const broken: RunGitSync = (args) =>
+      args.includes('refs/remotes/origin/feat/x^{commit}')
+        ? { status: null, stdout: '', error: spawnFailure('ENOENT') }
+        : run(args);
+    await expect(
+      fileRepairClassifyJob({ stateRoot: state, clone: '/clone', runGitSync: broken })(
+        obj(entry.get('queue')),
+        str(entry.get('job_id')),
+      ),
+    ).rejects.toThrow(/could not run/u);
+  });
+
+  it('keeps a completed non-zero exit as the ordinary stale observation', async () => {
+    const entry = caseNamed('legacy-run-binds-pin');
+    materialize(entry);
+    const result = await fileRepairClassifyJob({
+      stateRoot: state,
+      clone: '/clone',
+      runGitSync: () => ({ status: 1, stdout: '' }),
+    })(obj(entry.get('queue')), str(entry.get('job_id')));
+    expect(result).toMatchObject({
+      status: 'stale',
+      reason: 'finding path is absent at the job pin',
+    });
+  });
+
+  it('rejects, not stale, when the real git binary cannot be spawned', async () => {
+    const entry = caseNamed('legacy-run-binds-pin');
+    materialize(entry);
+    vi.stubEnv('PATH', join(root, 'no-such-bin'));
+    try {
+      await expect(
+        fileRepairClassifyJob({ stateRoot: state, clone: root })(
+          obj(entry.get('queue')),
+          str(entry.get('job_id')),
+        ),
+      ).rejects.toThrow(/could not run/u);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});
+
+describe('fileRepairClassifyJob JSON read semantics', () => {
+  const legacy = () => caseNamed('legacy-run-binds-pin');
+  const classifyFixture = (entry: JsonObject) => {
+    const { run } = fixtureGit(entry);
+    return fileRepairClassifyJob({ stateRoot: state, clone: '/clone', runGitSync: run })(
+      obj(entry.get('queue')),
+      str(entry.get('job_id')),
+    );
+  };
+
+  it('keeps NaN, Infinity and -Infinity in a job as Python json.loads does', async () => {
+    const entry = legacy();
+    const target = join(state, 'repair', 'inbox', `${str(entry.get('job_id'))}.json`);
+    writeFileSync(
+      target,
+      text(obj(entry.get('job'))).replace(
+        '{\n',
+        '{\n  "nan": NaN,\n  "up": Infinity,\n  "down": -Infinity,\n',
+      ),
+    );
+    const result = await classifyFixture(entry);
+    // Python: ('run', job, '') with the constants kept as floats.
+    expect(result.status).toBe('run');
+    expect(result.reason).toBe('');
+    const job = obj(result.job as JsonValue);
+    const nan = job.get('nan');
+    expect(nan instanceof JsonNumber && Number.isNaN(nan.float)).toBe(true);
+    expect((job.get('up') as JsonNumber).float).toBe(Number.POSITIVE_INFINITY);
+    expect((job.get('down') as JsonNumber).float).toBe(Number.NEGATIVE_INFINITY);
+  });
+
+  it('keeps non-finite constants in a canonical triage row', async () => {
+    const entry = caseNamed('severity-minor-canonical-delivered');
+    materialize(entry);
+    const fid = str(obj(entry.get('job')).get('canonical_finding_id'));
+    writeFileSync(
+      join(state, 'backfill', 'findings', 'triage', `${fid}.json`),
+      `{"status": "delivered", "receipt": {"repair_task": ${JSON.stringify(
+        str(entry.get('job_id')),
+      )}, "n": NaN, "m": -Infinity}}`,
+    );
+    const result = await classifyFixture(entry);
+    // Python: json.loads accepts the row, so delivery is confirmed: ('run', job, '').
+    expect(result).toMatchObject({ status: 'run', reason: '' });
+  });
+
+  it('refuses a leading BOM on the job file and the triage row, as read_text + json.loads do', async () => {
+    // Counterfactual: the same job without a BOM runs.
+    materialize(legacy());
+    expect((await classifyFixture(legacy())).status).toBe('run');
+    const bomJob = caseNamed('job-bom');
+    materialize(bomJob);
+    expect(await classifyFixture(bomJob)).toEqual({
+      status: 'skip',
+      job: null,
+      reason:
+        'unreadable job: Unexpected UTF-8 BOM (decode using utf-8-sig): line 1 column 1 (char 0)',
+    });
+  });
+});
+
+describe('osErrorText', () => {
+  it.each([
+    ['ENFILE', 23, 'Too many open files in system'],
+    ['EFAULT', 14, 'Bad address'],
+    ['EOVERFLOW', 75, 'Value too large for defined data type'],
+    ['ENOMEM', 12, 'Cannot allocate memory'],
+  ])('renders %s as CPython does', (code, errno, message) => {
+    expect(osErrorText(Object.assign(new Error('x'), { code }), '/a/b')).toBe(
+      `[Errno ${String(errno)}] ${message}: '/a/b'`,
+    );
   });
 });

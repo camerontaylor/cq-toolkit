@@ -11,7 +11,13 @@
  * and never matched as prose; no JSON schema, state enum, status or action is
  * changed here.
  */
-import { JsonNumber, JsonObject, parseJsonValue, type JsonValue } from './jsonValue.js';
+import {
+  JsonNumber,
+  JsonObject,
+  parseJsonValue,
+  pythonNonFinite,
+  type JsonValue,
+} from './jsonValue.js';
 import { ledgerLoads } from './ledger.js';
 import {
   checkCanonicalFindingId,
@@ -325,7 +331,7 @@ export function canonicalDeliveryRefusal(input: {
   if (input.rowText === undefined) return 'canonical-delivery-unavailable';
   let row: JsonValue;
   try {
-    row = parseJsonValue(input.rowText);
+    row = parseJsonValue(input.rowText, { parseConstant: pythonNonFinite });
   } catch {
     return 'canonical-delivery-unavailable';
   }

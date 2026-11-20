@@ -663,6 +663,13 @@ def build() -> dict:
         ),
         _drain_case("job-identity-mismatch", job=_legacy_job(job="crq-other-F1")),
         _drain_case("job-unreadable-json", raw="{broken"),
+        # read_text() keeps a leading BOM and json.loads refuses the document.
+        _drain_case("job-bom", raw="\ufeff" + json.dumps(_legacy_job())),
+        _drain_case(
+            "canonical-row-bom",
+            job=_legacy_job(canonical_finding_id=CANONICAL),
+            row_text="\ufeff" + json.dumps({"status": "delivered", "receipt": {"repair_task": OLD}}),
+        ),
         _drain_case("job-json-array", raw="[1, 2]"),
         _drain_case("job-unreadable-missing", job_id="crq-missing-F1"),
         _drain_case("finding-missing", job=_legacy_job(**{"finding": None})),

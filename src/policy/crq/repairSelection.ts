@@ -34,6 +34,7 @@
 import { JsonNumber, JsonObject, pythonNumbersEqual, type JsonValue } from './jsonValue.js';
 import {
   checkSha,
+  hasUnsafePathCharacter,
   findingDigest,
   pythonLength,
   pythonStrip,
@@ -397,8 +398,6 @@ function canonicalRefusal(
   throw new Error(`unexpected canonical refusal ${value}`);
 }
 
-const UNSAFE_PATH_CHARACTERS = ['\u0000', '\n', '\r', '\t', '"', '\\'] as const;
-
 /**
  * Python's `source_path` message for a path `sourcePath` refused: the
  * unsafe-character branch says `required`; an absolute, `.`-only or `..` path
@@ -406,10 +405,7 @@ const UNSAFE_PATH_CHARACTERS = ['\u0000', '\n', '\r', '\t', '"', '\\'] as const;
  */
 function pathRefusalReason(finding: JsonObject): string {
   const path = finding.get('path');
-  const required =
-    typeof path !== 'string' ||
-    path.length === 0 ||
-    UNSAFE_PATH_CHARACTERS.some((character) => path.includes(character));
+  const required = typeof path !== 'string' || path.length === 0 || hasUnsafePathCharacter(path);
   return required ? 'finding path required' : 'finding path must be repository-relative';
 }
 

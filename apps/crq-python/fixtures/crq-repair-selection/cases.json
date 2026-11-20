@@ -4163,6 +4163,152 @@
       "expected": {
         "job": null,
         "job_keys": null,
+        "reason": "unreadable job: Unexpected UTF-8 BOM (decode using utf-8-sig): line 1 column 1 (char 0)",
+        "refusal": "job-unreadable",
+        "status": "skip"
+      },
+      "git": {
+        "ancestors": [],
+        "blobs": {},
+        "branches": {},
+        "tip": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "git_reads": [],
+      "job": null,
+      "job_id": "crq-run1-F1",
+      "job_raw": "\ufeff{\"job\": \"crq-run1-F1\", \"item\": \"pr1-merged\", \"kind\": \"merged\", \"pr\": 1, \"run\": \"run1\", \"cycle\": 1, \"repair_base\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"branch\": null, \"finding\": {\"path\": \"src/kept.ts\", \"line\": 2, \"severity\": \"major\", \"body\": \"Finding data\"}, \"repair_round\": 1, \"prior\": null, \"recurrence\": false}",
+      "kind": "drain",
+      "name": "job-bom",
+      "queue": {
+        "items": [
+          {
+            "id": "pr1-merged",
+            "kind": "merged",
+            "pr": 1,
+            "repair_runs": {
+              "run1": {
+                "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "branch": null,
+                "jobs": [
+                  "crq-run1-F1"
+                ],
+                "open_pr": false,
+                "pin": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "round": 1,
+                "state": "queued"
+              }
+            },
+            "state": "repairing"
+          }
+        ]
+      },
+      "started": false,
+      "triage_row": null,
+      "triage_row_raw": null
+    },
+    {
+      "expected": {
+        "job": {
+          "branch": null,
+          "canonical_finding_id": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "cycle": 1,
+          "finding": {
+            "body": "Finding data",
+            "line": 2,
+            "path": "src/kept.ts",
+            "severity": "major"
+          },
+          "item": "pr1-merged",
+          "job": "crq-run1-F1",
+          "kind": "merged",
+          "pr": 1,
+          "prior": null,
+          "recurrence": false,
+          "repair_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "repair_round": 1,
+          "run": "run1"
+        },
+        "job_keys": [
+          "branch",
+          "canonical_finding_id",
+          "cycle",
+          "finding",
+          "item",
+          "job",
+          "kind",
+          "pr",
+          "prior",
+          "recurrence",
+          "repair_base",
+          "repair_round",
+          "run"
+        ],
+        "reason": "canonical delivery state unavailable",
+        "refusal": "canonical-delivery-unavailable",
+        "status": "skip"
+      },
+      "git": {
+        "ancestors": [],
+        "blobs": {},
+        "branches": {},
+        "tip": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "git_reads": [],
+      "job": {
+        "branch": null,
+        "canonical_finding_id": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "cycle": 1,
+        "finding": {
+          "body": "Finding data",
+          "line": 2,
+          "path": "src/kept.ts",
+          "severity": "major"
+        },
+        "item": "pr1-merged",
+        "job": "crq-run1-F1",
+        "kind": "merged",
+        "pr": 1,
+        "prior": null,
+        "recurrence": false,
+        "repair_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "repair_round": 1,
+        "run": "run1"
+      },
+      "job_id": "crq-run1-F1",
+      "job_raw": null,
+      "kind": "drain",
+      "name": "canonical-row-bom",
+      "queue": {
+        "items": [
+          {
+            "id": "pr1-merged",
+            "kind": "merged",
+            "pr": 1,
+            "repair_runs": {
+              "run1": {
+                "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "branch": null,
+                "jobs": [
+                  "crq-run1-F1"
+                ],
+                "open_pr": false,
+                "pin": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "round": 1,
+                "state": "queued"
+              }
+            },
+            "state": "repairing"
+          }
+        ]
+      },
+      "started": false,
+      "triage_row": null,
+      "triage_row_raw": "\ufeff{\"status\": \"delivered\", \"receipt\": {\"repair_task\": \"crq-run1-F1\"}}"
+    },
+    {
+      "expected": {
+        "job": null,
+        "job_keys": null,
         "reason": "job identity mismatch",
         "refusal": "job-identity-mismatch",
         "status": "skip"

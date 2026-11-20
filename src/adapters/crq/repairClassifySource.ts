@@ -22,7 +22,12 @@ import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { DrainJobClass } from '../../ops/crq/internal/repairDrain.js';
 import { GIT_HARDEN } from '../../shared/gitHarden.js';
-import { JsonObject, parseJsonValue, type JsonValue } from '../../policy/crq/jsonValue.js';
+import {
+  JsonObject,
+  parseJsonValue,
+  pythonNonFinite,
+  type JsonValue,
+} from '../../policy/crq/jsonValue.js';
 import {
   drainJob,
   type RepairJobFile,
@@ -31,10 +36,16 @@ import {
 import { gitEnv } from './publishSource.js';
 import { checkRepairJobId } from './repairPreparation.js';
 
-/** One synchronous git call: the exit status and the decoded stdout. */
+/**
+ * One synchronous git call: the exit status and the decoded stdout. `error` is
+ * set when the process could not be run to completion (spawn failure such as
+ * `ENOENT`/`EAGAIN`, or the timeout): Python's `command()` raises there, so the
+ * binding rejects instead of reading it as an ordinary missing ref or blob.
+ */
 export type RunGitSync = (args: readonly string[]) => {
   readonly status: number | null;
   readonly stdout: string;
+  readonly error?: unknown;
 };
 
 export interface RepairClassifySourceOptions {
@@ -48,7 +59,10 @@ export interface RepairClassifySourceOptions {
 const GIT_TIMEOUT_MS = 1_200_000; // `command(..., timeout=1200)`.
 const MAX_BUFFER = 64 * 1024 * 1024;
 const CANONICAL_ID = /^[0-9a-f]{64}$/u;
-const utf8 = new TextDecoder('utf-8', { fatal: true });
+// `ignoreBOM` keeps a leading U+FEFF: Python's `read_text()` keeps it and
+// `json.loads` then refuses the document.
+const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+const BOM_DETAIL = 'Unexpected UTF-8 BOM (decode using utf-8-sig): line 1 column 1 (char 0)';
 
 const ERRNO_TEXT: Readonly<Record<string, string>> = {
   ENOENT: 'No such file or directory',
@@ -59,7 +73,11 @@ const ERRNO_TEXT: Readonly<Record<string, string>> = {
   ENAMETOOLONG: 'File name too long',
   EIO: 'Input/output error',
   EMFILE: 'Too many open files',
+  ENFILE: 'Too many open files in system',
   EPERM: 'Operation not permitted',
+  EFAULT: 'Bad address',
+  EOVERFLOW: 'Value too large for defined data type',
+  ENOMEM: 'Cannot allocate memory',
 };
 
 /** CPython `repr(str)` for a path: single quotes unless only the text holds one. */
@@ -77,7 +95,7 @@ function pythonStrRepr(value: string): string {
 }
 
 /** `str(OSError)`: `[Errno N] <strerror>: '<path>'`. */
-function osErrorText(error: unknown, path: string): string {
+export function osErrorText(error: unknown, path: string): string {
   const code = (error as NodeJS.ErrnoException | null)?.code;
   const known = code === undefined ? undefined : ERRNO_TEXT[code];
   const number =
@@ -123,8 +141,10 @@ function readJobFile(stateRoot: string, jobId: string): RepairJobFile {
   } catch {
     return { kind: 'unreadable', detail: "'utf-8' codec can't decode the job file" };
   }
+  // CPython's `JSONDecodeError` text for a document that starts with a BOM.
+  if (text.startsWith('\uFEFF')) return { kind: 'unreadable', detail: BOM_DETAIL };
   try {
-    return { kind: 'value', value: parseJsonValue(text) };
+    return { kind: 'value', value: parseJsonValue(text, { parseConstant: pythonNonFinite }) };
   } catch (error) {
     return { kind: 'unreadable', detail: error instanceof Error ? error.message : String(error) };
   }
@@ -164,15 +184,26 @@ function spawnGitSync(clone: string): RunGitSync {
       timeout: GIT_TIMEOUT_MS,
       killSignal: 'SIGKILL',
     });
-    return { status: call.error === undefined ? call.status : null, stdout: call.stdout ?? '' };
+    return { status: call.status, stdout: call.stdout ?? '', error: call.error };
   };
 }
 
 /** The policy's git seam over one synchronous runner (`bounded.py`'s five reads). */
 function selectionGit(run: RunGitSync): RepairSelectionGit {
+  // A git that could not run (spawn failure, timeout) is Python's raised
+  // `command()` error: the drain errors and the job stays queued. Only a
+  // completed non-zero exit is the ordinary "absent" observation, so a
+  // transient failure can never reach `markStale`.
+  const call = (args: readonly string[]): ReturnType<RunGitSync> => {
+    const result = run(args);
+    if (result.error !== undefined && result.error !== null) {
+      throw new Error(`git ${args[0] ?? ''} could not run`, { cause: result.error });
+    }
+    return result;
+  };
   const out = (args: readonly string[]): string | undefined => {
-    const call = run(args);
-    return call.status === 0 ? call.stdout.trim() : undefined;
+    const result = call(args);
+    return result.status === 0 ? result.stdout.trim() : undefined;
   };
   return {
     currentTip() {
@@ -183,7 +214,7 @@ function selectionGit(run: RunGitSync): RepairSelectionGit {
     checkedBlob: (ref, path) => out(['rev-parse', `${ref}:${path}`]),
     blobAt: (ref, path) => out(['rev-parse', '--verify', '--quiet', `${ref}:${path}`]),
     isAncestor: (ancestor, descendant) =>
-      run(['merge-base', '--is-ancestor', ancestor, descendant]).status === 0,
+      call(['merge-base', '--is-ancestor', ancestor, descendant]).status === 0,
     originBranchHead: (branch) =>
       out(['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branch}^{commit}`]),
   };
