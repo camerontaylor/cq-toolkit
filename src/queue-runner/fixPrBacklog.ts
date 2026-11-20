@@ -9,7 +9,7 @@
  * previous `state/repair/fix-pr-backlog.json` stays on disk for the drain.
  */
 import { JsonObject, parseJsonValue, type JsonValue } from '../policy/crq/jsonValue.js';
-import { parseUtcUnchecked } from '../policy/crq/utc.js';
+import { parseUtcUnchecked, utcHasOffset } from '../policy/crq/utc.js';
 
 export const BACKFILL_ITEM = 'backfill-finding-';
 export const BACKFILL_BRANCH = 'crq/fix-backfill-';
@@ -103,9 +103,6 @@ export function pySplitLines(text: string): string[] {
   return lines;
 }
 
-/** Time-part offset (`+HH`, `-HH:MM`, ...) after the `T`/`t`/space separator. */
-const TIME_OFFSET = /[Tt ][^+-]*[+-]\d{2}/;
-
 /**
  * `review_start_limit`: `review_started` events in the trailing 72 h, times
  * four hours of capacity, floored. A timestamp without an offset is naive in
@@ -132,7 +129,7 @@ export async function reviewStartLimit(
     if (typeof at !== 'string') continue;
     const instant = parseUtcUnchecked(at);
     if (instant === null) continue;
-    if (!TIME_OFFSET.test(at.replaceAll('Z', '+00:00'))) continue;
+    if (!utcHasOffset(at)) continue;
     if (row.get('event') === 'review_started' && cutoff <= instant && instant <= nowMicros) {
       started += 1;
     }
