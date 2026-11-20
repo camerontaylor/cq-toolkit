@@ -1572,13 +1572,20 @@ def deploy_plan(effects: Effects, helper_module, target: str, tag: str,
             raise Refused("queue-owned reviews alive/ambiguous; drain through the "
                           "documented author-recovery path first: "
                           + json.dumps(drain["blocked"])[:400])
+        # Preflight's preserved digests can predate a final tick that published
+        # the queue and heartbeat before this fence, so the preservation
+        # baseline is captured only now: units are stopped and drained, which
+        # is what proves nothing further writes (the rollback path captures
+        # its state after the same fence). The post-helper comparison below
+        # still catches any write during the switch itself.
+        state = {**pre["state"], **preserved_digests(effects)}
         overlay, raw = helper_module.load_overlay(overlay_path)
         helper_precheck(helper_module, effects.root, overlay, target, tag)
-        with mutation_record(effects, "deploy", pre["state"], target, tag, prior_tag,
+        with mutation_record(effects, "deploy", state, target, tag, prior_tag,
                              helper_sha256) as tx:
             helper_module.switch(effects.root, overlay, raw, target, tag)
             tx["phase"] = "preservation"
-            post = preservation_check(effects, pre["state"])
+            post = preservation_check(effects, state)
             plan["steps"].append({"step": "preservation", **post})
             tx["phase"] = "compatibility"
             record = compatibility_record(effects, pre["state"]["prior_head"])
