@@ -69,7 +69,7 @@ export function tickBackfillInventory(
         enqueue,
         prepareOptions,
       ));
-  const writer = backfillStateEventWriter(stateRoot);
+  const writer = backfillStateEventWriter(stateRoot, { requireRollout: true });
   // Reuses the operator transaction's artifact, halt and queue writers verbatim.
   const files = createBackfillTransactionEffects({
     stateRoot,
@@ -103,12 +103,7 @@ export function tickBackfillInventory(
           'inventory enqueue',
         );
       }
-      // The event writer spools nothing when the rollout file is gone, so
-      // re-read it before publishing: aborting here (the operator route's
-      // stale-settings refusal under the merge lock) keeps retired and
-      // enqueued jobs from being saved without their spooled events; a
-      // present-but-disabled rollout still spooled, so the save stays
-      // consistent and the writer's behavior is preserved.
+      // Also check before publishing in case inventory had no events to spool.
       if ((await readBackfillRollout(stateRoot)) === null)
         throw new LedgerIntegrityError(
           'operator rollout removed during inventory; queue not saved',

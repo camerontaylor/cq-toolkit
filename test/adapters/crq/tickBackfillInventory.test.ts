@@ -146,10 +146,9 @@ describe('tick inventory binding', () => {
         return prepared;
       },
     });
-    // The writer spools nothing without the rollout, so the run must refuse
-    // rather than save retired or enqueued jobs without their events.
+    // Refuse at the event write even if a later rollout read could succeed.
     await expect(tick.inventory(live)).rejects.toThrow(
-      'operator rollout removed during inventory; queue not saved',
+      'operator rollout removed during inventory event write',
     );
     await expect(readFile(join(root, 'queue.json'), 'utf8')).rejects.toThrow();
     await expect(readFile(join(root, 'backfill/latest-ranked.json'), 'utf8')).rejects.toThrow();

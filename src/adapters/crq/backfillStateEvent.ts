@@ -70,7 +70,10 @@ export type BackfillStateEvent = (
   reason: string,
 ) => Promise<JsonObject>;
 
-export function backfillStateEventWriter(stateRoot: string): BackfillStateEvent {
+export function backfillStateEventWriter(
+  stateRoot: string,
+  { requireRollout = false } = {},
+): BackfillStateEvent {
   const outbox = new Outbox(outboxFiles(join(stateRoot, 'backfill', 'publication')), {
     async verify() {
       throw new LedgerIntegrityError('unexpected state event artifact');
@@ -78,6 +81,8 @@ export function backfillStateEventWriter(stateRoot: string): BackfillStateEvent 
   });
   return async (queue, item, at, reason) => {
     const config = await readBackfillRollout(stateRoot);
+    if (config === null && requireRollout)
+      throw new LedgerIntegrityError('operator rollout removed during inventory event write');
     if (config === null || item.get('kind') !== 'backfill') return queue;
     const job = ledgerSubscript(item, 'job_id');
     if (typeof job !== 'string') throw new LedgerIntegrityError('invalid job id');
