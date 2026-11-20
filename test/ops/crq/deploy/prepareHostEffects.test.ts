@@ -104,10 +104,10 @@ function host(over: { run?: RunProcess } = {}): Host {
   const calls: string[][] = [];
   const run: RunProcess =
     over.run ??
-    (async (argv) => {
+    (async (argv, options) => {
       calls.push([...argv]);
       if (argv[0] === 'systemctl' || argv[0] === 'systemd-analyze') return ok('');
-      return runProcess(argv);
+      return runProcess(argv, options);
     });
   const env: HostEnv = { ...realHostEnv(), run, home: () => '/home/h' };
   return { base, root, records, overlayPath, env, calls };
@@ -200,6 +200,34 @@ describe('requireOutsideGit', () => {
     const dir = pyResolve(fresh());
     await requireOutsideGit(join(dir, 'x/y'), { run });
     expect(seen).toEqual([['git', '-C', dir, 'rev-parse', '--show-toplevel']]);
+  });
+});
+
+describe('requireOutsideGit probe environment', () => {
+  test('runs git with a fixed locale, cross-filesystem discovery and no routing overrides', async () => {
+    const routing = [
+      'GIT_CEILING_DIRECTORIES',
+      'GIT_COMMON_DIR',
+      'GIT_DIR',
+      'GIT_OBJECT_DIRECTORY',
+      'GIT_WORK_TREE',
+    ];
+    const saved = { ...process.env };
+    for (const key of routing) process.env[key] = '/nonexistent';
+    process.env.LC_ALL = 'fr_FR.UTF-8';
+    let seen: NodeJS.ProcessEnv | undefined;
+    const run: RunProcess = async (_argv, options) => {
+      seen = options?.env;
+      return ok('', 128, 'fatal: not a git repository (or any of the parent directories): .git');
+    };
+    try {
+      await requireOutsideGit(pyResolve(fresh()), { run });
+    } finally {
+      process.env = saved;
+    }
+    expect(seen?.LC_ALL).toBe('C');
+    expect(seen?.GIT_DISCOVERY_ACROSS_FILESYSTEM).toBe('1');
+    for (const key of routing) expect(seen).not.toHaveProperty(key);
   });
 });
 
