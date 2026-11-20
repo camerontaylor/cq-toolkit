@@ -30,6 +30,7 @@ import { liveRender, renderPlists, type PlistEffects } from './plistRender.js';
 import { pyText, renderUnits } from './renderService.js';
 import { posixStr } from './unitRender.js';
 import { flockLockFs, type FlockLockFs } from './flockAdapter.js';
+import { currentEntryEnv } from '../../../config/run-env.js';
 
 const CONFIG_PATH = 'apps/crq-python/config.json';
 const SYSTEMD_DIR = 'apps/crq-python/ops/systemd';
@@ -76,12 +77,18 @@ export interface ProcessResult {
   readonly stderr: Uint8Array;
 }
 /** Run `argv`, resolve with the exit status; reject only when it cannot start. */
-export type RunProcess = (argv: readonly string[]) => Promise<ProcessResult>;
+export type RunProcess = (
+  argv: readonly string[],
+  options?: { readonly env?: NodeJS.ProcessEnv },
+) => Promise<ProcessResult>;
 
-export const runProcess: RunProcess = (argv) =>
+export const runProcess: RunProcess = (argv, options) =>
   new Promise<ProcessResult>((resolve, reject) => {
     const [file, ...args] = argv;
-    const child = spawn(file as string, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(file as string, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      ...(options?.env === undefined ? {} : { env: options.env }),
+    });
     const out: Buffer[] = [];
     const err: Buffer[] = [];
     child.stdout.on('data', (c: Buffer) => out.push(c));
@@ -171,14 +178,49 @@ export async function requireOutsideGit(path: string, env: OverlayEnv): Promise<
     if (up === parent) break;
     parent = up;
   }
-  const result = await env.run(['git', '-C', parent, 'rev-parse', '--show-toplevel']);
+  const result = await env.run(['git', '-C', parent, 'rev-parse', '--show-toplevel'], {
+    env: outsideProbeEnv(currentEntryEnv()),
+  });
   if (result.code === 0)
     throw new ValueError('private host artifacts must be outside every Git checkout');
   // Only git's "not a git repository" answer proves the path is outside a checkout: a
   // malformed config or any other probe failure says nothing about exclusion.
-  if (result.code !== 128 || !/not a git repository/i.test(text(result.stderr)))
+  if (result.code !== 128 || !isOutsideDiagnostic(text(result.stderr)))
     throw new ValueError(
       `cannot establish that the path is outside every Git checkout: git exited ${result.code}`,
+    );
+}
+
+const DISCOVERY_ROUTING = [
+  'GIT_CEILING_DIRECTORIES',
+  'GIT_COMMON_DIR',
+  'GIT_DIR',
+  'GIT_OBJECT_DIRECTORY',
+  'GIT_WORK_TREE',
+];
+/**
+ * Fixed locale so the diagnostic is matched untranslated, no inherited discovery override
+ * that could hide a checkout, and discovery across filesystems (a /dev/shm or tmpfs path
+ * otherwise reports a mount-point diagnostic). Mirrors prepare-host.py `require_outside_git`.
+ */
+export function outsideProbeEnv(
+  base: Readonly<Record<string, string | undefined>>,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...base };
+  for (const key of DISCOVERY_ROUTING) delete env[key];
+  env.LC_ALL = 'C';
+  env.GIT_DISCOVERY_ACROSS_FILESYSTEM = '1';
+  return env;
+}
+
+// Whole-line match: a dubious-ownership refusal can quote a path containing the phrase.
+function isOutsideDiagnostic(stderr: string): boolean {
+  return stderr
+    .split(/\r?\n/)
+    .some(
+      (line) =>
+        line.trim().toLowerCase() ===
+        'fatal: not a git repository (or any of the parent directories): .git',
     );
 }
 

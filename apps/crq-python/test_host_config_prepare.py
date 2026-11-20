@@ -17,6 +17,48 @@ from test_host_config_fixtures import HostConfigFixture, ROOT, host
 
 
 class HostConfigTests(HostConfigFixture, unittest.TestCase):
+    def test_outside_git_probe_uses_fixed_locale_and_clean_discovery_env(self):
+        seen = {}
+
+        def fake(argv, **kwargs):
+            seen.update(kwargs['env'])
+            return mock.Mock(returncode=128, stderr='fatal: not a git repository (or any of the parent directories): .git')
+
+        routing = ('GIT_CEILING_DIRECTORIES', 'GIT_COMMON_DIR', 'GIT_DIR',
+                   'GIT_OBJECT_DIRECTORY', 'GIT_WORK_TREE')
+        overrides = {'GIT_CEILING_DIRECTORIES': '/', 'GIT_COMMON_DIR': '/nonexistent',
+                     'GIT_DIR': '/nonexistent', 'GIT_OBJECT_DIRECTORY': '/nonexistent',
+                     'GIT_WORK_TREE': '/nonexistent', 'LC_ALL': 'fr_FR.UTF-8'}
+        with mock.patch.dict('os.environ', overrides), \
+                mock.patch.object(host.subprocess, 'run', side_effect=fake):
+            host.require_outside_git(self.root.parent)
+        self.assertEqual(seen['LC_ALL'], 'C')
+        self.assertEqual(seen['GIT_DISCOVERY_ACROSS_FILESYSTEM'], '1')
+        for key in routing:
+            self.assertNotIn(key, seen)
+        # Against real git, no routing variable aimed at a nonexistent path
+        # inside the fixture checkout may flip the probe's verdict: a path
+        # inside the checkout stays rejected and a genuinely outside one
+        # stays accepted.
+        hidden = str(self.root / 'nonexistent')
+        for key in routing:
+            with self.subTest(reject=key), mock.patch.dict('os.environ', {key: hidden}):
+                with self.assertRaisesRegex(ValueError, 'outside every Git checkout'):
+                    host.require_outside_git(self.root)
+            with self.subTest(accept=key), mock.patch.dict('os.environ', {key: hidden}):
+                host.require_outside_git(self.root.parent)
+
+    def test_outside_git_probe_requires_the_full_outside_diagnostic_line(self):
+        def probe(stderr):
+            return mock.patch.object(host.subprocess, 'run', return_value=mock.Mock(
+                returncode=128, stderr=stderr))
+        quoted = ("fatal: detected dubious ownership in repository at "
+                  "'/srv/not a git repository/x'\n")
+        with probe(quoted), self.assertRaisesRegex(ValueError, 'cannot establish'):
+            host.require_outside_git(self.root.parent)
+        with probe('fatal: not a git repository (or any of the parent directories): .git\n'):
+            host.require_outside_git(self.root.parent)
+
     def test_notification_allowlist_overlay_renders_and_validates(self):
         hosts = ['triton:6767', 'uranus:6767', 'pluto:6767']
         self.overlay['config']['notify'] = {'hosts': hosts}

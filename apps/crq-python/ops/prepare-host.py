@@ -200,10 +200,28 @@ def require_outside_git(path):
     parent = Path(path).resolve()
     while not parent.is_dir():
         parent = parent.parent
+    # Fixed locale so the diagnostic below is matched untranslated, and no
+    # inherited repository-discovery override that could hide a checkout.
+    env = {key: value for key, value in os.environ.items()
+           if key not in ('GIT_CEILING_DIRECTORIES', 'GIT_COMMON_DIR', 'GIT_DIR',
+                          'GIT_OBJECT_DIRECTORY', 'GIT_WORK_TREE')}
+    env['LC_ALL'] = 'C'
+    env['GIT_DISCOVERY_ACROSS_FILESYSTEM'] = '1'
     result = subprocess.run(['git', '-C', str(parent), 'rev-parse', '--show-toplevel'],
-                            capture_output=True, text=True)
+                            capture_output=True, text=True, env=env)
     if result.returncode == 0:
         raise ValueError('private host artifacts must be outside every Git checkout')
+    # Only git's "not a git repository" answer proves the path is outside a
+    # checkout: a shared-checkout ownership refusal or any other probe failure
+    # says nothing about exclusion, and a record written inside a checkout on
+    # that evidence would be a private artifact in Git.
+    # Match the whole diagnostic line: a dubious-ownership refusal can quote a path
+    # that itself contains the phrase.
+    outside_line = 'fatal: not a git repository (or any of the parent directories): .git'
+    if result.returncode != 128 or not any(
+            line.strip().lower() == outside_line for line in result.stderr.splitlines()):
+        raise ValueError('cannot establish that the path is outside every Git checkout: '
+                         + 'git exited ' + str(result.returncode))
 
 
 def load_overlay(path):
