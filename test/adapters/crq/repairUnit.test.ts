@@ -109,6 +109,7 @@ describe('fileRepairUnit', () => {
       'RepairDrainEffects.inboxItem',
       'RepairDrainEffects.readQueue',
       'RepairDrainEffects.readBacklog',
+      'RepairDrainEffects.nowMs',
       'RepairDrainEffects.classifyJob',
       'RepairDrainEffects.unreadableResult',
       'RepairDrainEffects.pending',

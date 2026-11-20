@@ -121,6 +121,10 @@ export const REPAIR_UNIT_MISSING_EFFECTS: readonly { name: string; python: strin
     name: 'RepairDrainEffects.readBacklog',
     python: 'crq_repair.hold_backfill_groups (state/repair/fix-pr-backlog.json)',
   },
+  {
+    name: 'RepairDrainEffects.nowMs',
+    python: 'crq_repair.hold_backfill_groups (dt.datetime.now(dt.timezone.utc) backlog age clock)',
+  },
   { name: 'RepairDrainEffects.classifyJob', python: 'bounded.drain_job (prose reason)' },
   { name: 'RepairDrainEffects.unreadableResult', python: 'crq_repair.unreadable_result' },
   { name: 'RepairDrainEffects.pending', python: 'crq_repair.pending' },
@@ -129,7 +133,10 @@ export const REPAIR_UNIT_MISSING_EFFECTS: readonly { name: string; python: strin
     name: 'RepairDrainEffects.processItem',
     python: 'crq_repair.process_item (serial findings; recover_job)',
   },
-  { name: 'RepairDrainEffects.withAdmissionLock', python: 'crq.cooldown_write (state/tick.lock)' },
+  {
+    name: 'RepairDrainEffects.withAdmissionLock',
+    python: 'crq_repair.cooldown_write (state/tick.lock)',
+  },
   {
     name: 'RepairDrainEffects.startWorker',
     python: 'crq_repair.drain_items (fork + private pipe; runs runRepairWorker)',

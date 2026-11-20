@@ -152,15 +152,28 @@ describe('holdBackfillGroups', () => {
     dispatchable: (item: string) => Promise<boolean> = all,
   ) => {
     const said: string[] = [];
-    const kept = await holdBackfillGroups(groups(), backlog, now, dispatchable, (m) =>
-      said.push(m),
+    const kept = await holdBackfillGroups(
+      groups(),
+      async () => backlog,
+      () => now,
+      dispatchable,
+      (m) => said.push(m),
     );
     return { kept: [...kept.keys()], said };
   };
 
   test('passes a pass with no backfill group through without reading the backlog', async () => {
     const plain = new Map([['pr-1', ['j1']]]);
-    expect(await holdBackfillGroups(plain, undefined, now, all, () => undefined)).toBe(plain);
+    const touched: string[] = [];
+    const kept = await holdBackfillGroups(
+      plain,
+      async () => (touched.push('backlog'), undefined),
+      () => (touched.push('clock'), now),
+      all,
+      () => undefined,
+    );
+    expect(kept).toBe(plain);
+    expect(touched).toEqual([]);
   });
   test('a missing or unreadable file holds every backfill group', async () => {
     expect(await hold(undefined)).toEqual({
@@ -459,19 +472,65 @@ describe('runRepairDrain queue and ordering', () => {
     await runRepairDrain(r.effects);
     expect(r.processed.map((p) => p.item)).toEqual(['major-1', 'crit-1', 'minor-1', 'minor-2']);
   });
-  test('a stale, completed or unreadable major job cannot promote a minor-only item', async () => {
+  test('a stale, completed, unreadable or skipped major job cannot promote its item', async () => {
+    // Each item pairs a non-promoting major with a pending minor sibling in
+    // another run, so a wrongly promoted item would be processed first.
     const r = rig({
       jobs: {
         a: { item: 'item-a', severity: 'minor' },
         b: { item: 'item-b', severity: 'major', status: 'stale', reason: 'moved' },
+        bm: { item: 'item-b', severity: 'minor', run: 'run-2' },
         c: { item: 'item-c', severity: 'major', pending: false },
+        cm: { item: 'item-c', severity: 'minor', run: 'run-2' },
         d: { item: 'item-d', severity: 'major', unreadable: true },
+        dm: { item: 'item-d', severity: 'minor', run: 'run-2' },
         e: { item: 'item-e', severity: 'major', status: 'skip' },
+        em: { item: 'item-e', severity: 'minor', run: 'run-2' },
       },
     });
     await runRepairDrain(r.effects);
-    expect(r.processed.map((p) => p.item)).toEqual(['item-a', 'item-b']);
+    expect(r.processed.map((p) => p.item)).toEqual([
+      'item-a',
+      'item-b',
+      'item-c',
+      'item-d',
+      'item-e',
+    ]);
     expect(r.stale).toEqual(['b:moved']);
+  });
+  test('a pending major job does promote its item over earlier minor-only items', async () => {
+    const r = rig({
+      jobs: {
+        a: { item: 'item-a', severity: 'minor' },
+        k: { item: 'item-k', severity: 'major' },
+      },
+    });
+    await runRepairDrain(r.effects);
+    expect(r.processed.map((p) => p.item)).toEqual(['item-k', 'item-a']);
+  });
+  test('a pass with no backfill group never reads the backlog file', async () => {
+    const r = rig({ jobs: { p1: { item: 'pr-1' } } });
+    let reads = 0;
+    const effects: RepairDrainEffects = {
+      ...r.effects,
+      readBacklog: async () => (reads++, undefined),
+    };
+    await runRepairDrain(effects);
+    expect(r.processed.map((p) => p.item)).toEqual(['pr-1']);
+    expect(reads).toBe(0);
+  });
+  test('narrate keeps its receiver on the backlog-hold path', async () => {
+    const said: string[] = [];
+    const r = rig({ jobs: { b1: { item: 'backfill-finding-1' } }, backlog: fresh(5, 5) });
+    const effects: RepairDrainEffects = {
+      ...r.effects,
+      narrate(this: { log: string[] }, message: string) {
+        this.log.push(message);
+      },
+    } as RepairDrainEffects;
+    Object.assign(effects, { log: said });
+    await runRepairDrain(effects);
+    expect(said).toEqual(['backfill repair held: 5 open fix PRs, limit 5']);
   });
   test('a held backfill group is neither processed nor marked stale', async () => {
     const r = rig({
@@ -742,6 +801,30 @@ describe('drainItems concurrency', () => {
     m.workers[0]!.finish({ kind: 'exit', code: 3 });
     await done;
     expect(r.said).toEqual(['repair item a: runner disabled; stopping new admission']);
+  });
+  test('a refusal published during the final under-lock marker read stops that admission', async () => {
+    const m = manualWorkers();
+    const r = rig({ startWorker: (item) => m.start(item) });
+    let samples = 0;
+    // Samples: item a (before-item, under lock), item b (before-item, under lock).
+    // The fourth is the final gate read for b; worker a refuses while it is in flight.
+    const effects: RepairDrainEffects = {
+      ...r.effects,
+      runnerDisabled: async () => {
+        samples += 1;
+        if (samples === 4) m.workers[0]!.channel.publish('refused');
+        return false;
+      },
+    };
+    const done = drainItems(effects, groupsOf('a', 'b'), ['a', 'b'], 2);
+    await flush();
+    m.workers[0]!.channel.publish('admitted');
+    await flush();
+    expect(samples).toBe(4);
+    expect(m.started()).toEqual(['a']);
+    m.workers[0]!.finish({ kind: 'exit', code: 3 });
+    await done;
+    expect(m.started()).toEqual(['a']);
   });
   test('a worker refused at its own gate latches the stop', async () => {
     const m = manualWorkers();

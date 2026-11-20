@@ -175,14 +175,16 @@ function backlogView(
  */
 export async function holdBackfillGroups(
   groups: Groups,
-  backlog: JsonValue | undefined,
-  nowMs: number,
+  readBacklog: () => Promise<JsonValue | undefined>,
+  nowMs: () => number,
   dispatchable: (item: string) => Promise<boolean>,
   narrate: (message: string) => void,
 ): Promise<Groups> {
   const held = [...groups.keys()].filter((item) => item.startsWith(BACKFILL_ITEM_PREFIX));
   if (held.length === 0) return groups;
-  const view = backlogView(backlog, nowMs);
+  // Python reads the file only once a backfill group exists, then samples the clock.
+  const backlog = await readBacklog();
+  const view = backlogView(backlog, nowMs());
   let budget = view === null || view.limit <= view.open ? 0n : view.limit - view.open;
   const drop = new Set<string>();
   if (budget === 0n) {
@@ -443,6 +445,11 @@ export async function drainItems(
         stopped = refusalPublished() || stopped;
         if (stopped) return null;
         if (!(await admit({ stage: 'before-item', item }, effects))) return null;
+        // `admit` awaits the marker read, and an admitted worker can publish its
+        // refusal while it is in flight. Python's samples are synchronous inside
+        // `cooldown_write`; re-sample with no await before the synchronous start.
+        stopped = refusalPublished() || stopped;
+        if (stopped) return null;
         return effects.startWorker(item, ids);
       });
       if (handle === null) break;
@@ -557,15 +564,15 @@ export async function runRepairDrain(
   };
   const held = await holdBackfillGroups(
     groups,
-    await effects.readBacklog(),
-    effects.nowMs(),
+    () => effects.readBacklog(),
+    () => effects.nowMs(),
     async (item) => {
       for (const jobId of groups.get(item)!) {
         if ((await runnable(item, jobId)) !== null) return true;
       }
       return false;
     },
-    effects.narrate,
+    (message) => effects.narrate(message),
   );
   const rank = new Map<string, number>();
   for (const [item, ids] of held) {
