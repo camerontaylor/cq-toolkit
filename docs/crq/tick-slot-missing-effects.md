@@ -37,7 +37,47 @@ TypeScript, so the probe returns the marked queue. `runTick` threads it into
 admission, and `runScheduledSlot`/`composeSlot` continue from the probed copy,
 as Python's `slot(observed, observation)` does.
 
-## Missing, by area
+## S6-f: offline composition and what is still staged
+
+`composeFullTick` (`src/adapters/crq/tickComposition.ts`) binds the sixteen
+`RemainingPhaseNames` to the merged S6-a..e adapters and `composeSlot`'s
+`collectFinished` to `createHarvestPhases`. It is inactive: no runtime entry
+imports it, `crq.ts` routes neither `tick` nor `slot`, and `LIVE_UNIT_COMMANDS`
+stays `['watchdog', 'publish']`.
+
+| Phase                                                           | Binding                                                                                                                                             |
+| --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `backfillPublish`, `backfillInventoryMode`, `backfillInventory` | `fileLocalReviewPublishEffects`, `tickBackfillInventory`; always bound (a gap there would be swallowed by `backfill_halted`)                        |
+| `discovery`, `enrollPrimary`, `enrollOthers`                    | `tickDiscoveryBinding`                                                                                                                              |
+| `resetFixPrBacklog`, `refreshFixPrBacklog`                      | `FixPrBacklog` (one `TICK_BACKLOG`, returned for the publisher) plus `fileFixPrBacklogEffects`                                                      |
+| `repairBackfill`, `archiveLegacy`                               | `fileRepairBackfillEffects` over a plain-queue bridge                                                                                               |
+| `harvestItems`, `reconcileCompleted`, `collectFinished`         | `createHarvestPhases`; run artifacts of a Python `_review` child (`review.pid`, `review.ndjson`, `exit.json`, `meta.json`) by `fileHarvestRunReads` |
+| `reconcile`                                                     | `fileReconcilePhaseEffects`; its new `onSaved` hook returns the reconciled queue                                                                    |
+| `writeStatus`, `publishLocalReviewPr`, `recordClientHealth`     | `fileReportingPhases`                                                                                                                               |
+
+A phase whose caller input is absent is bound to a function that rejects with
+`TickGapError` (never a no-op), because Python abandons a tick on a phase error
+and saves nothing. `TickComposition.unbound` lists those. `STAGED_GAPS` lists
+work no adapter does whatever the caller supplies; `complete` is true only when
+both are empty. `TICK_MISSING_EFFECTS` (`src/queue-runner/tick.ts`) repeats
+`STAGED_GAPS` (a test keeps them in step):
+
+- `harvest-review-effects`: `harvest_review` effects beyond the run-artifact reads (findings.md for non-local kinds, `removeWorktree`, `writeReceipt`, `repairEnqueue`, `backfillHarvest`, `requestPrReview`, coverage).
+- `repair-harvest-effects`: `repair_tick.harvest` queue side (worktree, verify, mechanical, `markFindingOutcome`, `cleanupHarvested`, publish); only the reads are file-backed.
+- `start-one-effects`: per-kind `LaunchEffects` and `CoverageEffects` for `admit.startOne`.
+- `usage-context`: `bindAdmit` never calls `usageContext`.
+- `review-child`: `_review` is not routed in the TS runner; Node needs `--foreground`, the tick kick and backfill proof, or the tick spawns the Python child.
+- `repair-parity`: repair-side tick passes have no seeded differential against Python.
+- `shadow-d2`: only the plan is shadowed, not the composed phases.
+
+Also noted, not gaps in the composition: primary fetch runs twice per tick
+(`fetch` plus `discoverOpenPrs`), and the enrollment skip-log text differs from
+Python.
+
+The tables below are the S6-0 inventory and are historical for every row that
+S6-a..f bound.
+
+## Missing, by area (S6-0, historical)
 
 Sizes are rough estimates of adapter and glue code over the existing pure logic.
 
