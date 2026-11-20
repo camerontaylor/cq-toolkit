@@ -682,6 +682,37 @@ async function resolveLockedPrWorktree(opts: PrWorktreeOpts, phase: ResolutionPh
     // stderr (git's refusal names any foreign branch-holder) — nothing is
     // registered for a tree that does not exist, and any stale registry
     // entry was never pruned, so the pointer survives for the next run.
+    // `-B` force-resets an EXISTING review branch. No worktree holds it here
+    // (the checks above only inspect listed trees), but a removed clean tree
+    // can leave unpushed commits on the branch: refuse before the reset drops
+    // the only reference to them.
+    const branchRef = `refs/heads/${reviewBranch}`;
+    const branchProbeArgs = ['-C', repoRoot, 'show-ref', '--verify', '--quiet', branchRef];
+    const branchProbe = await opts.run(branchProbeArgs);
+    if (branchProbe.code === 0) {
+      const branchAheadArgs = [
+        '-C',
+        repoRoot,
+        'rev-list',
+        '--count',
+        `${expectedSha}..${branchRef}`,
+      ];
+      const branchAhead = await opts.run(branchAheadArgs);
+      if (branchAhead.code !== 0 || !/^0\s*$/.test(branchAhead.stdout))
+        throw gitFail(
+          `review branch ${reviewBranch} holds commits not in the fetched PR head (unpushed fixer work would be orphaned by worktree add -B) — preserve them on a rescue branch by hand`,
+          branchAhead.code || 1,
+          branchAhead.stderr,
+          branchAheadArgs,
+        );
+    } else if (branchProbe.code !== 1) {
+      throw gitFail(
+        `show-ref ${branchRef} failed — the review branch's relation to the fetched head is unknown`,
+        branchProbe.code,
+        branchProbe.stderr,
+        branchProbeArgs,
+      );
+    }
     phase.checkoutMutation = true;
     checkoutWriterContext()!.markCheckoutMutation();
     await mkdir(worktreeRoot, { recursive: true });
