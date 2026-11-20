@@ -564,8 +564,8 @@ describe('repairHarvest result validation (differential)', () => {
     });
   });
 
-  // The next three pin behaviour crq flagged as defects in review (F2, F3). Python
-  // does exactly this, so the port must too; see the PR body for the Python-side note.
+  // These two cases pin the Python behavior around sibling identity and retry timing
+  // until the repair behavior changes in both runtimes.
   it('writes the unpublished-FIXED decision from a sibling whose identity does not match (as Python does)', async () => {
     const out = await same({
       item: item({}, { jobs: [J1, J2] }),
