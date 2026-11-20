@@ -30,6 +30,7 @@ import { liveRender, renderPlists, type PlistEffects } from './plistRender.js';
 import { pyText, renderUnits } from './renderService.js';
 import { posixStr } from './unitRender.js';
 import { flockLockFs, type FlockLockFs } from './flockAdapter.js';
+import { currentEntryEnv } from '../../../config/run-env.js';
 
 const CONFIG_PATH = 'apps/crq-python/config.json';
 const SYSTEMD_DIR = 'apps/crq-python/ops/systemd';
@@ -178,7 +179,7 @@ export async function requireOutsideGit(path: string, env: OverlayEnv): Promise<
     parent = up;
   }
   const result = await env.run(['git', '-C', parent, 'rev-parse', '--show-toplevel'], {
-    env: outsideProbeEnv(process.env),
+    env: outsideProbeEnv(currentEntryEnv()),
   });
   if (result.code === 0)
     throw new ValueError('private host artifacts must be outside every Git checkout');
@@ -202,7 +203,9 @@ const DISCOVERY_ROUTING = [
  * that could hide a checkout, and discovery across filesystems (a /dev/shm or tmpfs path
  * otherwise reports a mount-point diagnostic). Mirrors prepare-host.py `require_outside_git`.
  */
-export function outsideProbeEnv(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+export function outsideProbeEnv(
+  base: Readonly<Record<string, string | undefined>>,
+): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...base };
   for (const key of DISCOVERY_ROUTING) delete env[key];
   env.LC_ALL = 'C';
