@@ -60,6 +60,11 @@ class TimedDispatcher extends Dispatcher {
  * reason, so an open body stream cannot pin the call past a caller abort.
  */
 async function bufferBody(request: Request, signal: AbortSignal | null): Promise<Buffer> {
+  // Fetch rejects a Request whose body was already read (even partly) or is locked when no
+  // `init.body` replaces it; a fresh reader would otherwise send only the remaining bytes.
+  if (request.bodyUsed || (request.body as ReadableStream<Uint8Array>).locked) {
+    throw new TypeError('Cannot send a Request whose body has already been used.');
+  }
   signal?.throwIfAborted();
   const reader = (request.body as ReadableStream<Uint8Array>).getReader();
   const onAbort = (): void => {
@@ -114,14 +119,18 @@ export function createStepFetch(
           ...(needsBodyBuffer ? { body: await bufferBody(input, bufferSignal) } : {}),
         }
       : {};
-    // A nullish `init.body` means "not set" (native fetch keeps the Request's body), so it
-    // must not overwrite the buffered body in the spread below.
-    const { body: initBody, ...initRest } = (init ?? {}) as { body?: unknown };
+    // Fetch treats an own `undefined` init member as absent, so `{ signal: undefined }` keeps
+    // the Request's signal (likewise method, headers, redirect). A nullish `init.body` also
+    // means "not set", so it never overwrites the buffered Request body. `signal: null` stays.
+    const overrides = Object.fromEntries(
+      Object.entries(init ?? {}).filter(
+        ([key, value]) => value !== undefined && !(key === 'body' && value === null),
+      ),
+    );
     return undiciFetch(target, {
       ...fromRequest,
-      ...initRest,
-      ...(initBody != null ? { body: initBody } : {}),
+      ...overrides,
       dispatcher,
-    } as Parameters<typeof undiciFetch>[1]) as unknown as Promise<Response>;
+    } as unknown as Parameters<typeof undiciFetch>[1]) as unknown as Promise<Response>;
   };
 }

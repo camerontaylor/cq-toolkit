@@ -286,7 +286,7 @@ describe('createStepFetch', () => {
       body: 'orig',
     });
     const response = await within(
-      createStepFetch(1_000)(request, { body: undefined } as RequestInit),
+      createStepFetch(1_000)(request, { body: undefined } as unknown as RequestInit),
     );
     expect(await response.text()).toBe('sent');
     expect(received).toBe('orig');
@@ -324,6 +324,89 @@ describe('createStepFetch', () => {
     });
     const response = await within(createStepFetch(1_000, 0, transport)(request, { signal: null }));
     expect(await response.text()).toBe('sent');
+    await transport.close();
+  });
+
+  test('init.signal undefined is "not set": the Request signal still aborts the call', async () => {
+    const { url } = await stallingServer(); // never answers
+    const controller = new AbortController();
+    const request = new Request(`${url}/v1/x`, {
+      method: 'POST',
+      body: 'payload',
+      signal: controller.signal,
+    });
+    const pending = createStepFetch(10_000)(request, {
+      signal: undefined,
+    } as unknown as RequestInit);
+    setTimeout(() => controller.abort(new Error('request signal fired')), 50);
+    await expect(within(pending)).rejects.toThrow('request signal fired');
+  });
+
+  test('undefined init.method and init.headers keep the Request method and headers', async () => {
+    const transport = new agents.MockAgent();
+    transport.disableNetConnect();
+    transport
+      .get('http://undef-init.invalid')
+      .intercept({ path: '/v1/x', method: 'POST', headers: { 'x-from-request': 'yes' } })
+      .reply(200, 'kept');
+    const request = new Request('http://undef-init.invalid/v1/x', {
+      method: 'POST',
+      headers: { 'x-from-request': 'yes' },
+      body: 'payload',
+    });
+    const response = await within(
+      createStepFetch(
+        1_000,
+        0,
+        transport,
+      )(request, {
+        method: undefined,
+        headers: undefined,
+      } as unknown as RequestInit),
+    );
+    expect(await response.text()).toBe('kept');
+    transport.assertNoPendingInterceptors();
+    await transport.close();
+  });
+
+  test('an already-consumed Request body with no init.body rejects instead of sending ""', async () => {
+    const transport = new agents.MockAgent();
+    transport.disableNetConnect();
+    transport
+      .get('http://used-body.invalid')
+      .intercept({ path: '/v1/x', method: 'POST' })
+      .reply(200, 'sent')
+      .persist();
+    const request = new Request('http://used-body.invalid/v1/x', { method: 'POST', body: 'old' });
+    await request.text();
+    await expect(within(createStepFetch(1_000, 0, transport)(request))).rejects.toThrow(TypeError);
+    await transport.close();
+  });
+
+  test('a partly read Request body rejects instead of sending the remaining bytes', async () => {
+    const transport = new agents.MockAgent();
+    transport.disableNetConnect();
+    transport
+      .get('http://partial-body.invalid')
+      .intercept({ path: '/v1/x', method: 'POST' })
+      .reply(200, 'sent')
+      .persist();
+    const encoder = new TextEncoder();
+    const request = new Request('http://partial-body.invalid/v1/x', {
+      method: 'POST',
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode('head-'));
+          controller.enqueue(encoder.encode('tail'));
+          controller.close();
+        },
+      }),
+      duplex: 'half',
+    } as RequestInit);
+    const reader = (request.body as ReadableStream<Uint8Array>).getReader();
+    await reader.read(); // consume "head-" only
+    reader.releaseLock();
+    await expect(within(createStepFetch(1_000, 0, transport)(request))).rejects.toThrow(TypeError);
     await transport.close();
   });
 
