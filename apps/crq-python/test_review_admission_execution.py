@@ -517,16 +517,22 @@ class ExecutionTests(SnapshotGitFixture, unittest.TestCase):
                 # path never invokes launch.
                 self.q = saved[-1] if saved else copy.deepcopy(baseline)
                 self.item = self.q["items"][0]
+                replayed = []
                 c.save_queue = lambda q: None
                 with mock.patch.object(backfill_runtime, "settings", return_value={"enabled": True}), \
                      mock.patch.object(backfill_runtime, "services", return_value=(None, store, outbox, None)), \
                      mock.patch.object(backfill_runtime, "publish"):
                     for _ in range(2):  # a repeated replay must not duplicate the outbox entry
                         if self.item["state"] == "pending":
+                            replayed.append("complete")
                             runtime.complete(c, self.q, self.item, self.rdir, "run-1", self.cls,
                                              "2026-11-08T00:01:00Z", 0)
                         else:
+                            replayed.append("republish")
                             runtime.republish(c, self.q, self.item)
+                # Only the last saved snapshot already holds the terminal state, so
+                # recovering from it enters republish; the baseline would re-complete.
+                self.assertEqual(replayed[0], "republish" if saved else "complete")
                 self.assertEqual(self.item["state"], "done")
                 self.assertEqual(len(self.q["review_events"]), 1)
                 self.assertEqual(len(self.item["attempts"]), 1)
