@@ -116,14 +116,14 @@ function defaultUtc(): string {
 }
 
 /** Python `st_mtime`: `sec + nsec * 1e-9` as one float, so ties fall where Python's do. */
-function pythonMtime(mtimeNs: bigint): number {
+export function pythonMtime(mtimeNs: bigint): number {
   const sec = mtimeNs / 1_000_000_000n;
   const nsec = mtimeNs % 1_000_000_000n;
   return Number(sec) + Number(nsec) * 1e-9;
 }
 
 /** What `read_text()` + `json.loads` raise as `OSError`/`ValueError`. */
-class StateFileUnreadable extends Error {}
+export class StateFileUnreadable extends Error {}
 
 function isFsError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && typeof (error as NodeJS.ErrnoException).code === 'string';
@@ -154,7 +154,7 @@ function hasOversizedInteger(text: string): boolean {
  * Only the failures Python raises as `OSError` or `ValueError` become
  * {@link StateFileUnreadable}; anything else propagates untouched.
  */
-async function readJsonValue(path: string): Promise<JsonValue> {
+export async function readJsonValue(path: string): Promise<JsonValue> {
   let bytes: Uint8Array;
   try {
     bytes = await readFile(path);
@@ -182,7 +182,7 @@ async function readJsonValue(path: string): Promise<JsonValue> {
 }
 
 /** `Path.exists()` on 3.14: any `stat` failure is "does not exist". */
-async function pathExists(path: string): Promise<boolean> {
+export async function pathExists(path: string): Promise<boolean> {
   try {
     await stat(path);
     return true;
