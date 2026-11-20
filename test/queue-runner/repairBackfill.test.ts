@@ -442,10 +442,12 @@ describe('repairEnqueue vs the real repair_tick.enqueue', () => {
     await same(enqueue({ ...base, state: {} }));
   });
 
-  // crq review (F4, F10) flagged the next two as defects. Python behaves exactly
-  // this way, and the port is differential against it, so they are pinned as parity.
-  it('keeps a completed inbox job for another finding and still binds the blocker to it (as Python does)', async () => {
-    const out = await same(
+  // crq review (F3) supersedes the older parity pin: a completed slot belonging
+  // to a different finding must not be reused for this finding, so the port now
+  // deliberately deviates from Python (repair_tick still binds the blocker) and
+  // pins its own behavior on the TS side.
+  it('preserves a completed inbox job for another finding without reusing it or its blocker', async () => {
+    const out = await runTs(
       enqueue({
         queue: { items: [openItem({ blocking: [{ run: 'r1', run_finding: 1 }] })] },
         findings: { r1: rows(F2) }, // finding B now occupies slot 1
@@ -455,10 +457,15 @@ describe('repairEnqueue vs the real repair_tick.enqueue', () => {
         },
       }),
     );
+    expect(out.error).toBe(false);
+    expect(out.ret).toBe(true);
     expect(out.files['state/repair/inbox/crq-r1-F1.json']).toContain('fix a'); // still finding A
-    expect(out.queue).toContain('"repair_job":"crq-r1-F1"');
+    expect(out.queue).not.toContain('"repair_job"'); // never bound to another finding's job
+    expect(out.queue).toContain('"jobs":[]'); // the run claims no job it does not own
   });
 
+  // crq review (F4, F10) flagged the next one as a defect. Python behaves exactly
+  // this way, and the port is differential against it, so it is pinned as parity.
   it('counts a foreign repository PR with the same number toward the round ceiling (as Python does)', async () => {
     const done = (run: string): Record<string, unknown> => ({
       jobs: [],

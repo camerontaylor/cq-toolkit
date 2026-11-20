@@ -345,25 +345,39 @@ export async function repairEnqueue(
       source: sources[n - 1],
     };
     const prev = await fx.readInbox(jobId);
+    // The slot counts toward this run only when it ends up holding a job for
+    // this finding: fresh, same-finding reuse, or a rebound never-ran orphan.
+    let ownsSlot = true;
     if (prev === null) {
       await fx.writeInbox(jobId, job);
     } else {
-      if (!truthy(get(prev, 'source')) && pyEq(get(prev, 'finding'), finding)) {
+      const sameFinding = pyEq(get(prev, 'finding'), finding);
+      if (!truthy(get(prev, 'source')) && sameFinding) {
         prev.source = sources[n - 1];
         await fx.writeInbox(jobId, prev);
       }
       if (
-        (!pyEq(get(prev, 'repair_base'), base) || !pyEq(get(prev, 'finding'), finding)) &&
+        (!pyEq(get(prev, 'repair_base'), base) || !sameFinding) &&
         !(await fx.resultExists(jobId))
       ) {
         // Stale orphan that never ran: rebind to this record.
         await fx.writeInbox(jobId, job);
+      } else if (!sameFinding) {
+        // The slot holds a different finding's completed job: keep that job and
+        // its result untouched, and do not reuse them for this finding — its
+        // blocker stays unresolved unless it receives a distinct job.
+        ownsSlot = false;
       }
     }
-    (record.jobs as string[]).push(jobId);
+    if (ownsSlot) (record.jobs as string[]).push(jobId);
     for (const blocker of list(get(item, 'blocking', []), 'blocking')) {
       const b = dict(blocker, 'blocker');
-      if (pyEq(get(b, 'run'), runId) && pyEq(get(b, 'run_finding'), n)) b.repair_job = jobId;
+      if (
+        ownsSlot &&
+        pyEq(get(b, 'run'), runId) &&
+        pyEq(get(b, 'run_finding'), n)
+      )
+        b.repair_job = jobId;
     }
   }
   if (isReceipt) {
