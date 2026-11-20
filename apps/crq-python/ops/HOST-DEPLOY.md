@@ -549,7 +549,12 @@ The sequence:
    900 s deadline). An expired drain is a fail-stop: hold retained, nothing
    killed. Once quiescent it re-measures the config, pointer and queue
    digests and re-proves rollback compatibility, so a tick that ran during
-   the hold cannot leave the switch with no fallback. A separate advisory
+   the hold cannot leave the switch with no fallback. That post-drain
+   baseline is then persisted as its own `post-drain-baseline.json`
+   checkpoint before the switch: the immutable `recovery-receipt.json` keeps
+   the pre-admission measurements, so recovery after a death in the switch
+   can still prove which bytes the switch was required to preserve even when
+   a tick finished during the drain. A separate advisory
    lock (`state/deploy.lock`, held from before the first measurement) serializes
    whole deploys, including the released health window.
    Before the hold, a target that changes any rendered `crq-*` unit template
@@ -585,7 +590,9 @@ Exit codes: 0 completed, 1 failed but rolled back cleanly, 2 refused with the
 host unchanged, 3 recovery required. The run directory under `--record-dir`
 holds `deploy.json` (the result), `phase.json` (the last phase), `drain.json`,
 `health.json`, `rollback-drain.json` after a rollback,
-`recovery-receipt.json` (the immutable pre-admission measurements), and the
+`recovery-receipt.json` (the immutable pre-admission measurements),
+`post-drain-baseline.json` (the full digests re-measured after the drain,
+written before the switch), and the
 target helper/controller it executed. `deploy.json` carries
 `original_triggers` as well as `final_triggers`, so a recovery record still
 names the measured pre-deploy map; an interrupted run is routed through

@@ -70,6 +70,20 @@ export class GitPool {
 }
 
 /** One Git call with stdin, bounded output and a wall-clock kill. */
+function gitCallEnv(options: {
+  readonly skipLfsSmudge?: boolean;
+  readonly transportConfig?: boolean;
+}): NodeJS.ProcessEnv {
+  const env = childEnv();
+  if (options.skipLfsSmudge) env.GIT_LFS_SKIP_SMUDGE = '1';
+  if (options.transportConfig) {
+    delete env.GIT_CONFIG_NOSYSTEM;
+    delete env.GIT_CONFIG_GLOBAL;
+    env.GIT_SSH_COMMAND = 'ssh -o BatchMode=yes';
+  }
+  return env;
+}
+
 export function gitCall(
   pool: GitPool,
   cwd: string,
@@ -80,6 +94,12 @@ export function gitCall(
     readonly maxOutput?: number;
     /** Scoped checkout-only override after the ambient GIT_* scrub. */
     readonly skipLfsSmudge?: boolean;
+    /**
+     * Keep the runner's user and system Git configuration (credential
+     * helpers, URL rewrites) for a network transport, as `crq.fetch` does;
+     * SSH runs in batch mode so it can never prompt.
+     */
+    readonly transportConfig?: boolean;
   } = {},
 ): Promise<GitResult> {
   const timeoutMs = options.timeoutMs ?? GIT_CALL_TIMEOUT_MS;
@@ -89,7 +109,7 @@ export function gitCall(
       'git',
       ['-C', cwd, '--no-replace-objects', '-c', 'core.hooksPath=/dev/null', ...GIT_HARDEN, ...args],
       {
-        env: { ...childEnv(), ...(options.skipLfsSmudge ? { GIT_LFS_SKIP_SMUDGE: '1' } : {}) },
+        env: gitCallEnv(options),
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
         detached: process.platform !== 'win32',

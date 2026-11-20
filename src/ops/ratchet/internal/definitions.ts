@@ -160,9 +160,11 @@ const MAX_TSCONFIG_FILES = 64;
  * Strip JSONC to JSON: `//` and `/* *\/` comments are removed and trailing
  * commas before `}`/`]` dropped, all outside string literals (escapes are
  * honoured, so `"a//b"` and `"\"/*"` survive). Throws on an unterminated
- * block comment or string.
+ * block comment or string. A leading UTF-8 BOM is dropped.
  */
-function stripJsonc(text: string): string {
+export function stripJsonc(text: string): string {
+  // A UTF-8 BOM is not valid JSON; editors on Windows write one.
+  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
   let out = '';
   let i = 0;
   while (i < text.length) {
