@@ -1893,10 +1893,16 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
         # set as push items. These reviews scan the raw base..head range — not a
         # projection — so the else branch below threads clone/classes instead.
         cfg = repo_registry.by_repo(REPOS, item_repo(item))
-        if cfg is None:
+        if cfg is None and item["kind"] == local_review_runtime.KIND:
+            # A manual review of an unconfigured repository runs in its
+            # on-demand clone with the universal secret-shape set only.
+            repo_clone = local_review_runtime.transport.clone_for(sys.modules[__name__], item_repo(item))
+            scan_classes = UNIVERSAL_SCAN_CLASSES
+        elif cfg is None:
             raise RuntimeError(f"{item['kind']} item names an unconfigured repo: {item_repo(item)}")
-        repo_clone = Path(cfg["clone"])
-        scan_classes = UNIVERSAL_SCAN_CLASSES | set(cfg["scan_extra_classes"])
+        else:
+            repo_clone = Path(cfg["clone"])
+            scan_classes = UNIVERSAL_SCAN_CLASSES | set(cfg["scan_extra_classes"])
     if item["kind"] in (review_receipt.KIND, push_current.KIND):
         patch = git("diff", "--text", "--no-textconv", "--no-ext-diff", "--no-renames", "--no-color",
                     "--unified=0", plan["base"], plan["head"], cwd=repo_clone)
@@ -2525,9 +2531,12 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
         try:
             try:
                 clone = local_review_runtime.transport.clone_for(sys.modules[__name__], item_repo(item))
+                if not clone.is_dir():
+                    raise ValueError("review clone absent")
             except ValueError:
                 # Resolve the owning git directory before removing a worktree
-                # whose repo was removed from REPOS. Never use the primary clone.
+                # whose repo was removed from REPOS (its manual-review clone
+                # path then does not exist). Never use the primary clone.
                 clone = Path(git("rev-parse", "--path-format=absolute", "--git-common-dir",
                                  cwd=Path(meta["worktree"])))
             remove_worktree(Path(meta["worktree"]), meta["wt_branch"], clone=clone)

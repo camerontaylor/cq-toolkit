@@ -214,15 +214,31 @@ installations and repo permissions (issue creation via the existing `gh`
 auth); choosing floors and exclude lists per repo; the queue-host deploy
 itself (coordinator).
 
-## Local-first review authorization
+## Manual review of any repository
 
-`review-v1` uses the configured repository clone for object resolution, snapshot
-installation, planning, scans, execution worktrees and cleanup. A clone entry in
-runner configuration does not authorize submissions. The queue policy's existing
-`repo` remains authorized; an optional `repos` array adds repository slugs, for
-example `"repos": ["example/secondary"]`. Existing policies without this field
-retain single-repository behavior. The principal and target branch must still
-match the policy's `write` and `branches` allowlists.
+A manual `review-v1` submit may name any `owner/name` repository. There is no
+CRQ-side repository gate: neither the queue policy's `repos` array nor the
+runner's `repos` config decides whether a submit is accepted, so only
+CodeRabbit's own limits (rate limits, capacity) bound manual review. The
+principal and target branch must still match the policy's `write` and
+`branches` allowlists, and every existing input, snapshot and secret-scan check
+still applies.
 
-D-1 must add `repos` to the live queue policy before enabling any non-primary
-repository. This source change does not update or activate that live policy.
+The primary and configured repositories use their configured clone for object
+resolution, snapshot installation, planning, scans, execution worktrees and
+cleanup. Any other repository is cloned once, on demand, into
+`<state>/review-repos/<owner>/<name>` (lower-cased identity) from the primary
+clone's origin URL with the repository swapped in, so it uses the same
+transport and credentials the runner already fetches with. Its pre-upload scan
+uses the universal secret-shape set only. A repository the runner cannot clone
+(missing, no access, or the 90 s clone timeout) answers
+`state: unsupported, reason: repo-unavailable`; a malformed slug still answers
+`unsupported-repo`.
+
+A manual clone never joins `repos`: automatic discovery (push ranges and
+open-PR enrollment) stays limited to the configured list. The capabilities advertisement is unchanged, so old clients
+keep working.
+
+The queue policy's optional `repos` array is still accepted (existing policies
+stay valid) and still gates `record` imports, which publish evidence rather
+than request a review.
