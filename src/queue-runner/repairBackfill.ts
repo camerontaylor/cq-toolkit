@@ -70,9 +70,10 @@ export interface RepairArchiveEffects {
 
 // ---------------------------------------------------------------- py helpers
 
-const isRec = (v: unknown): v is Rec => typeof v === 'object' && v !== null && !Array.isArray(v);
+export const isRec = (v: unknown): v is Rec =>
+  typeof v === 'object' && v !== null && !Array.isArray(v);
 
-function truthy(v: unknown): boolean {
+export function truthy(v: unknown): boolean {
   if (v === undefined || v === null || v === false || v === 0 || v === '') return false;
   if (typeof v === 'bigint') return v !== 0n;
   if (Array.isArray(v)) return v.length > 0;
@@ -80,7 +81,7 @@ function truthy(v: unknown): boolean {
   return true;
 }
 
-function dict(v: unknown, what: string): Rec {
+export function dict(v: unknown, what: string): Rec {
   if (!isRec(v)) throw new TypeError(`${what} must be a dict`);
   return v;
 }
@@ -92,7 +93,7 @@ function req(o: Rec, key: string): unknown {
 }
 
 /** `d.get(key[, default])`; an absent key with no default is `undefined`. */
-function get(o: Rec, key: string, fallback?: unknown): unknown {
+export function get(o: Rec, key: string, fallback?: unknown): unknown {
   return Object.hasOwn(o, key) ? o[key] : fallback;
 }
 
@@ -101,13 +102,13 @@ function str(v: unknown, what: string): string {
   return v;
 }
 
-function list(v: unknown, what: string): unknown[] {
+export function list(v: unknown, what: string): unknown[] {
   if (!Array.isArray(v)) throw new TypeError(`${what} must be a list`);
   return v;
 }
 
 /** Python `==` over JSON values: `1 == 1.0 == True`, `None` equals only `None`. */
-function pyEq(a: unknown, b: unknown): boolean {
+export function pyEq(a: unknown, b: unknown): boolean {
   const x = a === undefined ? null : a;
   const y = b === undefined ? null : b;
   const num = (v: unknown): number | bigint | null =>
