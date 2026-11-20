@@ -106,8 +106,8 @@ Nothing here edits queue state, the policy file or the signer.
    read-only `health` call from the client. `status` cannot be the check: it is
    refused (exit `2`) for a request id that was never enqueued, and no queue
    capability request writes `state/events.jsonl`. `health` needs no enqueue and
-   no forge lookup, but the policy must carry a `health_reads` grant for the
-   principal and this exact binding (see `docs/queue-client.md`, health):
+   no forge lookup, but the policy must keep the principal in its `read` array and carry a
+   `health_reads` grant for the principal and this exact binding (see `docs/queue-client.md`, health):
 
    ```sh
    printf '%s\n' '{"v":1,"op":"health","requestId":"switch-probe-health","binding":{"repo":"<owner/repo>","targetSelector":"promoted-main"}}' \
@@ -117,7 +117,8 @@ Nothing here edits queue state, the policy file or the signer.
    It must exit `0` with a `"result"` carrying `pending`, `blocked`, `deployedSha`
    and a `snapshot` digest (null ages and SHAs are normal on a quiet queue). A
    refusal (`queue capability refused; no permission`, exit `2`) means the
-   `health_reads` grant is missing or does not match the binding, the repo or
+   principal is not in `read`, the `health_reads` grant is missing or does not match
+   the binding, the repo or
    `targetSelector` is not in the policy, or `<deploy-root>/state/queue.json` is
    unreadable; the first two are policy fixes, not a reason to roll back. The call
    changes no queue state; `<deploy-root>/state/queue.json` is unchanged.
