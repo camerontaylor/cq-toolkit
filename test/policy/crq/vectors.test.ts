@@ -261,6 +261,8 @@ const NOT_APPLICABLE: Readonly<Record<string, string>> = {
     'crq.rank/sort_key/background_turn and dependencies are replayed in tickSchedule.test.ts',
   liveness: 'author_quota.identity_kind/run_state are replayed in runLiveness.test.ts',
   'tick-admission': 'crq.admit_available gate arithmetic is replayed in tickAdmission.test.ts',
+  'usage-context':
+    'crq.admit_available with the real backfill_runtime.usage_context is replayed through bindAdmit in admitUsageContext.test.ts',
   'status-helpers': 'status helpers are a later group-P port',
   summary: 'summary rendering is a later group-P port',
   usage: 'usage/slot pacing is a later group-P port',

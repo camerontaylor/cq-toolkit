@@ -71,7 +71,6 @@ export const TICK_MISSING_EFFECTS: readonly string[] = [
   'harvest-review-effects: harvest_review effects beyond the run-artifact reads (findings.md for non-local kinds, removeWorktree, writeReceipt, repairEnqueue, backfillHarvest, requestPrReview, coverage)',
   'repair-harvest-effects: repair_tick.harvest queue side (worktree, verify, mechanical, markFindingOutcome, cleanupHarvested, publish)',
   'start-one-effects: per-kind LaunchEffects and CoverageEffects for admit.startOne',
-  'usage-context: backfill_runtime.usage_context is never called by bindAdmit',
   'review-child: `_review` is not routed in the TS runner (--foreground, tick kick, backfill proof)',
   'repair-parity: repair-side tick passes have no seeded differential against Python',
   'shadow-d2: the composed phases are not shadowed, only the plan',

@@ -85,6 +85,9 @@ export function usageContext(
   for (const value of items) {
     const item = object(value, 'item');
     const attempt = item.get('attempt_id');
+    // Python `attempt_id in dict` hashes the key: a list or object is a TypeError.
+    if (Array.isArray(attempt) || attempt instanceof JsonObject)
+      throw new LedgerTypeError('attempt_id is unhashable');
     if (typeof attempt !== 'string' || !holds.has(attempt)) continue;
     const rawRun = item.get('run');
     const run = pyTruthy(rawRun) ? object(rawRun, 'run') : empty();

@@ -67,10 +67,24 @@ both are empty. `TICK_MISSING_EFFECTS` (`src/queue-runner/tick.ts`) repeats
 - `harvest-review-effects`: `harvest_review` effects beyond the run-artifact reads (findings.md for non-local kinds, `removeWorktree`, `writeReceipt`, `repairEnqueue`, `backfillHarvest`, `requestPrReview`, coverage).
 - `repair-harvest-effects`: `repair_tick.harvest` queue side (worktree, verify, mechanical, `markFindingOutcome`, `cleanupHarvested`, publish); only the reads are file-backed.
 - `start-one-effects`: per-kind `LaunchEffects` and `CoverageEffects` for `admit.startOne`.
-- `usage-context`: `bindAdmit` never calls `usageContext`.
 - `review-child`: `_review` is not routed in the TS runner; Node needs `--foreground`, the tick kick and backfill proof, or the tick spawns the Python child.
 - `repair-parity`: repair-side tick passes have no seeded differential against Python.
 - `shadow-d2`: only the plan is shadowed, not the composed phases.
+
+Closed in S6-g, kept here as the record:
+
+- `usage-context`: `bindAdmit` now runs what `admit_available` runs before its
+  gate: `q["usage"] = usage`, `backfill_runtime.usage_context` and
+  `q["backfill_starts_at_observation"] = len(starts)`, on dry runs and closed
+  gates too, so the saved queue carries `backfill_usage` and any reflected or
+  expired backfill hold. It reuses `usageContext` from
+  `src/ops/crq/internal/backfillGate.ts` (JsonObject-based, so `None` start
+  stamps, unreadable `terminal_at` and a non-object hold fail as Python does),
+  not the plain-record `coverageUsage.usageContext`, which is test-only and
+  matches an undated hold differently. Replayed against Python by the
+  `usage-context` group-P family (`test/adapters/crq/admitUsageContext.test.ts`).
+  An unhashable `attempt_id` is now a refusal in `usageContext`, as Python's
+  `attempt_id in dict` is a `TypeError`.
 
 Closed in S6-f, kept here as the record:
 
@@ -116,7 +130,7 @@ Sizes are rough estimates of adapter and glue code over the existing pure logic.
 | `admit.startOne`                     | `start_one` (`crq.py:3198`)                                                                      | selection loop `startOne` (`src/queue-runner/startOne.ts:116`)                                                                                         | A `StartOneEffects` implementation. That means a `planItem` dispatcher by kind over `planOpen`/`planDelta` (`ordinaryPlan.ts:92`/`:144`), `planMerged`/`planAuthor` (`mergedAuthorPlan.ts`), `prepareCurrent`, `preparePushCurrent` and the local-review prepare (`preparePasses.ts`), plus the PR lookup and quiet gate. `ensure_commit`, `measure_merged` and `build_synthetic` exist only as effect members.                  |
 | `launch`                             | `launch` (`crq.py:2004`)                                                                         | `reserveAndSpawnReview` (`src/queue-runner/reviewLaunch.ts:64`), `prepareOrdinaryReview` (`src/queue-runner/reviewPreparation.ts:48`, open/delta only) | Meta, scan and `cmd` for receipt, push-current, local-review, author, merged/coverage and backfill. Also the secret scan with exemptions and a blocked-scan receipt. `ReviewLaunchEffects` is unbound.                                                                                                                                                                                                                           |
 | Detached review child                | `cmd_review_child` (`crq.py:2202`), spawned as `python3 crq.py _review <run_id>` (`crq.py:2150`) | `runReviewChild` (`src/adapters/crq/reviewProcess.ts:103`), no runtime caller                                                                          | `_review` is in the runner's command set (`src/queue-runner/runner.ts:31`) but not routed. `runReviewChild` differs from Python in three ways. It runs `timeout` without `--foreground`. It does not start `crq-tick.service` (`--no-block`) when the child finishes. It refuses backfill submission proof. An interim TS launch could spawn the Python child (same artifact names: `review.pid`, `review.ndjson`, `exit.json`). |
-| Coverage fallback and backfill usage | `_coverage_fallback` (`crq.py:3131`), `backfill_runtime.usage_context`                           | `coverageFallback`, `usageContext` (`src/queue-runner/coverageUsage.ts`)                                                                               | Effect binding (17 members; `measureMerged`, `buildSynthetic` and `legacyOrigins` have no implementation). `bindAdmit` never calls `usageContext`, which Python's `admit_available` does.                                                                                                                                                                                                                                        |
+| Coverage fallback and backfill usage | `_coverage_fallback` (`crq.py:3131`), `backfill_runtime.usage_context`                           | `coverageFallback`, `usageContext` (`src/queue-runner/coverageUsage.ts`)                                                                               | Effect binding (17 members; `measureMerged`, `buildSynthetic` and `legacyOrigins` have no implementation). `bindAdmit` calls the `backfillGate.ts` `usageContext` since S6-g (this row's `coverageUsage.ts` copy stays test-only).                                                                                                                                                                                               |
 
 ### Discovery, enrollment, delivery and reporting (about 1k–1.4k lines)
 
