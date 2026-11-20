@@ -9,10 +9,11 @@ import { join } from 'node:path';
 
 import { parseJsonValue, toPlainJson } from '../../policy/crq/jsonValue.js';
 import { atomicJsonText } from '../../policy/crq/pythonJson.js';
-import type {
-  RepairArchiveEffects,
-  RepairBackfillEffects,
-  SourcedFinding,
+import {
+  isRec,
+  type RepairArchiveEffects,
+  type RepairBackfillEffects,
+  type SourcedFinding,
 } from '../../queue-runner/repairBackfill.js';
 import { atomicWrite } from './atomic.js';
 
@@ -71,8 +72,14 @@ export function fileRepairBackfillEffects(
     },
     async readInbox(jobId) {
       const path = inbox(jobId);
+      // `null` is reserved for an absent file: a present document that parses
+      // to a non-dict (JSON `null`, an array, a scalar) is malformed content,
+      // so it raises instead of masquerading as an absent inbox (Python dies
+      // on `prev.get(...)`; enqueue must never overwrite it with a new job).
       if (!(await exists(path))) return null;
-      return (await readJson(path)) as Record<string, unknown>;
+      const doc = await readJson(path);
+      if (!isRec(doc)) throw new TypeError(`repair inbox ${jobId} must be a dict`);
+      return doc;
     },
     async writeInbox(jobId, doc) {
       const path = inbox(jobId);

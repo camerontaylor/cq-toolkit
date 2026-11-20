@@ -281,6 +281,12 @@ describe('repairEnqueue vs the real repair_tick.enqueue', () => {
     );
   });
 
+  it('raises on a present inbox file that is not a JSON object (as Python does)', async () => {
+    await same(enqueue({ state: { 'repair/inbox/crq-r1-F1.json': null } })); // JSON null
+    await same(enqueue({ state: { 'repair/inbox/crq-r1-F1.json': [1] } })); // an array
+    await same(enqueue({ state: { 'repair/inbox/crq-r1-F1.json': 'nul' } })); // malformed text
+  });
+
   it('backfills a missing source onto an existing job without a second record', async () => {
     const existing = { jobs: ['crq-r1-F1', 'crq-r1-F2'], state: 'ready', pin: 'b0' };
     await same(
@@ -712,6 +718,34 @@ describe('injected effects only', () => {
     expect(calls).toEqual(['has:r9']);
     expect(q.legacy_repair_missing).toEqual([]);
     expect(q.legacy_repair_backfilled).toBe(ISO);
+  });
+});
+
+describe('file-backed repair inbox reads', () => {
+  it('returns null only for an absent file and rejects a non-object document', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'repair-bf-inbox-'));
+    dirs.push(root);
+    const fx = fileRepairBackfillEffects({
+      stateRoot: join(root, 'state'),
+      runsRoot: join(root, 'runs'),
+      ledgerRoot: join(root, 'ledger'),
+      primaryRepo: 'o/r',
+      defaultRef: 'origin/main',
+      mergedCurrentEnabled: false,
+      maxRoundsPerPin: 2,
+      iso: () => ISO,
+      git: async () => '',
+      findings: async () => [],
+    });
+    const path = join(root, 'state', 'repair', 'inbox', 'crq-x-F1.json');
+    expect(await fx.readInbox('crq-x-F1')).toBeNull(); // absent
+    await fx.writeInbox('crq-x-F1', { job: 'crq-x-F1', finding: F1 });
+    expect(await fx.readInbox('crq-x-F1')).toEqual({ job: 'crq-x-F1', finding: F1 });
+    for (const text of ['null', '[1]', '7', '"s"', 'nul']) {
+      writeFileSync(path, text);
+      await expect(fx.readInbox('crq-x-F1')).rejects.toThrow();
+    }
+    expect(existsSync(path)).toBe(true); // invalid content is never treated as absence
   });
 });
 
