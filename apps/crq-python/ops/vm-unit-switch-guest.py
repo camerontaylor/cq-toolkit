@@ -388,6 +388,9 @@ def finish_cleanup(cleanup, process_actions, restore_actions):
         if first is None:
             first = exc
     if first is not None:
+        # The phase never reaches ``result["cleanup"]`` on failure; carry the
+        # retained stop results on the exception so main() can emit them.
+        first.cleanup_results = list(cleanup)
         raise first
 
 
@@ -2930,8 +2933,11 @@ def main(argv=None):
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
     except Exception as exc:  # noqa: BLE001 - the harness must see the failure
-        print(json.dumps({"phase": args.phase, "error": type(exc).__name__,
-                          "detail": str(exc)[:1000]}, sort_keys=True))
+        failure = {"phase": args.phase, "error": type(exc).__name__,
+                   "detail": str(exc)[:1000]}
+        if hasattr(exc, "cleanup_results"):
+            failure["cleanup"] = exc.cleanup_results
+        print(json.dumps(failure, sort_keys=True))
         return 1
 
 

@@ -65,7 +65,7 @@ DURATION_UNITS = {
 }
 # Longest spelling first so ``min`` never matches as ``m`` and ``ms`` never as ``m``.
 DURATION_RE = re.compile(
-    r"(?P<value>\d+)(?P<unit>"
+    r"(?P<value>\d+(?:\.\d+)?)(?P<unit>"
     + "|".join(sorted(map(re.escape, DURATION_UNITS), key=len, reverse=True))
     + ")?")
 UNIT_FILE_STATES = {"enabled", "disabled", "static", "masked", "alias",
@@ -323,9 +323,9 @@ def _duration_seconds(text: str) -> int | None:
             position += 1
         factor = DURATION_UNITS[match.group("unit") or "s"]
         try:
-            seconds += int(match.group("value")) * factor
+            seconds += float(match.group("value")) * factor
         except (OverflowError, ValueError):
-            # Too many digits for int() (ValueError) or float (OverflowError).
+            # Too many digits for float() (OverflowError) or a non-numeric value.
             return None
     if seconds <= 0 or seconds == float("inf"):
         return None

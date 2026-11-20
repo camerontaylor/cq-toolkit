@@ -7,6 +7,7 @@
 // `stepTimeoutMs` (+ a margin, so the SDK's step timeout fires first).
 // Scaled down: a local server that stalls before sending headers stands in
 // for the provider, and short bounds stand in for 300 s / 20 min.
+import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -226,9 +227,27 @@ describe('createStepFetch', () => {
       transport,
     )(request).then(
       () => undefined,
-      (error: unknown) => error as Error,
+      (error: unknown) => error as { message: string; cause?: { message?: string } },
     );
+    // An integrity mismatch specifically, not any transport error.
     expect(failure).toBeDefined();
+    expect(`${failure?.message} ${failure?.cause?.message ?? ''}`).toMatch(/integrity/i);
+    await transport.close();
+  });
+
+  test('a native Request whose integrity digest matches the body succeeds (control)', async () => {
+    const transport = new agents.MockAgent();
+    transport.disableNetConnect();
+    transport
+      .get('http://integrity.invalid')
+      .intercept({ path: '/v1/x', method: 'GET' })
+      .reply(200, 'genuine bytes');
+    const digest = createHash('sha256').update('genuine bytes').digest('base64');
+    const request = new Request('http://integrity.invalid/v1/x', {
+      integrity: `sha256-${digest}`,
+    });
+    const response = await createStepFetch(1_000, 0, transport)(request);
+    expect(await response.text()).toBe('genuine bytes');
     await transport.close();
   });
 
