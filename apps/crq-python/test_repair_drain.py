@@ -218,9 +218,40 @@ class RepairDrainTest(unittest.TestCase):
         first = {'driver': 'codex', 'model': 'gpt-5.1'}
         second = {'driver': 'codex', 'model': 'gpt-5.2'}
         self.assertEqual(service.role_provider(first), service.role_provider(second))
+        self.assertEqual(service.role_provider({'driver': 'cq', 'model': 'codex/gpt-5.1'}), service.role_provider(first))
         self.assertEqual(service.role_provider({'driver': 'cq', 'model': 'zai/glm-5.3'}), 'zai')
         service.remember_provider_limit(service.role_provider(first), {'retry_after_ms': 60000})
         self.assertIn(service.role_provider(second), service.provider_cooldowns())
+
+    def test_unstatable_cooldown_file_fails_closed(self):
+        path = service.ROOT / 'state/repair/provider-cooldowns.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        real = Path.stat
+        def stat(self, *args, **kwargs):
+            if self == path:
+                raise PermissionError('denied')
+            return real(self, *args, **kwargs)
+        with mock.patch.object(Path, 'stat', stat):
+            with self.assertRaises(service.CooldownStateError):
+                service.provider_cooldowns()
+
+    def test_codex_cooldown_key_is_used_by_every_call_site(self):
+        codex = {'driver': 'codex', 'model': 'gpt-5.1'}
+        paseo = {'driver': 'cq', 'model': 'codex/gpt-5.1'}
+        self.config['repair']['fallback_models'] = ['deepseek/deepseek-flash']
+        # dispatch: the persisted openai cooldown defers a codex lane.
+        service.remember_provider_limit('openai', {'retry_after_ms': 60000})
+        with mock.patch.object(service, '_dispatch', return_value={'stop': 'ok'}) as invoke:
+            service.dispatch(self.config, codex, {'run': 'r', 'job': 'j'}, self.clone, self.root / 'a')
+        invoke.assert_not_called()
+        # dispatch_paused: only openai-keyed roles, all cooling, so the pause stands.
+        service.rate_limit_pause({}, 'global-marker')
+        self.config['repair']['roles'] = {'fixer': codex, 'judge': paseo}
+        with mock.patch.object(service, 'fallback_roles', side_effect=lambda config, role: [role]):
+            self.assertIsNotNone(service.dispatch_paused(self.config))
+        # provider_ready: an unprefixed role is keyed by its driver, which needs ZAI_API_KEY.
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(service.provider_ready({'driver': 'zai', 'model': 'glm-5'}))
 
     def test_reap_aggregates_success_and_crash_before_replacement(self):
         fds = []

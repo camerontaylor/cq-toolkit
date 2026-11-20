@@ -200,9 +200,11 @@ def role_provider(role):
     real provider when the model is unprefixed (codex gpt-5.1 and gpt-5.2 are
     both OpenAI and must share one cooldown)."""
     prefix, sep, _ = role['model'].partition('/')
+    # A Paseo 'codex/...' model and the codex driver are the same OpenAI account.
+    aliases = {'codex': 'openai'}
     if sep:
-        return prefix
-    return {'codex': 'openai'}.get(role['driver'], role['driver'])
+        return aliases.get(prefix, prefix)
+    return aliases.get(role['driver'], role['driver'])
 
 
 def provider_ready(role):
@@ -231,8 +233,13 @@ def valid_cooldown_stamp(stamp):
 
 def provider_cooldowns():
     path = ROOT / 'state/repair/provider-cooldowns.json'
-    if not path.exists():
+    try:
+        path.stat()
+    except FileNotFoundError:
         return {}
+    except OSError as exc:
+        # Path.exists() would read an unstatable file as absent, i.e. no cooldown.
+        raise CooldownStateError('provider-cooldowns.json cannot be inspected: ' + str(exc)[:200]) from exc
     # Corrupt state must not silently spend against a known exhausted provider:
     # validate the complete document and reject every invalid timestamp before a
     # caller compares one with utc().
