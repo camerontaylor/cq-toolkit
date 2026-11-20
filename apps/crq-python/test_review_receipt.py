@@ -1,6 +1,7 @@
 """Offline contract tests for the Q1/Q3 receipt seam."""
 import base64
 import copy
+import datetime as dt
 import hashlib
 import json
 from pathlib import Path
@@ -31,7 +32,8 @@ class ReceiptTest(unittest.TestCase):
             info = dict(number=9, state="MERGED", baseRefName="main", headRefOid="b" * 40,
                         mergeCommit={"oid": "c" * 40})
             c = SimpleNamespace(STATE=Path(td), pr_info=lambda _: info,
-                                git=lambda *args: "d" * 40, is_ancestor=lambda *args: True)
+                                git=lambda *args: "d" * 40, is_ancestor=lambda *args: True,
+                                iso=lambda: dt.datetime.now(dt.timezone.utc).isoformat())
             repair_tick.reconcile_current_fix(c, item)
             self.assertTrue(receipt.remediation_fixed(item, doc, rid))
             c.pr_info = lambda _: self.fail("historical merged PR was fetched again")
@@ -83,7 +85,8 @@ class ReceiptTest(unittest.TestCase):
             info = dict(number=9, state="MERGED", baseRefName="main", headRefOid="b" * 40,
                         mergeCommit={"oid": "c" * 40})
             c = SimpleNamespace(STATE=Path(td), pr_info=mock.Mock(return_value=info),
-                                git=mock.Mock(return_value="d" * 40), is_ancestor=lambda *args: True)
+                                git=mock.Mock(return_value="d" * 40), is_ancestor=lambda *args: True,
+                                iso=lambda: dt.datetime.now(dt.timezone.utc).isoformat())
             original = copy.deepcopy(item)
             for verdicts in (record['verdicts'][:1], [record['verdicts'][0],
                             {**record['verdicts'][1], 'verdict': 'NOT-FIXED'}]):
@@ -100,6 +103,19 @@ class ReceiptTest(unittest.TestCase):
                 repair_tick.reconcile_fix_prs(c, {'items': [changed]})
                 c.pr_info.assert_called_once()
                 self.assertNotIn('remediation', changed)
+                # The closed marker is bounded, not terminal: past the cadence
+                # the record is rechecked, and a reopen (or a merge back at the
+                # verified head) invalidates the marker so the fix is credited.
+                stale = (dt.datetime.now(dt.timezone.utc) - repair_tick.CLOSED_FIX_RECHECK).isoformat()
+                changed['repair_runs']['r']['not_fixed']['at'] = stale
+                repair_tick.reconcile_fix_prs(c, {'items': [changed]})
+                self.assertEqual(c.pr_info.call_count, 2)
+                self.assertNotIn('remediation', changed)
+                c.pr_info.return_value = info
+                changed['repair_runs']['r']['not_fixed']['at'] = stale
+                repair_tick.reconcile_fix_prs(c, {'items': [changed]})
+                self.assertNotIn('not_fixed', changed['repair_runs']['r'])
+                self.assertTrue(receipt.remediation_fixed(changed, doc, rid))
             changed = copy.deepcopy(original)
             c.pr_info = mock.Mock(return_value={**info, 'baseRefName': 'other'})
             repair_tick.reconcile_fix_prs(c, {'items': [changed]})

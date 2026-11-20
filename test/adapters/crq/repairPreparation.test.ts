@@ -370,6 +370,30 @@ describe('operator argv parsing', () => {
       message: 'missing historical job id',
     });
   });
+
+  test('refuses an empty runner root or state root instead of defaulting to cwd', () => {
+    const emptyRunner = [...full];
+    emptyRunner[emptyRunner.indexOf('--runner-root') + 1] = '';
+    expect(parseRepairPrepareArgv(emptyRunner)).toEqual({
+      ok: false,
+      message: 'empty root: --runner-root',
+    });
+    const emptyState = [...full];
+    emptyState[emptyState.indexOf('--state-root') + 1] = '';
+    expect(parseRepairPrepareArgv(emptyState)).toEqual({
+      ok: false,
+      message: 'empty root: --state-root',
+    });
+  });
+
+  test('an empty root is a usage error (exit 2) before any filesystem access', async () => {
+    const emptyState = [...full];
+    emptyState[emptyState.indexOf('--state-root') + 1] = '';
+    expect(await runRepairPrepare(emptyState)).toMatchObject({
+      exitCode: 2,
+      artifact: { error: { kind: 'usage', message: 'empty root: --state-root' } },
+    });
+  });
 });
 
 describe('executor result mapping', () => {

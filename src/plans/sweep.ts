@@ -125,7 +125,11 @@ export const SWEEP_PLAN_JOB_IDS = {
  * are deliberately EXCLUDED: the segments are the builder's collision
  * resolution (jcqEl) — an overlay overriding them would desync the unit's
  * branch/worktree/marker from the assembler's resolvedSegments — and the
- * unit identity names the work the planner selected.
+ * unit identity names the work the planner selected. `mode` is EXCLUDED too:
+ * the pipeline mode is CONFIG-GRADE (it also gates the assembler), so it is
+ * resolved once from `config.mode` and applied AFTER the overlay — an
+ * overlay could otherwise flip a `prep` (probe-only) run into a fixer run
+ * that commits and pushes.
  */
 export type SweepUnitJobOverlay = Partial<
   Omit<
@@ -139,6 +143,7 @@ export type SweepUnitJobOverlay = Partial<
     | 'files'
     | 'kind'
     | 'slug'
+    | 'mode'
   >
 >;
 
@@ -410,9 +415,6 @@ export function buildSweepPlan(
         base: config.base,
         kind: resolvedSegments[index]?.kind,
         slug: resolvedSegments[index]?.slug,
-        // PREP MODE (UC §1 row 3): the unit jobs carry the mode; the unit op
-        // stops after the baseline snapshot (probes only).
-        ...(config.mode === 'prep' ? { mode: 'prep' as const } : {}),
         // jeDch: the config's dispatch wiring lands on every unit job (the
         // overlay's per-unit values still win over it).
         ...(dispatch.driver !== undefined ? { driver: dispatch.driver } : {}),
@@ -421,6 +423,13 @@ export function buildSweepPlan(
           ? { promptTemplate: dispatch.promptTemplate }
           : {}),
         ...overlay,
+        // PREP MODE (UC §1 row 3): the unit jobs carry the mode; the unit op
+        // stops after the baseline snapshot (probes only). CONFIG-GRADE and
+        // applied AFTER the overlay: `mode` is not an overlay knob, so a
+        // probe-only run can never be flipped into a fixer that commits and
+        // pushes. The mode is resolved ONCE here and the assembly gate below
+        // reads the same `config.mode`.
+        ...(config.mode === 'prep' ? { mode: 'prep' as const } : {}),
         ...(defaultScope !== undefined ? { stagePathAllowlist: defaultScope } : {}),
       },
     };

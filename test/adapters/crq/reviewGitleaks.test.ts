@@ -40,6 +40,8 @@ describe('inactive gitleaks binding', () => {
   it('refuses missing or malformed reports and never leaks report content', async () => {
     const missing = await fixture('exit 0');
     await expect(missing.scan('')).rejects.toThrow('gitleaks execution or report failed');
+    const zeroByte = await fixture(`${reportPath}\n: > "$report"`);
+    await expect(zeroByte.scan('')).rejects.toThrow('gitleaks execution or report failed');
     const malformed = await fixture(`${reportPath}\nprintf '%s' 'SECRET' > "$report"`);
     await expect(malformed.scan('')).rejects.toThrow('gitleaks execution or report failed');
     expect(await readdir(malformed.root)).toEqual(['gitleaks']);

@@ -130,7 +130,7 @@ export async function publishRepairSourceFeedback(
   ]);
   if (targetLineage.code !== 0) throw new Error('merged repair not in target');
   const canonical = async (): Promise<JsonObject | null> => {
-    const entries: [string, JsonValue][] = [];
+    const jobs: JsonObject[] = [];
     for (const entry of input.jobs) {
       const job = await effects.readJob(entry.id);
       const pr = job.get('pr');
@@ -146,7 +146,13 @@ export async function publishRepairSourceFeedback(
             pr.integer !== BigInt(entry.sourcePr))
       )
         throw new Error('canonical fixed repair job identity mismatch');
-      const id = await effects.currentFixedEvent(job, input.merge);
+      jobs.push(job);
+    }
+    // Every job identity and source PR binding is checked before terminal-event availability,
+    // so a job missing its terminal event cannot skip validating the jobs after it.
+    const entries: [string, JsonValue][] = [];
+    for (const [index, entry] of input.jobs.entries()) {
+      const id = await effects.currentFixedEvent(jobs[index]!, input.merge);
       if (!id) return null;
       entries.push([entry.id, id]);
     }

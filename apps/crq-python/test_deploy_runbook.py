@@ -173,7 +173,7 @@ class DeployFixture(unittest.TestCase):
 
     def stopped(self, argv):
         if argv[0] == "systemctl":
-            if argv[2] in {"list-unit-files", "list-units"}:
+            if argv[2] in {"list-unit-files", "list-units", "list-jobs"}:
                 return ""
             return "inactive\n"
         return subprocess.run(argv, check=True, capture_output=True,
@@ -220,6 +220,23 @@ class DeployFixture(unittest.TestCase):
 
 
 class DeployTests(DeployFixture, unittest.TestCase):
+    def test_compatibility_is_judged_against_the_prior_sha_throughout(self):
+        # Pre-hold and post-drain checks, and the post-switch check, must ask
+        # about the PRIOR (live) sha, never the deploy target.
+        shas = []
+        real = dc.compatibility_record
+
+        def spy(effects, sha):
+            shas.append(sha)
+            return real(effects, sha)
+
+        with mock.patch.object(dc, "compatibility_record", side_effect=spy):
+            document = self.build().run()
+        self.assertEqual(document["outcome"], "completed")
+        self.assertGreaterEqual(len(shas), 3)
+        self.assertEqual(set(shas), {self.prior})
+        self.assertNotEqual(self.prior, self.target)
+
     def test_deploy_switches_health_checks_and_restarts_only_active(self):
         run = self.build()
         document = run.run()
@@ -301,6 +318,26 @@ class DeployTests(DeployFixture, unittest.TestCase):
         self.assertEqual(self.units.stopped, [])
         self.assertFalse(self.marker().exists())
         self.assertEqual(self.head(), unmerged)
+
+    def test_unrollbackable_prior_refuses_before_admission(self):
+        # Only the target was tested for merged-main ancestry, so a live prior
+        # SHA that is not merged to origin/main passed preflight and then
+        # failed the helper's same check inside the rollback switch, after the
+        # target was installed. The prior SHA must be refused up front, before
+        # admission and any switch.
+        self.command("commit", "--allow-empty", "-qm", "local only")
+        local = self.head()
+        self.assertNotEqual(
+            subprocess.run(["git", "-C", str(self.root), "merge-base",
+                            "--is-ancestor", local,
+                            "refs/remotes/origin/main"]).returncode, 0)
+        run = self.build(target_sha=self.target)
+        with self.assertRaisesRegex(rb.Refused, "rollback target check"):
+            run.run()
+        self.assertEqual(self.head(), local)
+        self.assertEqual(self.units.stopped, [])
+        self.assertEqual(self.units.started, [])
+        self.assertFalse(self.marker().exists())
 
     def test_foreign_marker_refuses_and_touches_no_unit(self):
         self.marker().write_text("someone else's hold\n")
@@ -753,7 +790,7 @@ class DeployTests(DeployFixture, unittest.TestCase):
                  "--overlay", str(self.overlay_path),
                  "--record-dir", str(self.record_dir)],
                 run_factory=Interrupted)
-        self.assertEqual(code, 130)
+        self.assertEqual(code, 1)
         document = json.loads(output.getvalue())
         self.assertEqual(document["error"]["kind"], "interrupted")
 
@@ -847,6 +884,17 @@ class HoldPersistenceTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="crq-hold-")
         self.addCleanup(self.temp.cleanup)
         self.hold = rb.Hold(Path(self.temp.name))
+
+    def test_ownership_distinguishes_unreadable_from_not_owned(self):
+        self.hold.acquire()
+        self.assertIs(self.hold.ownership(), True)
+        with mock.patch.object(Path, "read_bytes", side_effect=PermissionError(13, "denied")):
+            self.assertIsNone(self.hold.ownership())
+            self.assertFalse(self.hold.owns())
+        self.hold.path.write_bytes(b"foreign\n")
+        self.assertIs(self.hold.ownership(), False)
+        self.hold.path.unlink()
+        self.assertIs(self.hold.ownership(), False)
 
     def test_fragment_token_demands_recovery_and_keeps_the_marker(self):
         # Only a fragment of the token lands before storage gives up, so the

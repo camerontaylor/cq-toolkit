@@ -162,6 +162,9 @@ async function captureFile({ root, rootPath, rel, bundleDir, sourcePrefix = '' }
     return { ...base, state: 'unsupported', reason: 'not UTF-8 text; left unbundled' };
   const scanned = scanEvidenceText(text);
   const stored = scanned.redactionCount ? Buffer.from(scanned.text, 'utf8') : raw;
+  // Redaction can lengthen the text; a file stored over the cap would restore as unavailable.
+  if (stored.length > MAX_FILE_BYTES)
+    return { ...base, state: 'unsupported', reason: 'sanitized evidence exceeds 8 MiB size cap' };
   const pointer = ['files', root, ...rel.split('/')].join('/');
   try {
     await mkdir(dirname(resolve(bundleDir, pointer)), { recursive: true, mode: 0o700 });
@@ -345,8 +348,30 @@ async function resolveStored(bundleDir, entry) {
   if (!inside(await realpath(resolve(bundleDir)), real))
     return { state: 'unavailable', reason: 'bundle pointer escapes the bundle' };
   let bytes;
+  let handle;
   try {
-    bytes = await readFile(real);
+    // Capture caps stored files at 8 MiB; a swapped-in larger file must be refused without
+    // allocating it. Check the size on one handle and read at most the cap plus one byte.
+    handle = await open(real, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const { size } = await handle.stat();
+    if (size > MAX_FILE_BYTES)
+      return { state: 'unavailable', reason: 'stored file exceeds the 8 MiB size cap' };
+    // Read in bounded chunks until EOF or the cap is crossed: a full buffer sized from the
+    // earlier stat() does not establish EOF if the file grew after it.
+    const chunks = [];
+    let length = 0;
+    const chunk = Buffer.alloc(64 * 1024);
+    while (length <= MAX_FILE_BYTES) {
+      // One byte past the cap is enough to detect growth; never read further.
+      const readLength = Math.min(chunk.length, MAX_FILE_BYTES + 1 - length);
+      const { bytesRead } = await handle.read(chunk, 0, readLength, null);
+      if (!bytesRead) break;
+      chunks.push(Buffer.from(chunk.subarray(0, bytesRead)));
+      length += bytesRead;
+    }
+    if (length > MAX_FILE_BYTES)
+      return { state: 'unavailable', reason: 'stored file exceeds the 8 MiB size cap' };
+    bytes = Buffer.concat(chunks, length);
   } catch (error) {
     return {
       state: 'unavailable',
@@ -355,6 +380,10 @@ async function resolveStored(bundleDir, entry) {
           ? 'the bundle pointer is absent on disk'
           : `the bundle pointer could not be read: ${reasonOf(error)}`,
     };
+  } finally {
+    // A failed close must not discard the computed result or abort the restore; the
+    // checksum below still decides whether the bytes read are trusted.
+    await handle?.close().catch(() => undefined);
   }
   if (sha256(bytes) !== entry.sha256)
     return { state: 'unavailable', reason: 'stored checksum does not match the manifest' };

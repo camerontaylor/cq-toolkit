@@ -7,7 +7,8 @@
 // panel section states the window, and identical inputs render byte-identical
 // JSON and Markdown. Corrupt panel shapes are refused at render time, never
 // rendered as fabricated figures; untrusted text renders inert (line breaks
-// collapse, pipes escape); identical unknown rows across the two buckets
+// collapse, Markdown metacharacters including the backslash and HTML
+// delimiters escape); identical unknown rows across the two buckets
 // collapse. The window is a caller-declared label: the renderer does not
 // verify the panels fall inside it. The CLI reads one explicit local input
 // artifact and writes the two reports beside it; no provider is called and no
@@ -123,9 +124,42 @@ export function renderMeasurementReport({
       throw new TypeError('renderMeasurementReport: identifiers must be numbers, strings or null');
     return String(value);
   };
-  /** Untrusted text renders inert in Markdown: line breaks collapse, pipes escape. */
+  /**
+   * Untrusted text renders inert in Markdown: line breaks collapse, and every
+   * structural metacharacter — the backslash itself, plus the code-span,
+   * emphasis, link/image, table and HTML delimiters — is backslash-escaped in
+   * one pass. Escaping the backslash in the same pass means an existing
+   * `\*`-style escape is escaped once, never re-read as an escape of its own,
+   * so `![evidence](remote.png)` stays literal text instead of becoming an
+   * image.
+   */
   const md = (text) =>
-    String(text).replaceAll('\r', ' ').replaceAll('\n', ' ').replaceAll('|', '\\|');
+    String(text)
+      .replaceAll('\r', ' ')
+      .replaceAll('\n', ' ')
+      .replace(/[\\`*_~[\]()!|<>&]/g, '\\$&');
+  /**
+   * A reference renders as a code span: code spans are literal, so no
+   * autolink can swallow inserted escapes and the text reads back verbatim.
+   * The fence is longer than any backtick run inside, padded when the text
+   * starts or ends with a backtick.
+   */
+  const lit = (text) => {
+    const flat = String(text).replaceAll('\r', ' ').replaceAll('\n', ' ');
+    const runs = flat.match(/`+/g) ?? [];
+    const longest = runs.reduce((max, run) => Math.max(max, run.length), 0);
+    const fence = '`'.repeat(longest + 1);
+    // CommonMark strips one space from each end of a code span, so pad when
+    // the text starts or ends with a backtick, and compensate when it is
+    // space-bounded (and not all spaces) so the stripped text reads back.
+    const pad =
+      flat.startsWith('`') ||
+      flat.endsWith('`') ||
+      (flat.startsWith(' ') && flat.endsWith(' ') && flat.trim() !== '')
+        ? ' '
+        : '';
+    return `${fence}${pad}${flat}${pad}${fence}`;
+  };
   // A non-known total never renders its stored number: unavailable,
   // not-collected and n-a render unknown; partial keeps an explicitly
   // labelled subtotal.
@@ -157,13 +191,13 @@ export function renderMeasurementReport({
     '',
     '## Evidence artifacts',
     '',
-    ...(refs.length === 0 ? ['- (none)'] : refs.map((ref) => `- ${md(ref)}`)),
+    ...(refs.length === 0 ? ['- (none)'] : refs.map((ref) => `- ${lit(ref)}`)),
     '',
     '## Unknown evidence',
     '',
     ...(unknown.length === 0
       ? ['- (none)']
-      : unknown.map((row) => `- ${md(row.source)} — ${md(row.kind)}: ${md(row.reason)}`)),
+      : unknown.map((row) => `- ${lit(row.source)} — ${md(row.kind)}: ${md(row.reason)}`)),
     '',
     `## Fix panel — window ${span}`,
     '',
@@ -184,6 +218,18 @@ export function renderMeasurementReport({
           ([name, value]) =>
             `- usage channel ${md(name)}: ${stated(value, cost.availability[`/usageChannels/${escape(name)}`])}`,
         )),
+    // A torn channel with no value has no key in usageChannels, only its own
+    // availability entry; render it so the panel never lists the remaining
+    // channels as if they were complete. Names decode the producer's pointer
+    // escaping (~1 -> /, then ~0 -> ~).
+    ...Object.entries(cost.availability)
+      .filter(([pointer]) => pointer.startsWith('/usageChannels/'))
+      .map(([pointer, record]) => ({
+        name: pointer.slice('/usageChannels/'.length).replaceAll('~1', '/').replaceAll('~0', '~'),
+        record,
+      }))
+      .filter(({ name }) => !Object.hasOwn(cost.usageChannels, name))
+      .map(({ name, record }) => `- usage channel ${md(name)}: ${stated(null, record)}`),
     `- attempt wall (ms): ${stated(cost.attemptWallMs, cost.availability['/attemptWallMs'])}`,
     `- run elapsed (ms): ${stated(cost.runElapsedMs, cost.availability['/runElapsedMs'])}`,
     `- modeled USD: ${stated(cost.modeledUsd, cost.availability['/modeledUsd'])}`,

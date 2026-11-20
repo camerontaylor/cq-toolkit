@@ -201,8 +201,14 @@ export const makeSubmit = (transport?: QueueTransport, beforeDispatch?: () => Pr
           await writeFile(path, JSON.stringify(record), { flag: 'wx', mode: 0o600 });
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-          const concurrent = JSON.parse(await readFile(path, 'utf8')) as { wire: unknown };
-          if (!isDeepStrictEqual(concurrent.wire, wire))
+          const concurrent = JSON.parse(await readFile(path, 'utf8')) as {
+            wire: unknown;
+            snapshotPolicy?: string;
+          };
+          if (
+            !isDeepStrictEqual(concurrent.wire, wire) ||
+            concurrent.snapshotPolicy !== snapshotPolicy
+          )
             throw new Error('requestId is already bound to different inputs');
         }
       }

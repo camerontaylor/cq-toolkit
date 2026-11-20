@@ -6,7 +6,8 @@ The route is deliberately narrow and offline:
 1. require a clean checkout whose HEAD is the requested full commit SHA and
    whose packageManager pin names a full pnpm version;
 2. run `pnpm install --frozen-lockfile --offline` with an isolated project
-   virtual store, then `pnpm rebuild fs-ext` and `pnpm run build`;
+   virtual store, then `pnpm rebuild fs-ext`, remove any stale `dist/` output
+   left by an earlier build in a reused checkout, and `pnpm run build`;
 3. deploy the production tree with `pnpm deploy --prod --offline`;
 4. re-check HEAD, the tracked tree and the lockfile digest;
 5. record provenance from the actual staging tree (source, lockfile, Node
@@ -21,6 +22,8 @@ records; a self-consistent manifest can be rewritten with the archive. This
 route does not switch a production unit or authorize a cutover.
 """
 import argparse
+import contextlib
+import fcntl
 import hashlib
 import importlib.util
 import json
@@ -242,8 +245,40 @@ def _check_unchanged(checkout, lockfile_sha, run=run_command):
         raise BuildError('build changed the lockfile')
 
 
+@contextlib.contextmanager
+def _exclusive_checkout(repo, run=run_command):
+    """Hold an exclusive advisory lock on one checkout for a whole build.
+
+    The lock file lives in the checkout's own Git directory (per worktree, from
+    `git rev-parse --absolute-git-dir`), so every build of the same checkout
+    contends on the same file whatever its environment (TMPDIR included), and
+    it never shows up in the tracked-tree check. A second build of the same
+    checkout fails fast instead of racing install, dist cleanup and compile.
+    """
+    git_dir = Path(_git(Path(repo).resolve(), 'rev-parse', '--absolute-git-dir', run=run))
+    if not git_dir.is_dir():
+        raise BuildError('cannot locate the Git directory of ' + str(repo))
+    lock_path = git_dir / 'crq-build.lock'
+    with open(lock_path, 'a') as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            raise BuildError('another build owns checkout ' + str(repo)) from error
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
 def build(repo, sha, staging, output, node='node', pnpm='pnpm',
           run=run_command, keep_staging=False):
+    with _exclusive_checkout(repo, run=run):
+        return _build_locked(repo, sha, staging, output, node=node, pnpm=pnpm,
+                             run=run, keep_staging=keep_staging)
+
+
+def _build_locked(repo, sha, staging, output, node='node', pnpm='pnpm',
+                  run=run_command, keep_staging=False):
     checkout = validate_checkout(repo, sha, run=run)
     env = build_env(node=node, pnpm=pnpm)
     versions = tool_versions(checkout['repo'], node=node, pnpm=pnpm, env=env, run=run)
@@ -271,6 +306,17 @@ def build(repo, sha, staging, output, node='node', pnpm='pnpm',
     compile_runner = [pnpm, 'run', 'build']
     run(install, cwd=checkout['repo'], env=env)
     run(rebuild, cwd=checkout['repo'], env=env)
+    stale_dist = checkout['repo'] / 'dist'
+    if stale_dist.exists() or stale_dist.is_symlink():
+        try:
+            if stale_dist.is_symlink() or not stale_dist.is_dir():
+                stale_dist.unlink()
+            else:
+                shutil.rmtree(stale_dist)
+        except OSError as error:
+            raise BuildError('cannot remove stale dist/: ' + str(error)) from error
+        if stale_dist.exists() or stale_dist.is_symlink():
+            raise BuildError('stale dist/ survived cleanup')
     run(compile_runner, cwd=checkout['repo'], env=env)
     deploy_command = deploy(checkout['repo'], staging, pnpm, env, run=run)
     if not staging.is_dir():

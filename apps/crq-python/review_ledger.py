@@ -23,6 +23,11 @@ SCHEMA = Path(__file__).resolve().parents[2] / "policy/review-ledger.schema.json
 
 IMPORT_BATCH_LIMIT = 64
 IMPORT_BATCH_BYTES = 4 * 1024 * 1024
+# Per-record bound enforced identically when publishing and when reading; the
+# reader checks each object's type and size with --batch-check before any blob
+# body is buffered.
+RECORD_BYTES = 1024 * 1024
+READ_GROUP_BYTES = 4 * 1024 * 1024
 
 
 def independent_import(value):
@@ -223,7 +228,7 @@ def validate(value):
             intervals(finding["intervals"])
             if finding["anchor_status"] == "verified" and (not finding["path"] or not finding["blob"] or not finding["intervals"]):
                 raise IntegrityError("verified finding requires exact anchor")
-        if p["outcome"] == "completed" and not creditable(value):
+        if p["outcome"] == "completed" and not report_producer(value) and not creditable(value):
             raise IntegrityError("completed review lacks authenticated scoped completion")
     elif value["event_type"] == "finding-event":
         evidence = p["evidence"]
@@ -351,21 +356,23 @@ def fsync_dir(directory):
 
 
 def durable_directory(directory):
-    """Create a directory tree and persist each new entry in its parent."""
+    """Create a directory tree and persist each entry above it in its parent."""
     directory = Path(directory)
-    created = []
+    missing = False
     probe = directory
     while probe.parent != probe and not probe.exists():
-        created.append(probe)
+        missing = True
         probe = probe.parent
-    if created:
+    if missing:
         directory.mkdir(parents=True, exist_ok=True)
-    # Sync every created entry, and the target's own entry even when it
-    # already exists: an earlier call (or another process) may have created it
-    # and stopped before its parent was synced.
-    for entry in created or [directory]:
-        if entry.parent != entry:
-            fsync_dir(entry.parent)
+    # Sync every entry from the target up to the filesystem root, not only the
+    # entries discovered as missing during this call: an earlier call (or
+    # another process) may have created an ancestor and stopped before its own
+    # entry was synced, so a retry must persist that ancestor's entry as well.
+    probe = directory
+    while probe.parent != probe:
+        fsync_dir(probe.parent)
+        probe = probe.parent
 
 
 def atomic(filename, data):
@@ -400,6 +407,10 @@ class ArtifactStore:
         if filename.exists():
             if filename.read_bytes() != data:
                 raise IntegrityError("artifact store corruption")
+            # Always persist the file's directory entry, also when the artifact
+            # already exists: a previous call may have replaced it and failed
+            # before this sync, and a retry must not skip it.
+            fsync_dir(filename.parent)
         else:
             atomic(filename, data)
         return {"sha256": ident, "location": str(filename)}
@@ -418,26 +429,31 @@ class ArtifactStore:
             raise IntegrityError("missing or corrupt retained artifact")
 
     def put_file(self, filename):
-        hasher = hashlib.sha256()
-        with Path(filename).open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                hasher.update(chunk)
-        ident = hasher.hexdigest()
-        destination = self.root / "sha256" / ident
-        durable_directory(destination.parent)
-        if not destination.exists():
-            temporary = None
-            try:
-                with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as stream:
-                    temporary = stream.name
-                    with Path(filename).open("rb") as source:
-                        shutil.copyfileobj(source, stream)
-                    stream.flush(); os.fsync(stream.fileno())
+        durable_directory(self.root / "sha256")
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=self.root / "sha256", delete=False) as stream:
+                temporary = stream.name
+                with Path(filename).open("rb") as source:
+                    shutil.copyfileobj(source, stream)
+                stream.flush(); os.fsync(stream.fileno())
+            # Hash the staged copy, never the source in a separate pass: the
+            # producer may replace the source between passes, and the bytes
+            # that get installed must land under the digest of themselves.
+            hasher = hashlib.sha256()
+            with open(temporary, "rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    hasher.update(chunk)
+            ident = hasher.hexdigest()
+            destination = self.root / "sha256" / ident
+            if destination.exists():
+                Path(temporary).unlink()
+            else:
                 os.replace(temporary, destination)
-                temporary = None
-            finally:
-                if temporary is not None:
-                    Path(temporary).unlink(missing_ok=True)
+            temporary = None
+        finally:
+            if temporary is not None:
+                Path(temporary).unlink(missing_ok=True)
         # Always persist the destination's directory entry, also when the
         # artifact already exists: a previous call may have replaced it and
         # failed before this sync, and a retry must not skip it.
@@ -537,10 +553,33 @@ class GitLedger:
             entries.append((commit, changes[i].decode(), fields[3].decode()))
             i += 1
         batches = {}
-        # Bound each plumbing response to a small group of records. Objects are
-        # addressed by immutable IDs from the raw diff, never caller path syntax.
-        for offset in range(0, len(entries), 64):
-            group = entries[offset:offset + 64]
+        # Objects are addressed by immutable IDs from the raw diff, never caller
+        # path syntax. Check each object's type and size without its body first,
+        # so an oversized record is rejected before any payload is buffered; then
+        # request bodies in groups bounded by record count and by total bytes.
+        sizes = {}
+        if entries:
+            check = self.git("cat-file", "--batch-check",
+                             input=("\n".join(e[2] for e in entries) + "\n").encode()).split(b"\n")
+            if len(check) != len(entries) + 1 or check[-1] != b"":
+                raise IntegrityError("unexpected ledger blob response")
+            for entry, row in zip(entries, check):
+                oid = entry[2]
+                fields = row.split()
+                if len(fields) != 3 or fields[:2] != [oid.encode(), b"blob"] or not fields[2].isdigit():
+                    raise IntegrityError("malformed ledger blob response")
+                size = int(fields[2])
+                if size > RECORD_BYTES:
+                    raise IntegrityError("ledger record exceeds validation bound")
+                sizes[oid] = size
+        offset = 0
+        while offset < len(entries):
+            group, total = [], 0
+            while offset < len(entries) and len(group) < 64:
+                size = sizes[entries[offset][2]]
+                if group and total + size > READ_GROUP_BYTES:
+                    break
+                group.append(entries[offset]); total += size; offset += 1
             raw = self.git("cat-file", "--batch", input=("\n".join(e[2] for e in group) + "\n").encode())
             cursor = 0
             for commit, filename, oid in group:
@@ -549,6 +588,8 @@ class GitLedger:
                 if end < 0 or len(fields) != 3 or fields[:2] != [oid.encode(), b"blob"] or not fields[2].isdigit():
                     raise IntegrityError("malformed ledger blob response")
                 size = int(fields[2]); cursor = end + 1
+                if size != sizes[oid]:
+                    raise IntegrityError("ledger blob size mismatch")
                 payload = raw[cursor:cursor + size]
                 cursor += size
                 if len(payload) != size or raw[cursor:cursor + 1] != b"\n":
@@ -621,7 +662,13 @@ class GitLedger:
                         if value["event_type"] == "finding-event":
                             deps = [p["review_id"], p["previous_event_id"]]
                         elif value["event_type"] == "import-result":
-                            deps = [p["review_id"], p["duplicate_id"]]
+                            # Mirror validate_sequence(): a credited import links
+                            # only its review, so a stray duplicate_id that is
+                            # absent from history cannot block publication.
+                            if p["result"] == "credited":
+                                deps = [p["review_id"]]
+                            else:
+                                deps = [p["review_id"], p["duplicate_id"]]
                         if all(d is None or d in available for d in deps):
                             ready.append(value)
                     if not ready:
@@ -635,7 +682,7 @@ class GitLedger:
                         outbox.acknowledge(value, ids)
                         continue
                     size = len(canonical(value))
-                    if size > 1024 * 1024:
+                    if size > RECORD_BYTES:
                         raise IntegrityError("ledger record exceeds validation bound")
                     kind = "import" if independent_import(value) else None
                     if initial_inventory_enrollment(value) and value["payload"]["job_id"] not in seen_jobs:

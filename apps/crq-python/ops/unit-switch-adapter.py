@@ -1322,7 +1322,13 @@ class GuestFixtureAdapter:
         os.kill(os.getpid(), signal.SIGKILL)
 
     def _maybe_pause(self, phase):
-        """Bounded guest-only pause after the durable mask reload."""
+        """Bounded guest-only pause after the durable mask reload.
+
+        The fence ends only when the harness removes the marker to report
+        that its observation callback returned; if the callback has not
+        completed within the bound the switch refuses instead of continuing
+        while evidence is still being collected.
+        """
         if not self.guest_only:
             return
         if os.environ.get("CRQ_PROOF_PAUSE_ON") != phase:
@@ -1339,9 +1345,15 @@ class GuestFixtureAdapter:
         seconds = max(0.0, min(float(self.pause_seconds), 30.0))
         deadline = self.clock() + seconds
         # The loop is bounded and does not swallow signals. The harness owns
-        # cleanup of the marker and the process.
+        # cleanup of the process and removes the marker only after its
+        # observation callback returns, so the fence never ends early.
         while self.clock() < deadline:
+            if not marker_path.exists():
+                return
             self.sleep(min(0.1, max(0.0, deadline - self.clock())))
+        if marker_path.exists():
+            self.refuse("proof pause observation callback did not complete "
+                        "within the fence bound")
 
 
 def main(argv=None):

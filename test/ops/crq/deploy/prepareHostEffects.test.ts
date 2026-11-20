@@ -539,7 +539,38 @@ describe('withTickLock lock loss', () => {
       mkdirp: async () => undefined,
       tryLock: async () => ({ release: async () => undefined, lost }),
     };
-    const work = withTickLock(lockFs, dir, () => new Promise<string>(() => lose()));
+    const work = withTickLock(
+      lockFs,
+      dir,
+      (signal) =>
+        new Promise<string>((_, reject) => {
+          signal?.addEventListener('abort', () => reject(new Error('aborted')));
+          lose();
+        }),
+    );
     await expect(work).rejects.toThrow('tick lock lost while held');
+  });
+
+  test('aborts the work and releases the lock only after the work settles', async () => {
+    const dir = fresh();
+    mkdirSync(join(dir, 'apps/crq-python'), { recursive: true });
+    let lose: () => void = () => undefined;
+    const lost = new Promise<void>((r) => (lose = r));
+    const events: string[] = [];
+    const lockFs = {
+      mkdirp: async () => undefined,
+      tryLock: async () => ({
+        release: async () => void events.push('release'),
+        lost,
+      }),
+    };
+    const work = withTickLock(lockFs, dir, async (signal) => {
+      lose();
+      await new Promise((r) => setTimeout(r, 20));
+      events.push(signal?.aborted ? 'saw-abort' : 'no-abort');
+      return 'done';
+    });
+    await expect(work).rejects.toThrow('tick lock lost while held');
+    expect(events).toEqual(['saw-abort', 'release']);
   });
 });

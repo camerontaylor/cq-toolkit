@@ -223,7 +223,7 @@ export class BlockingIOError extends Error {
 export async function withTickLock<T>(
   lockFs: FlockLockFs,
   root: string,
-  fn: () => Promise<T>,
+  fn: (signal?: AbortSignal) => Promise<T>,
 ): Promise<T> {
   const state = `${posixStr(root)}/${STATE_DIR}`;
   try {
@@ -235,10 +235,24 @@ export async function withTickLock<T>(
   if (handle === null) throw new BlockingIOError();
   try {
     if (handle.lost === undefined) return await fn();
-    const lostSignal = handle.lost.then(() => {
-      throw new Error(`tick lock lost while held: ${state}/tick.lock`);
-    });
-    return await Promise.race([fn(), lostSignal]);
+    // Losing the lock aborts the work and waits for it to settle before the
+    // lock is released and the loss is reported, so `fn` never keeps mutating
+    // after its caller has seen the failure.
+    const abort = new AbortController();
+    const lossMessage = `tick lock lost while held: ${state}/tick.lock`;
+    const work = fn(abort.signal).then(
+      (value) => ({ ok: true as const, value }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
+    const lost = handle.lost.then(() => 'lost' as const);
+    const first = await Promise.race([work, lost]);
+    if (first === 'lost') {
+      abort.abort(new Error(lossMessage));
+      await work;
+      throw new Error(lossMessage);
+    }
+    if (!first.ok) throw first.error;
+    return first.value;
   } finally {
     await handle.release();
   }

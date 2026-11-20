@@ -213,6 +213,42 @@ test('M7-many malformed evidence degrades to unknown without losing settlement',
   });
 });
 
+test('M7-many unmeasured dispatch settles as unknown, never a partial known total', async () => {
+  // The producer adds every dispatch's usage to `report.usage` even when the
+  // provider supplied no measurement, and records the unmeasured dispatch only
+  // in the report's own `usageSummary`. A numeric total from such a report is
+  // PARTIAL, not complete: treating it as known would refund the reservation
+  // and admit a later candidate while the real spend stays unrecorded. The leg
+  // therefore settles through the unknown-usage path — the reservation is
+  // retained unresolved at its full allocation, the sticky stop is set, and no
+  // sibling is admitted on the unrecorded spend.
+  const partial = {
+    ...report(),
+    usageSummary: { knownCount: 1, unknownCount: 1, unpricedCount: 0 },
+  };
+  const address = vi.fn(async () => ({ status: 'ok' as const, value: partial }));
+  const result = await makeReviewAddressMany({
+    coordinationRoot: coordinationRoot(),
+    isolate: async (root) => root,
+    gh,
+    address,
+  })(input);
+  expect(address).toHaveBeenCalledTimes(1);
+  expect(result.report?.accounting).toEqual({
+    limitTokens: 100,
+    observedTokens: 0,
+    heldTokens: 50,
+    unresolved: ['1'],
+    stop: 'unknown-usage',
+  });
+  // The public summary must not count the partial leg as fully measured either.
+  expect(result.report?.usageSummary).toEqual({
+    knownCount: 0,
+    unknownCount: 1,
+    unpricedCount: 1,
+  });
+});
+
 test('M7-many post-dispatch exit retains the envelope through a thrown settlement', async () => {
   // Leg 1 settles with measured usage; leg 2's settlement arithmetic leaves
   // the safe integer range and throws. The guard settles it as unknown with
@@ -262,6 +298,44 @@ test('M7-many clamp saturation at the safe integer bound', async () => {
     address,
   })(input);
   expect(result.report?.usageSummary.usage?.input).toBe(Number.MAX_SAFE_INTEGER);
+});
+
+test('M7-many unknown observation in the address report settles the leg as unknown', async () => {
+  // `report.usage` is an ADDITIVE total, so an unmeasured dispatch folds zero
+  // into it while `report.usageSummary` records that dispatch as unknown. The
+  // total alone would normalize as a KNOWN zero and release the reservation,
+  // admitting a later PR beyond the requested budget. An unknown observation in
+  // the summary forces the leg through the unknown-usage settlement path: its
+  // reservation is retained unresolved at full allocation, the sticky stop is
+  // set, and the sibling is never admitted.
+  const unmeasuredSibling = {
+    ...report(),
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    usageSummary: {
+      knownCount: 1,
+      unknownCount: 1,
+      unpricedCount: 1,
+    },
+  };
+  const address = vi.fn(async () => ({ status: 'ok' as const, value: unmeasuredSibling }));
+  const result = await makeReviewAddressMany({
+    coordinationRoot: coordinationRoot(),
+    isolate: async (root) => root,
+    gh,
+    address,
+  })({ ...input, pulls: [1, 2], maxTokens: 100, tokensPerPr: 100, concurrency: 1 });
+  expect(result.report?.accounting).toEqual({
+    limitTokens: 100,
+    observedTokens: 0,
+    heldTokens: 100,
+    unresolved: ['1'],
+    stop: 'unknown-usage',
+  });
+  // The stopped ledger admits nothing further: the second candidate is refused
+  // rather than admitted on a budget the unknown leg could still consume.
+  expect(result.status).toBe('budget-exhausted');
+  expect(address).toHaveBeenCalledTimes(1);
+  expect(result.report?.totals.notAdmitted).toBe(1);
 });
 
 test('M7-many report-less refusal carries a top-level usage summary', async () => {
