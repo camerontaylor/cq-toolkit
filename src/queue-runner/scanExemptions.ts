@@ -135,6 +135,10 @@ export function parseScanExemptions(text: string): ScanExemption[] {
   const entries: Record<string, string>[] = [];
   let current: Record<string, string> | null = null;
   let ignoring = false;
+  // Unrelated tables are skipped, but a malformed one still voids the file (as
+  // `tomllib` would): track header kinds and keys so duplicates fail closed.
+  const headerKinds = new Map<string, 'table' | 'array'>();
+  let ignoredKeys: Set<string> | null = null;
   for (const raw of text.split(/\r\n|\n/)) {
     const line = raw.trim();
     if (line === '' || line.startsWith('#')) continue;
@@ -142,6 +146,13 @@ export function parseScanExemptions(text: string): ScanExemption[] {
       const header = /^\[(\[)?\s*([A-Za-z0-9_-]+)\s*(\])?\](?:\s*#.*)?$/.exec(line);
       if (header === null || (header[1] === '[') !== (header[3] === ']'))
         throw new Error('invalid table header');
+      const name = header[2] as string;
+      const kind = header[1] === '[' ? 'array' : 'table';
+      const seen = headerKinds.get(name);
+      if (seen !== undefined && (seen !== kind || kind === 'table'))
+        throw new Error('duplicate table');
+      headerKinds.set(name, kind);
+      ignoredKeys = null;
       if (header[1] === '[' && header[2] === 'exempt') {
         current = {};
         ignoring = false;
@@ -151,6 +162,7 @@ export function parseScanExemptions(text: string): ScanExemption[] {
         if (header[2] === 'exempt') throw new Error('exempt is not an array of tables');
         current = null;
         ignoring = true;
+        ignoredKeys = new Set();
       }
       continue;
     }
@@ -159,7 +171,11 @@ export function parseScanExemptions(text: string): ScanExemption[] {
     const { value, rest } = parseString((pair[2] as string).trim());
     const tail = rest.trim();
     if (tail !== '' && !tail.startsWith('#')) throw new Error('invalid value');
-    if (ignoring) continue;
+    if (ignoring) {
+      if (ignoredKeys?.has(pair[1] as string) === true) throw new Error('duplicate key');
+      ignoredKeys?.add(pair[1] as string);
+      continue;
+    }
     if (current === null) throw new Error('key outside a table is not supported');
     if (Object.hasOwn(current, pair[1] as string)) throw new Error('duplicate key');
     current[pair[1] as string] = value;

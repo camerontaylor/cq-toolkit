@@ -364,8 +364,10 @@ export async function launch(
     };
     item.state = kind === LOCAL_REVIEW_KIND ? 'failed' : AUTHOR_FAILED;
     item.last_error = clip(`${kind} spawn failed (no retry): ${error.message}`, 300);
-    await fx.event('spawn_failed', { item: item.id, run: runId, error: clip(error.message, 200) });
+    // Persist the terminal state first: if the event write rejects, the queue
+    // must not stay at the `launch_pending` reservation with no child.
     await fx.saveQueue();
+    await fx.event('spawn_failed', { item: item.id, run: runId, error: clip(error.message, 200) });
     return runId;
   }
   run.pid = pid;

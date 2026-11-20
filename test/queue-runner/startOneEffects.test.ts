@@ -136,6 +136,14 @@ describe('bindStartOne', () => {
     expect(out.hasCoverage).toBe(false);
   });
 
+  it('preserves integers beyond the safe range in untouched fields', async () => {
+    const big = 9007199254740993n;
+    const doc = queueDoc([pending()]);
+    const withExtra = new JsonObject([...doc.entries, ['extension', JsonNumber.int(big)]]);
+    const out = await bindStartOne({ bundle: bundle([]) })(withExtra, ctx);
+    expect(out.queue.get('extension')).toEqual(JsonNumber.int(big));
+  });
+
   it('a dry run plans without launching or editing state', async () => {
     const calls: string[] = [];
     const out = await bindStartOne({ bundle: bundle(calls) })(queueDoc([pending()]), {

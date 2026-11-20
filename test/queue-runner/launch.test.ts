@@ -415,6 +415,22 @@ describe('launch: receipts, backfill, merged, author', () => {
     expect(h.events.map((e) => e.kind)).toEqual(['spawn_failed']);
   });
 
+  it('persists a terminal spawn failure before the event can reject', async () => {
+    const savesAtEvent: number[] = [];
+    const h: Harness = harness({
+      spawn: () => Promise.reject(new ReviewSpawnError('boom')),
+      event: () => {
+        savesAtEvent.push(h.calls.filter((c) => c === 'save').length);
+        return Promise.reject(new Error('event write failed'));
+      },
+    });
+    const lr = item({ kind: 'local-review', profile: { flags: [] } });
+    await expect(launch(h.queue, lr, plan(), h.fx)).rejects.toThrow('event write failed');
+    expect(lr.state).toBe('failed');
+    // The reservation save plus the terminal save, both before the event.
+    expect(savesAtEvent).toEqual([2]);
+  });
+
   it('a local-review spawn failure ends failed', async () => {
     const h = harness({ spawn: () => Promise.reject(new ReviewSpawnError('boom')) });
     const lr = item({ kind: 'local-review', profile: { flags: [] } });

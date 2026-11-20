@@ -57,6 +57,24 @@ describe('scan exemption parsing', () => {
   });
 });
 
+describe('malformed unrelated tables still void the file', () => {
+  const good = '[[exempt]]\npath = "a"\nrule = "generic-api-key"\nreason = "r"\n';
+  it.each([
+    ['a duplicate key', '[meta]\nk = "1"\nk = "2"\n'],
+    ['a repeated table header', '[meta]\nk = "1"\n[meta]\nj = "2"\n'],
+    ['a table redefined as an array', '[meta]\nk = "1"\n[[meta]]\nj = "2"\n'],
+  ])('%s', (_name, tail) => {
+    expect(loadScanExemptions(`${good}${tail}`).entries).toEqual([]);
+    expect(loadScanExemptions(`${good}${tail}`).error).toMatch(/^\.crq\/scan-exemptions\.toml: /);
+  });
+
+  it('repeated array-of-tables headers and distinct keys stay valid', () => {
+    const text = `${good}[[meta]]\nk = "1"\n[[meta]]\nk = "2"\n`;
+    expect(loadScanExemptions(text).error).toBeNull();
+    expect(loadScanExemptions(text).entries).toHaveLength(1);
+  });
+});
+
 describe('glob semantics (_glob_regex)', () => {
   const match = (pattern: string, path: string): boolean => globRegex(pattern).test(path);
   it('keeps * inside a segment and ** across segments', () => {

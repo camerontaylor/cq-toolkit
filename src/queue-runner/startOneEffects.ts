@@ -78,7 +78,8 @@ export function makeStartOneEffects(
 
 /**
  * `AdmitEnv.startOne`: run one selection over a plain copy of the queue and
- * hand back the edited queue. The int/float distinction of the JSON number
+ * hand back the edited queue. Integers beyond the safe range stay bigints so
+ * untouched extension fields survive the round trip. The int/float distinction of the JSON number
  * model survives only where `fromPlainJson` can see it: a float with an
  * integral value (`1.0`) returns as an int.
  */
@@ -86,7 +87,7 @@ export function bindStartOne(env: {
   bundle(queue: StartRecord): StartOneBundle;
 }): AdmitEnv['startOne'] {
   return async (queue, context) => {
-    const plain = toPlainJson(queue) as StartRecord;
+    const plain = toPlainJson(queue, { bigints: true }) as StartRecord;
     const log: string[] = [];
     const run: StartOneRun = {
       dry: context.dry,
