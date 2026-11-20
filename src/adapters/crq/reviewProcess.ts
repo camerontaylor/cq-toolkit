@@ -173,11 +173,17 @@ async function reapGroup(pgid: number, self: number, graceMs: number): Promise<v
   let members = await groupMembers(pgid, self);
   if (members.length === 0) return;
   signalAll(members, 'SIGTERM');
+  // Each poll spawns `ps`, so back off geometrically (100 ms doubling to a 2 s cap):
+  // a 60 s grace costs about 35 listings, not 600, while a quick exit is still seen fast.
   const wait = async (limitMs: number): Promise<void> => {
-    for (let waited = 0; waited < limitMs; waited += 100) {
-      await sleep(100);
+    let delay = 100;
+    for (let waited = 0; waited < limitMs;) {
+      const step = Math.min(delay, limitMs - waited);
+      await sleep(step);
+      waited += step;
       members = await groupMembers(pgid, self);
       if (members.length === 0) return;
+      delay = Math.min(delay * 2, 2000);
     }
   };
   await wait(graceMs);
