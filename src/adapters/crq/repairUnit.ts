@@ -98,14 +98,40 @@ export function fileRepairUnit(options: RepairUnitOptions): RepairUnit {
 /**
  * Effects of the repair unit that no source binds yet, by the Python function
  * that owns them. A future slice adds each as its own `file*` source.
+ *
+ * The drain orchestration (`runRepairDrain`, `drainItem`, `drainItems`,
+ * `runRepairWorker`) is ported and tested over `RepairDrainEffects`; the
+ * runner-disabled marker and `narrate` are the only two of its effects bound
+ * here (`PassGateEffects`). Everything below is a binding to supply before the
+ * drain can run for real; none activates anything by existing.
  */
 export const REPAIR_UNIT_MISSING_EFFECTS: readonly { name: string; python: string }[] = [
-  { name: 'DrainPassEffects.fetchClone', python: 'crq_repair.fetch_clone' },
-  { name: 'DrainPassEffects.triage', python: 'crq_repair.triage_phase' },
-  { name: 'DrainPassEffects.items', python: 'crq_repair.drain / drain_items ordering' },
-  { name: 'DrainPassEffects.halted', python: 'crq_repair.paused / blackout' },
+  { name: 'RepairDrainEffects.maxConcurrentItems', python: "config['repair'] / worker_limit" },
+  { name: 'RepairDrainEffects.dispatchPaused', python: 'crq_repair.dispatch_paused' },
+  { name: 'RepairDrainEffects.blocked', python: 'crq_repair.blocked (GLM peak blackout)' },
+  { name: 'RepairDrainEffects.fetchClone', python: 'crq_repair.fetch_clone' },
+  { name: 'RepairDrainEffects.triage', python: 'crq_repair.triage_phase' },
+  { name: 'RepairDrainEffects.inboxOrder', python: 'bounded.drain_order (state/repair/inbox)' },
+  { name: 'RepairDrainEffects.inboxItem', python: 'crq_repair.drain (inbox job file item)' },
   {
-    name: 'DrainPassEffects.drainItem',
-    python: 'crq_repair.drain_item (plan, run, harvest per job)',
+    name: 'RepairDrainEffects.readQueue',
+    python: 'crq_repair.drain / drain_item (state/queue.json)',
+  },
+  {
+    name: 'RepairDrainEffects.readBacklog',
+    python: 'crq_repair.hold_backfill_groups (state/repair/fix-pr-backlog.json)',
+  },
+  { name: 'RepairDrainEffects.classifyJob', python: 'bounded.drain_job (prose reason)' },
+  { name: 'RepairDrainEffects.unreadableResult', python: 'crq_repair.unreadable_result' },
+  { name: 'RepairDrainEffects.pending', python: 'crq_repair.pending' },
+  { name: 'RepairDrainEffects.markStale', python: 'crq_repair.mark_stale' },
+  {
+    name: 'RepairDrainEffects.processItem',
+    python: 'crq_repair.process_item (serial findings; recover_job)',
+  },
+  { name: 'RepairDrainEffects.withAdmissionLock', python: 'crq.cooldown_write (state/tick.lock)' },
+  {
+    name: 'RepairDrainEffects.startWorker',
+    python: 'crq_repair.drain_items (fork + private pipe; runs runRepairWorker)',
   },
 ];

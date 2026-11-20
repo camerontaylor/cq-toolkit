@@ -100,11 +100,22 @@ describe('fileRepairUnit', () => {
 
   it('lists the unbound drain effects', () => {
     expect(REPAIR_UNIT_MISSING_EFFECTS.map((e) => e.name)).toEqual([
-      'DrainPassEffects.fetchClone',
-      'DrainPassEffects.triage',
-      'DrainPassEffects.items',
-      'DrainPassEffects.halted',
-      'DrainPassEffects.drainItem',
+      'RepairDrainEffects.maxConcurrentItems',
+      'RepairDrainEffects.dispatchPaused',
+      'RepairDrainEffects.blocked',
+      'RepairDrainEffects.fetchClone',
+      'RepairDrainEffects.triage',
+      'RepairDrainEffects.inboxOrder',
+      'RepairDrainEffects.inboxItem',
+      'RepairDrainEffects.readQueue',
+      'RepairDrainEffects.readBacklog',
+      'RepairDrainEffects.classifyJob',
+      'RepairDrainEffects.unreadableResult',
+      'RepairDrainEffects.pending',
+      'RepairDrainEffects.markStale',
+      'RepairDrainEffects.processItem',
+      'RepairDrainEffects.withAdmissionLock',
+      'RepairDrainEffects.startWorker',
     ]);
   });
 });
