@@ -1683,6 +1683,16 @@ class AdapterTests(AdapterFixture):
         self.assertIsNone(adapter_mod._duration_seconds("5mins"))
         self.assertIsNone(adapter_mod._duration_seconds("5H"))
 
+    def test_duration_truncates_microseconds_and_refuses_a_zero_total(self):
+        # systemd truncates each component to whole microseconds; a total of
+        # zero is its "0" value, which disables the start timeout, so
+        # preflight must refuse it rather than read it as a duration.
+        self.assertIsNone(adapter_mod._duration_seconds("0"))
+        self.assertIsNone(adapter_mod._duration_seconds("0.1usec"))
+        self.assertEqual(adapter_mod._duration_seconds("3000000usec"), 3)
+        # Per-component truncation, then a sub-second total floors to 1s.
+        self.assertEqual(adapter_mod._duration_seconds("0.4s 0.4s"), 1)
+
     def test_saved_timeout_in_days_is_honored(self):
         recovery, snapshot = self._recovery_with_timeout_line("TimeoutStartSec=2d")
         self.fake.service_start_delay = 700
