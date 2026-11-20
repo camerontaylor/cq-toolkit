@@ -147,6 +147,98 @@ class ScanExemptionTest(unittest.TestCase):
         self.assertTrue(crq._glob_regex("**/tests.rs").match("tests.rs"))
         self.assertTrue(crq._glob_regex("a/**").match("a/b/c"))
 
+    def test_glob_globstar_bounded(self):
+        # Consecutive "**/" collapse, so the regex has one optional group.
+        rx = crq._glob_regex("**/**/x")
+        self.assertTrue(rx.match("x"))
+        self.assertTrue(rx.match("a/b/x"))
+        self.assertEqual(rx.pattern.count("(?:.*/)?"), 1)
+        # More globstars than the cap fail the whole file closed.
+        many = "/".join(["**"] * 8) + "/x.rs"
+        base = self.commit({crq.SCAN_EXEMPTIONS_PATH:
+                            f'[[exempt]]\npath="{many}"\nrule="generic-api-key"\nreason="r"\n'})
+        ex, err = crq.load_scan_exemptions(base, self.repo)
+        self.assertEqual(ex, [])
+        self.assertIn("**", err)
+
+    def test_non_utf8_exemption_file_fails_closed(self):
+        f = self.repo / crq.SCAN_EXEMPTIONS_PATH
+        f.parent.mkdir(parents=True)
+        f.write_bytes(b"\xff\xfe")
+        self.g("add", "-A")
+        self.g("commit", "-q", "-m", "bad bytes")
+        ex, err = crq.load_scan_exemptions(self.g("rev-parse", "HEAD"), self.repo)
+        self.assertEqual(ex, [])
+        self.assertIsNotNone(err)
+
+    def test_gitleaks_mapping_and_veto_with_stubbed_binary(self):
+        files = {SWARM: ["generic only", "generic plus provider"], "src/app.rs": ["generic elsewhere"]}
+        # Diff lines: 1-4 header/hunk of SWARM, 5-6 its lines; 7-10 second header, 11 its line.
+        report = [{"RuleID": "generic-api-key", "StartLine": 5},
+                  {"RuleID": "generic-api-key", "StartLine": 6},
+                  {"RuleID": "github-pat", "StartLine": 6},
+                  {"RuleID": "generic-api-key", "StartLine": 11}]
+
+        def fake_run(argv, **kw):
+            self.assertEqual(argv[0], "gitleaks")
+            Path(argv[argv.index("--report-path") + 1]).write_text(json.dumps(report))
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        exemptions = self.exemptions_from(EXEMPT_TOML)
+        with mock.patch.object(crq, "git", return_value=CORPUS), \
+             mock.patch.object(crq.shutil, "which", return_value="/stub/gitleaks"), \
+             mock.patch.object(crq, "run", side_effect=fake_run):
+            ok, res = crq.secret_scan_diff(diff_of(files), self.root / "scan.json",
+                                           classes=crq.UNIVERSAL_SCAN_CLASSES,
+                                           exemptions=exemptions)
+        self.assertFalse(ok)
+        self.assertEqual(res["exempted"]["gitleaks"],
+                         [{"rule": "generic-api-key", "diff_line": 5, "file": SWARM,
+                           "reason": "upstream redaction fixtures"}])
+        self.assertEqual(sorted((h["rule"], h["diff_line"], h["file"]) for h in res["gitleaks_hits"]),
+                         [("generic-api-key", 6, SWARM), ("generic-api-key", 11, "src/app.rs"),
+                          ("github-pat", 6, SWARM)])
+
+    # Projected scans (push/merged-current) read exemptions from the subject's
+    # base, never from the projection base.
+    def test_push_cannot_supply_its_own_exemptions_through_out_of_scope_paths(self):
+        pre = self.commit({"README.md": "x\n"})
+        secret = "API_KEY=" + "abcdefgh12345678"
+        tip = self.commit({"src/secret.rs": secret + "\n",
+                           crq.SCAN_EXEMPTIONS_PATH: '[[exempt]]\npath="src/**"\n'
+                           'rule="class:inline-secret-assignments"\nreason="mine"\n'}, "push")
+        # include=["src/**"]: only src/secret.rs is selected; the exemption file
+        # is out of scope, so the projection base keeps the pushed copy.
+        with mock.patch.object(crq, "CLONE", self.repo):
+            base, head = crq.build_current_projection(tip, ["src/secret.rs"], clone=self.repo)
+        self.assertTrue(crq.load_scan_exemptions(base, self.repo)[0], "precondition: the bug's input")
+        item = {"id": "push-x", "kind": crq.push_current.KIND, "state": "pending", "capture": {},
+                "subject": {"type": "push-range", "repo": "o/r", "base": pre, "head": tip}}
+        self.assertEqual(crq.exemption_base(item, self.repo), pre)
+        cfg = {"repo": "o/r", "clone": str(self.repo), "scan_extra_classes": []}
+        rule = [{"id": "class:inline-secret-assignments", "regex": "API_KEY="}]
+        with mock.patch.object(crq, "RUNS", self.root / "runs"), \
+             mock.patch.object(crq, "STATE", self.root / "state"), \
+             mock.patch.object(crq.repo_registry, "by_repo", return_value=cfg), \
+             mock.patch.object(crq, "denylist_rules", return_value=rule), \
+             mock.patch.object(crq.shutil, "which", return_value=None), \
+             mock.patch.object(crq, "save_queue"), mock.patch.object(crq, "event"), \
+             mock.patch.object(crq.review_receipt, "write_receipt", return_value="r"), \
+             mock.patch.object(crq, "make_worktree", side_effect=AssertionError("upload allowed")):
+            crq.launch({"items": [item], "starts": []}, item, {"base": base, "head": head})
+        self.assertEqual(item["state"], "blocked")
+        scan = json.loads(next((self.root / "runs").glob("*/secret-scan.json")).read_text())
+        self.assertEqual([h["file"] for h in scan["denylist_hits"]], ["src/secret.rs"])
+
+    def test_merged_current_reads_merge_first_parent(self):
+        parent = self.commit({"README.md": "x\n"})
+        merge = self.commit({crq.SCAN_EXEMPTIONS_PATH: EXEMPT_TOML}, "merge adds exemptions")
+        item = {"kind": crq.review_receipt.KIND, "subject": {"merge_sha": merge}}
+        self.assertEqual(crq.exemption_base(item, self.repo), parent)
+        self.assertEqual(crq.load_scan_exemptions(crq.exemption_base(item, self.repo), self.repo), ([], None))
+        root_only = {"kind": crq.review_receipt.KIND, "subject": {"merge_sha": self.g("rev-list", "--max-parents=0", "HEAD")}}
+        self.assertIsNone(crq.exemption_base(root_only, self.repo))
+
 
 if __name__ == "__main__":
     unittest.main()

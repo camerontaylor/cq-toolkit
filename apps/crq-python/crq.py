@@ -383,12 +383,20 @@ SCAN_EXEMPTIONS_PATH = ".crq/scan-exemptions.toml"
 EXEMPTIBLE_RULES = frozenset({"class:inline-secret-assignments", "generic-api-key"})
 
 
+MAX_GLOBSTARS = 2  # bounds regex backtracking; more fails the file closed
+
+
 def _glob_regex(pattern: str) -> "re.Pattern[str]":
+    if pattern.count("**") > MAX_GLOBSTARS:
+        raise ValueError(f"path has more than {MAX_GLOBSTARS} '**': {pattern}")
     out, i = [], 0
     while i < len(pattern):
         if pattern.startswith("**/", i):
+            # Consecutive "**/" segments match the same paths as one; collapsing
+            # them keeps (?:.*/)? from repeating into exponential backtracking.
+            while pattern.startswith("**/", i):
+                i += 3
             out.append("(?:.*/)?")
-            i += 3
         elif pattern.startswith("**", i):
             out.append(".*")
             i += 2
@@ -416,8 +424,10 @@ def load_scan_exemptions(base: Optional[str], clone: Optional[Path] = None) -> T
     # cat-file -s prints nothing to stdout when the path is absent on the base.
     if not git("cat-file", "-s", spec, check=False, cwd=clone).isdigit():
         return [], None
-    text = git("cat-file", "blob", spec, check=False, cwd=clone)
     try:
+        # Inside the try: a non-UTF-8 blob raises UnicodeDecodeError while
+        # decoding git's output, which must fail closed like a parse error.
+        text = git("cat-file", "blob", spec, check=False, cwd=clone)
         import tomllib
         doc = tomllib.loads(text)
         entries = []
@@ -431,6 +441,27 @@ def load_scan_exemptions(base: Optional[str], clone: Optional[Path] = None) -> T
         return entries, None
     except Exception as exc:  # noqa: BLE001 - any parse failure fails closed
         return [], f"{SCAN_EXEMPTIONS_PATH}: {exc}"
+
+
+def exemption_base(item: Dict[str, Any], clone: Optional[Path] = None) -> Optional[str]:
+    """The commit whose exemption file governs a projected (push/merged-current)
+    scan. Never the projection's own base: that is the reviewed tip minus only
+    the selected paths, so any out-of-scope change (repo include/exclude, split
+    overflow) would keep its reviewed copy of the exemption file as policy.
+    Push: the range's pre-push base. Merged-current: the merge's first parent.
+    None (no exemptions) when that commit cannot be resolved."""
+    subject = item.get("subject") or {}
+    if item.get("kind") == push_current.KIND:
+        spec = subject.get("base")
+    elif item.get("kind") == review_receipt.KIND and subject.get("merge_sha"):
+        spec = subject["merge_sha"] + "^1"
+    else:
+        return None
+    if not isinstance(spec, str) or not spec:
+        return None
+    # On failure rev-parse echoes the spec itself; only a full object id counts.
+    sha = git("rev-parse", spec, check=False, cwd=clone)
+    return sha if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha) else None
 
 
 def _exempt(exemptions, rule, path) -> Optional[str]:
@@ -2005,7 +2036,7 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
     if item["kind"] in (review_receipt.KIND, push_current.KIND):
         patch = git("diff", "--text", "--no-textconv", "--no-ext-diff", "--no-renames", "--no-color",
                     "--unified=0", plan["base"], plan["head"], cwd=repo_clone)
-        exemptions, exemption_error = load_scan_exemptions(plan["base"], repo_clone)
+        exemptions, exemption_error = load_scan_exemptions(exemption_base(item, repo_clone), repo_clone)
         ok, scan = secret_scan_diff(patch, rdir / "secret-scan.json", base=plan["base"], head=plan["head"],
                                     classes=scan_classes, exemptions=exemptions,
                                     exemption_error=exemption_error)
