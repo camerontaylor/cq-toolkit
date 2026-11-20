@@ -146,6 +146,21 @@ function repairRuns(item: Item): Rec {
   return dict(item.repair_runs, 'repair_runs');
 }
 
+/**
+ * `runs[run_id] = record`. Python dicts treat `__proto__` as an ordinary key, so
+ * every run id — `__proto__` included — must become an own enumerable property:
+ * a plain assignment would instead run the inherited `__proto__` accessor, drop
+ * the record, and hide it from the archive check's `Object.values`.
+ */
+function setRepairRun(runs: Rec, runId: string, record: Rec): void {
+  Object.defineProperty(runs, runId, {
+    value: record,
+    enumerable: true,
+    writable: true,
+    configurable: true,
+  });
+}
+
 /** `own_range`: `bool(commits) and set(commits) <= set(q.get('repair_own_commits', []))`. */
 async function ownRange(
   q: Queue,
@@ -357,7 +372,7 @@ export async function repairEnqueue(
     record.receipt_findings = receiptFindings.map((f) => receiptDigest(f)).sort();
     record.repair_findings = actionable.map((f) => receiptDigest(f)).sort();
   }
-  runs[runId] = record;
+  setRepairRun(runs, runId, record);
   return true;
 }
 
