@@ -272,6 +272,44 @@ describe('createStepFetch', () => {
     await transport.close();
   });
 
+  test('init.body undefined is "not set": the Request body is still sent', async () => {
+    let received = '';
+    const server = createServer((request: IncomingMessage, response: ServerResponse) => {
+      request.on('data', (chunk: Buffer) => (received += chunk.toString()));
+      request.on('end', () => response.end('sent'));
+    });
+    servers.push(server);
+    await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+    const { port } = server.address() as AddressInfo;
+    const request = new Request(`http://127.0.0.1:${String(port)}/v1/x`, {
+      method: 'POST',
+      body: 'orig',
+    });
+    const response = await within(
+      createStepFetch(1_000)(request, { body: undefined } as RequestInit),
+    );
+    expect(await response.text()).toBe('sent');
+    expect(received).toBe('orig');
+  });
+
+  test('init.body null is "not set": the Request body is still sent', async () => {
+    let received = '';
+    const server = createServer((request: IncomingMessage, response: ServerResponse) => {
+      request.on('data', (chunk: Buffer) => (received += chunk.toString()));
+      request.on('end', () => response.end('sent'));
+    });
+    servers.push(server);
+    await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+    const { port } = server.address() as AddressInfo;
+    const request = new Request(`http://127.0.0.1:${String(port)}/v1/x`, {
+      method: 'POST',
+      body: 'orig',
+    });
+    const response = await within(createStepFetch(1_000)(request, { body: null } as RequestInit));
+    expect(await response.text()).toBe('sent');
+    expect(received).toBe('orig');
+  });
+
   test('init.signal null means no signal: an aborted Request signal does not reject', async () => {
     const transport = new agents.MockAgent();
     transport.disableNetConnect();

@@ -114,9 +114,13 @@ export function createStepFetch(
           ...(needsBodyBuffer ? { body: await bufferBody(input, bufferSignal) } : {}),
         }
       : {};
+    // A nullish `init.body` means "not set" (native fetch keeps the Request's body), so it
+    // must not overwrite the buffered body in the spread below.
+    const { body: initBody, ...initRest } = (init ?? {}) as { body?: unknown };
     return undiciFetch(target, {
       ...fromRequest,
-      ...(init as Parameters<typeof undiciFetch>[1]),
+      ...initRest,
+      ...(initBody != null ? { body: initBody } : {}),
       dispatcher,
     } as Parameters<typeof undiciFetch>[1]) as unknown as Promise<Response>;
   };
