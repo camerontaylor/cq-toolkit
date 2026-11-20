@@ -273,11 +273,14 @@ export function blocked(repair: JsonValue, now: Date): boolean {
   const minutes = mapping(budget, 'repair.budget').get('wall_clock_min');
   const reach = timedeltaMicros(minutes === undefined ? JsonNumber.int(0) : minutes, 60_000_000);
   const at = microsOf(now);
+  // `blackout(now) or blackout(now + reach)`: `now + reach` is evaluated, and can overflow,
+  // only when the current window check is false.
+  if (blackoutAt(section, at)) return true;
   const later = at + reach;
   if (later < DATETIME_MIN_MICROS || later > DATETIME_MAX_MICROS) {
     throw shape('date value out of range');
   }
-  return blackoutAt(section, at) || blackoutAt(section, later);
+  return blackoutAt(section, later);
 }
 
 // ------------------------------------------------------------------ roles ---

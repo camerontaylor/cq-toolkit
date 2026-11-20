@@ -336,6 +336,47 @@ describe('blocked', () => {
     add('bool minutes', repair({ budget: { wall_clock_min: true } }), sgt(13, 59));
     add('false minutes', repair({ budget: { wall_clock_min: false } }), sgt(13, 59));
     add('negative minutes', repair({ budget: { wall_clock_min: -30 } }), sgt(14, 20));
+    // `now + reach` is only evaluated (and only overflows) when the current window misses.
+    add(
+      'far reach, now inside the window: true before the overflow',
+      repair({ budget: { wall_clock_min: 5000000000 } }),
+      sgt(15),
+    );
+    add(
+      'far reach, now outside the window: overflow raises',
+      repair({ budget: { wall_clock_min: 5000000000 } }),
+      sgt(12),
+    );
+    add(
+      'far reach, window disabled: overflow raises',
+      repair({ budget: { wall_clock_min: 5000000000 } }, { ...window, enabled: false }),
+      sgt(15),
+    );
+    add(
+      'far reach, no blackout: overflow raises',
+      { budget: { wall_clock_min: 5000000000 } },
+      sgt(15),
+    );
+    add(
+      'far negative reach, now inside: true',
+      repair({ budget: { wall_clock_min: -5000000000 } }),
+      sgt(15),
+    );
+    add(
+      'far negative reach, now outside: raises',
+      repair({ budget: { wall_clock_min: -5000000000 } }),
+      sgt(12),
+    );
+    add(
+      'largest timedelta reach, now inside',
+      repair({ budget: { wall_clock_min: 1439999999999 } }),
+      sgt(15),
+    );
+    add(
+      'past timedelta.max still raises first',
+      repair({ budget: { wall_clock_min: 1440000000001 } }),
+      sgt(15),
+    );
     add('huge minutes', repair({ budget: { wall_clock_min: 1e20 } }), sgt(15));
     add('string minutes raises', repair({ budget: { wall_clock_min: '60' } }), sgt(15));
     add('null minutes raises', repair({ budget: { wall_clock_min: null } }), sgt(15));
@@ -347,6 +388,12 @@ describe('blocked', () => {
     );
     add('repair not an object', [], sgt(15));
     await expectParity(cases);
+  });
+
+  it('returns true before range-checking a far-future reach', () => {
+    const far = repair({ budget: { wall_clock_min: 5_000_000_000 } });
+    expect(blocked(toJson(far), new Date('2026-11-23T07:00:00Z'))).toBe(true);
+    expect(() => blocked(toJson(far), new Date('2026-11-23T04:00:00Z'))).toThrow();
   });
 
   it('honours the suspended window exactly as configured', () => {
