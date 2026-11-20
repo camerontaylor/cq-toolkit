@@ -37,7 +37,12 @@ const decoder = new TextDecoder('utf-8', { fatal: true });
 const exists = (path: string): Promise<boolean> =>
   stat(path).then(
     () => true,
-    () => false,
+    (error: unknown): boolean => {
+      // False only for a confirmed-missing path (ENOENT) so absent results
+      // still read as absent; any other stat fault (EACCES, EIO, …) propagates.
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      throw error;
+    },
   );
 
 async function readJson(path: string): Promise<unknown> {
