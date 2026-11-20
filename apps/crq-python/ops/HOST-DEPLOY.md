@@ -188,7 +188,22 @@ the new deployment root with the old checkout kept inert, the legacy overlay,
 `.bak` removal and `dispatch_after_min` steps; do not run a first root move
 from this general sequence.
 
-1. Hold admission first, before stopping anything: claim the
+1. Serialize the whole procedure first, before any measurement: hold both
+   fencing locks with a nonblocking `flock`, stopping if either is busy —
+   `apps/crq-python/state/deploy.lock`, which any concurrent whole deploy
+   holds from before its own first measurement through its released health
+   window, and the shared `apps/crq-python/state/controller.lock`, which
+   every controller transaction (checkout deploy or rollback, a `--unit`
+   switch, recovery) holds through `Effects.controller_lock` while reading
+   neither `deploy.lock` nor the admission marker; without both claims a
+   concurrent deploy or controller transaction can move the checkout or
+   swap installed units under this procedure. Create the controller lock
+   mode 0600 and keep it 0600 (the live binding refuses a group- or
+   world-writable lock). Keep both locks through step 3's prepare, step
+   5's health observation and any rollback, and release neither when step
+   5 removes the runner-disabled marker: release them only after
+   acceptance, or after a completed rollback. Then hold admission,
+   before stopping anything: claim the
    `apps/crq-python/state/runner-disabled` marker with `O_EXCL` (for
    example `( set -o noclobber; printf 'held for owner handover\n' >
    apps/crq-python/state/runner-disabled )`), and stop if it already
@@ -261,7 +276,9 @@ from this general sequence.
    back, including after a failed health check in step 5 (which starts
    the units): repeat step 1 in full — keep the admission marker already claimed in
    step 1 (it is still held until step 5 removes it; claim it again, with
-   step 1's exclusive create, only if step 5 already released it), then stop every `crq-*.timer`/`.path` and the
+   step 1's exclusive create, only if step 5 already released it), keep both
+   step 1 locks held (step 5 removes only the marker, never a lock),
+   then stop every `crq-*.timer`/`.path` and the
    records service again (including the repair and backfill triggers if
    they were active), because the helper refuses active units; wait for
    every `crq-*.service` to reach inactive or failed, and drain owned
@@ -278,7 +295,8 @@ from this general sequence.
    `systemctl --user daemon-reload`; and only then restart as in
    step 5, restoring the units that were active before step 1.
 5. Verify and approve the recorded evidence (rendered config, unit
-   hashes, Git status), then remove the inert marker and start the
+   hashes, Git status), then remove the inert marker — releasing only
+   the admission claim, never either step 1 lock — and start the
    tick/watchdog timers and records service (and every other
    `crq-*.timer`/`.path` noted active in step 1, such as `crq-slot.timer`,
    `crq-publisher.path`/`.timer`, `crq-repair.timer`/`.path` and
@@ -289,7 +307,8 @@ from this general sequence.
    (prepare enables nothing); keep the original step 1 set for
    rollback; accept only after
    `last_tick` advances for two consecutive slots in the heartbeat
-   and summary. Do not finish this target by re-running
+   and summary, and only then release both step 1 locks. Do not
+   finish this target by re-running
    `deploy-runbook.py`: it refuses a target that is already the
    checked-out HEAD, and until the checkout moves, installing unit
    files changes neither Git tree, so the template-delta check refuses
