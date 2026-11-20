@@ -268,6 +268,22 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'provenance does not match'):
             host.artifact_identity(artifact, 'node:' + sha)
 
+    def test_render_service_text_follows_systemd_continuation_rules(self):
+        def render(body):
+            return host.render_service_text('u', '[Service]\n' + body, '/r', 'NEW')
+        # A comment between continued lines does not end the continuation.
+        self.assertEqual(
+            render('ExecStart=/a \\\n# note\n  --b\nEnvironment=X=1\n'),
+            '[Service]\nExecStart=NEW\nEnvironment=X=1\n')
+        # An escaped (even) trailing backslash run is not a continuation.
+        self.assertEqual(
+            render('ExecStart=/a \\\\\nRestart=always\n'),
+            '[Service]\nExecStart=NEW\nRestart=always\n')
+        # An odd run of three still continues.
+        self.assertEqual(
+            render('ExecStart=/a \\\\\\\n  --b\nRestart=always\n'),
+            '[Service]\nExecStart=NEW\nRestart=always\n')
+
     def test_single_unit_render_matches_render_units_for_all_services(self):
         sha = 'a' * 40
         artifact = self._node_artifact(sha)

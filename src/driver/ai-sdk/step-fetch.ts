@@ -76,13 +76,14 @@ export function createStepFetch(
       // replayable buffer before constructing the request; an explicit init
       // body still wins below, as in the fetch contract.
       const body =
-        baseRest.body === undefined && input.body !== null
-          ? await input.arrayBuffer()
-          : undefined;
+        baseRest.body === undefined && input.body !== null ? await input.arrayBuffer() : undefined;
       return undiciFetch(input.url, {
         method: input.method,
         headers: input.headers as unknown as UndiciInit['headers'],
         signal: (initSignal ?? input.signal) as UndiciInit['signal'],
+        // Keep the Request's redirect policy (`error`/`manual`); an explicit
+        // init redirect still wins through `baseRest`.
+        redirect: input.redirect,
         ...(input.body !== null ? { duplex: 'half' as const } : {}),
         ...(body !== undefined ? { body } : {}),
         ...baseRest,

@@ -138,6 +138,27 @@ describe('createStepFetch', () => {
     expect(seen).toEqual({ url: '/p', method: 'POST', header: '1', body: 'hello' });
   });
 
+  test('a native Request with redirect: error rejects a 302 and never reaches the target', async () => {
+    let targetHits = 0;
+    const target = createServer((_request: IncomingMessage, response: ServerResponse) => {
+      targetHits += 1;
+      response.end('target');
+    });
+    servers.push(target);
+    await new Promise<void>((done) => target.listen(0, '127.0.0.1', done));
+    const targetPort = (target.address() as AddressInfo).port;
+    const redirector = createServer((_request: IncomingMessage, response: ServerResponse) => {
+      response.writeHead(302, { location: `http://127.0.0.1:${String(targetPort)}/` });
+      response.end();
+    });
+    servers.push(redirector);
+    await new Promise<void>((done) => redirector.listen(0, '127.0.0.1', done));
+    const { port } = redirector.address() as AddressInfo;
+    const input = new Request(`http://127.0.0.1:${String(port)}/`, { redirect: 'error' });
+    await expect(createStepFetch(2_000, 0)(input)).rejects.toThrow();
+    expect(targetHits).toBe(0);
+  });
+
   test('aborting the original Request controller cancels the call when init passes signal: undefined', async () => {
     // `{ signal: undefined }` means "not supplied" in the fetch contract: the
     // unpacked Request's own signal must survive, not be erased by the spread
@@ -158,7 +179,9 @@ describe('createStepFetch', () => {
     const { port } = server.address() as AddressInfo;
     const controller = new AbortController();
     const request = new Request(`http://127.0.0.1:${String(port)}/`, { signal: controller.signal });
-    const pending = createStepFetch(60_000, 0)(request, { signal: undefined });
+    const pending = createStepFetch(60_000, 0)(request, {
+      signal: undefined,
+    } as unknown as RequestInit);
     await arrivedPromise;
     controller.abort();
     const failure = await pending.then(

@@ -8,7 +8,7 @@
  * Git runs through the bounded helper, so a snapshot or history call can never
  * outlive the forced command.
  */
-import { appendFile, mkdir, readFile, readdir } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, readFile, readdir, rename, rm, stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { JsonNumber, JsonObject as ObjectValue } from '../../policy/crq/jsonValue.js';
@@ -74,6 +74,36 @@ function sameRepo(left: string, right: string): boolean {
   return left.toLowerCase() === right.toLowerCase();
 }
 
+/** `repo_registry.SLUG`. */
+const REPO_SLUG = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/;
+/** `review_transport.CLONE_TIMEOUT_S`. */
+const CLONE_TIMEOUT_MS = 90_000;
+
+/**
+ * `repo_registry.manual_clone`: the on-demand clone path for a manual review
+ * of an unconfigured repository, keyed by identity; null for a malformed slug.
+ */
+export function manualClonePath(stateRoot: string, repo: string): string | null {
+  if (!REPO_SLUG.test(repo)) return null;
+  const [owner, name] = repo.toLowerCase().split('/') as [string, string];
+  return join(stateRoot, 'review-repos', owner, name);
+}
+
+/** `review_transport.clone_url`: the primary origin with the repository swapped in. */
+export function manualCloneUrl(primaryOrigin: string, primaryRepo: string, repo: string): string {
+  const at = primaryOrigin.toLowerCase().lastIndexOf(primaryRepo.toLowerCase());
+  if (at < 0) return `https://github.com/${repo}.git`;
+  return primaryOrigin.slice(0, at) + repo + primaryOrigin.slice(at + primaryRepo.length);
+}
+
+async function isDirectory(path: string): Promise<boolean> {
+  try {
+    return (await stat(path)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 /** Build the review effects and their Git kill switch. */
 export function createReviewEffects(options: ReviewEffectsOptions): ReviewEffectsBundle {
   const clock = options.now ?? (() => new Date());
@@ -104,8 +134,14 @@ export function createReviewEffects(options: ReviewEffectsOptions): ReviewEffect
       return clone;
     }
     const entry = repoEntry(repo);
-    const clone = entry?.get('clone');
-    if (entry === null || typeof clone !== 'string' || clone.length === 0) {
+    if (entry === null) {
+      // Any other well-formed repository resolves to its manual-review clone.
+      const manual = manualClonePath(state, repo);
+      if (manual === null) throw new ValueError('unconfigured review repository');
+      return manual;
+    }
+    const clone = entry.get('clone');
+    if (typeof clone !== 'string' || clone.length === 0) {
       throw new ValueError('unconfigured review repository');
     }
     return clone;
@@ -157,7 +193,43 @@ export function createReviewEffects(options: ReviewEffectsOptions): ReviewEffect
       if (sha256Hex(bytes) !== receiptId) throw new ValueError('receipt digest mismatch');
       return new Uint8Array(bytes);
     },
-    isConfiguredRepo: (repo) => sameRepo(repo, options.repo) || repoEntry(repo) !== null,
+    async provisionRepo(repo) {
+      if (sameRepo(repo, options.repo) || repoEntry(repo) !== null) return true;
+      const path = manualClonePath(state, repo);
+      if (path === null) return false;
+      if (await isDirectory(join(path, '.git'))) return true;
+      const primary = cloneFor(options.repo);
+      const origin = await gitCall(pool, primary, ['remote', 'get-url', 'origin']);
+      if (origin.code !== 0) return false;
+      const url = manualCloneUrl(
+        new TextDecoder().decode(origin.stdout).trim(),
+        options.repo,
+        repo,
+      );
+      // A unique scratch directory under `.tmp`, outside the owner/name
+      // namespace (a slug never starts with a dot), so a failed clone can
+      // never collide with or delete another repository's clone.
+      const scratchRoot = join(state, 'review-repos', '.tmp');
+      await mkdir(scratchRoot, { recursive: true });
+      const scratch = await mkdtemp(join(scratchRoot, 'clone-'));
+      const partial = join(scratch, 'clone');
+      try {
+        const result = await gitCall(
+          pool,
+          scratch,
+          ['clone', '--quiet', '--no-checkout', url, partial],
+          { timeoutMs: CLONE_TIMEOUT_MS, transportConfig: true },
+        );
+        if (result.code !== 0) return false;
+        await mkdir(join(path, '..'), { recursive: true });
+        await rename(partial, path);
+      } catch {
+        return false;
+      } finally {
+        await rm(scratch, { recursive: true, force: true });
+      }
+      return true;
+    },
     async hasCommit(repo, commit) {
       const clone = cloneFor(repo);
       const result = await gitCall(pool, clone, ['cat-file', '-e', `${commit}^{commit}`]);
@@ -174,15 +246,16 @@ export function createReviewEffects(options: ReviewEffectsOptions): ReviewEffect
     },
     async installSnapshot(repo, snapshot, binding) {
       const configured = repoEntry(repo);
-      const scanClasses =
-        configured === null
-          ? undefined
-          : [
-              ...UNIVERSAL_SCAN_CLASSES,
-              ...arrayOrEmpty(configured.get('scan_extra_classes')).filter(
-                (value): value is string => typeof value === 'string' && value.length > 0,
-              ),
-            ];
+      // The primary keeps its publish classes (undefined); a configured repo
+      // adds its extras; a manual-review repo scans the universal set only.
+      const scanClasses = sameRepo(repo, options.repo)
+        ? undefined
+        : [
+            ...UNIVERSAL_SCAN_CLASSES,
+            ...arrayOrEmpty(configured?.get('scan_extra_classes')).filter(
+              (value): value is string => typeof value === 'string' && value.length > 0,
+            ),
+          ];
       await installAuthorSnapshot({
         pool,
         clone: cloneFor(repo),

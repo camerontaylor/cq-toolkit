@@ -404,7 +404,7 @@ describe('analyze.init over a solution-style reference graph (real tsc build)', 
         // Build mode must NOT force --noEmit onto the graph: each referenced
         // project's own emit settings govern (the lib's composite declaration
         // emit is what the app's dependency edge reads).
-        expect(check?.command.args).toEqual(['-b', '--pretty', 'false']);
+        expect(check?.command.args).toEqual(['--build', '--pretty', 'false']);
         if (check === undefined) return;
         // The dependency edge no longer triggers TS6310: the detected check's
         // exact arguments over the real compiler exit 0 with no failures —

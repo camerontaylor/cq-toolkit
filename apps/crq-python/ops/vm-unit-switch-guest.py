@@ -552,18 +552,55 @@ def check_preserved_expected(expected_state, label):
             "record_count": len(records())}
 
 
+COMPLETIONS_READ_ATTEMPTS = 5
+COMPLETIONS_RETRY_SECONDS = 0.2
+
+
 def completions():
+    """Parse the completion log; retry while an unterminated final line may still be appending.
+
+    A line that fails to parse is only retried when it is the final line and the file lacks a
+    trailing newline (a write in flight). Anything else, or a persistent partial line, raises:
+    a partial line is never accepted as complete evidence.
+    """
     if not COMPLETIONS.exists():
         return []
-    entries = []
-    for number, line in enumerate(COMPLETIONS.read_text().splitlines(), 1):
-        if not line.strip():
-            continue
-        try:
-            entries.append(json.loads(line))
-        except ValueError as exc:
-            raise RuntimeError("completion log line %d is not JSON" % number) from exc
-    return entries
+    for attempt in range(COMPLETIONS_READ_ATTEMPTS):
+        text = COMPLETIONS.read_text()
+        lines = text.splitlines()
+        entries = []
+        partial_tail = False
+        for number, line in enumerate(lines, 1):
+            if not line.strip():
+                continue
+            try:
+                entries.append(json.loads(line))
+            except ValueError as exc:
+                if number == len(lines) and not text.endswith("\n"):
+                    partial_tail = True
+                    break
+                raise RuntimeError(
+                    "completion log line %d is not JSON" % number) from exc
+        if entries and text.strip() and not text.endswith("\n"):
+            # Valid JSON without its newline is still an unfinished append.
+            partial_tail = True
+        if not partial_tail:
+            return entries
+        if attempt + 1 < COMPLETIONS_READ_ATTEMPTS:
+            time.sleep(COMPLETIONS_RETRY_SECONDS)
+    raise RuntimeError("completion log line %d is not JSON" % len(lines))
+
+
+def wait_unit_exited(timeout=30):
+    """Wait until no fixture invocation is running, so the completion log is final."""
+    deadline = time.monotonic() + timeout
+    while True:
+        state = show(UNIT, ["ActiveState"]).get("ActiveState", "")
+        if state not in ("active", "activating", "deactivating", "reloading"):
+            return
+        require(time.monotonic() < deadline,
+                "fixture unit still running after %ds" % timeout)
+        time.sleep(0.2)
 
 
 def metadata_state():
@@ -774,7 +811,19 @@ def completion_baseline(entries):
             "invocations": set(item.get("invocation") for item in entries)}
 
 
-def validate_completed(record, runtime, prior, baseline):
+def completion_logged(item, log_entries):
+    """Journal completion evidence must match a real fixture log entry."""
+    return any(isinstance(entry, dict)
+               and type(entry.get("sequence")) is int
+               and entry.get("sequence") == item.get("sequence")
+               and entry.get("invocation") == item.get("invocation")
+               and entry.get("unit") == UNIT
+               and entry.get("runtime") == item.get("runtime")
+               and entry.get("success") is True
+               for entry in log_entries)
+
+
+def validate_completed(record, runtime, prior, baseline, log_entries):
     require(record["outcome"] == "completed", "switch did not complete")
     require(record["phase"] == "activation_pending",
             "completed record has the wrong phase")
@@ -799,6 +848,8 @@ def validate_completed(record, runtime, prior, baseline):
     require(all(item.get("unit") == UNIT and item.get("runtime") == runtime
                 and item.get("success") is True for item in evidence),
             "completion evidence is not unit/runtime bound")
+    require(all(completion_logged(item, log_entries) for item in evidence),
+            "completion evidence is absent from the fixture completion log")
     return {"sequences": sequences, "invocations": invocations}
 
 
@@ -819,10 +870,12 @@ def switch_phase(runtime):
     require(len(created) == 1, "switch did not create exactly one journal record")
     record_path = created[0]
     record = json.loads(record_path.read_text())
-    evidence = validate_completed(record, runtime, prior, completions_baseline)
     systemctl("stop", TIMER)
     systemctl("reset-failed", TIMER)
     time.sleep(0.5)
+    wait_unit_exited()
+    evidence = validate_completed(record, runtime, prior, completions_baseline,
+                                  completions())
     after = snapshot()
     check_preserved("switch")
     installed = load_adapter().GuestFixtureAdapter(
@@ -990,14 +1043,16 @@ def drain_harvest_phase(args):
         require(len(node_records) == 1,
                 "harvest switch did not create exactly one record")
         node_record = json.loads(node_records[0].read_text())
-        node_completions = validate_completed(
-            node_record, NODE_RUNTIME, PYTHON_RUNTIME, node_baseline)
         # Match switch_phase's post-switch baseline: the proof adapter starts
         # the fixture timer on release, and the timer must not keep triggering
         # a oneshot service into the next phase's snapshot.
         systemctl("stop", TIMER)
         systemctl("reset-failed", TIMER)
         time.sleep(0.5)
+        wait_unit_exited()
+        node_completions = validate_completed(
+            node_record, NODE_RUNTIME, PYTHON_RUNTIME, node_baseline,
+            completions())
         require(sha256_file(STATE / "queue.json") == seeded_sha,
                 "harvest switch changed the seeded queue bytes")
         require(process_state(unrelated.pid)["alive"],
@@ -1015,11 +1070,13 @@ def drain_harvest_phase(args):
         require(len(python_records) == 1,
                 "harvest return switch did not create exactly one record")
         python_record = json.loads(python_records[0].read_text())
-        python_completions = validate_completed(
-            python_record, PYTHON_RUNTIME, NODE_RUNTIME, python_baseline)
         systemctl("stop", TIMER)
         systemctl("reset-failed", TIMER)
         time.sleep(0.5)
+        wait_unit_exited()
+        python_completions = validate_completed(
+            python_record, PYTHON_RUNTIME, NODE_RUNTIME, python_baseline,
+            completions())
         require(sha256_file(STATE / "queue.json") == seeded_sha,
                 "harvest return switch changed the seeded queue bytes")
         require(process_state(unrelated.pid)["alive"],
@@ -1864,6 +1921,18 @@ def wait_until(predicate, timeout, label):
     raise RuntimeError(label + " did not settle within the bound")
 
 
+def waiting_start_job(line, unit_name):
+    """True for the exact canonical row ``ID unit start waiting``.
+
+    The queue and fence controls must sample the target unit's ``start`` job
+    while it is still ``waiting``: a ``running`` row means the blocker already
+    exited, and cancelling it would not prove cancellation of a waiting job.
+    """
+    fields = line.split()
+    return (len(fields) == 4 and fields[1] == unit_name
+            and fields[2] == "start" and fields[3] == "waiting")
+
+
 def wait_job(unit_name, timeout=15):
     deadline = time.time() + timeout
     last = None
@@ -1874,11 +1943,11 @@ def wait_job(unit_name, timeout=15):
                 "list-jobs failed; job identity is unknown")
         last = observation["lines"]
         for line in last:
-            if unit_name in line:
+            if waiting_start_job(line, unit_name):
                 return line, observation
         time.sleep(0.1)
-    raise RuntimeError("no job for " + unit_name + " within the bound: "
-                       + json.dumps(last)[:300])
+    raise RuntimeError("no waiting start job for " + unit_name
+                       + " within the bound: " + json.dumps(last)[:300])
 
 
 def wait_job_absent(unit_name, timeout=15):
@@ -1951,7 +2020,7 @@ def write_repair_fixture():
         "\n"
         "[Service]\n"
         "Type=oneshot\n"
-        "ExecStart=/bin/sleep 10\n"), 0o644)
+        "ExecStart=/bin/sleep 60\n"), 0o644)
     REPAIR_TIMER_WANTS.symlink_to("../" + REPAIR_TIMER)
     REPAIR_PATH_WANTS.symlink_to("../" + REPAIR_PATH_UNIT)
     REPAIR_COMPLETIONS.unlink(missing_ok=True)
@@ -2095,11 +2164,16 @@ def activators_positive(args):
     target = systemctl("start", "--no-block", REPAIR_UNIT)
     require(target["rc"] == 0, "queued target failed to queue")
     job_line, job_observation = wait_job(REPAIR_UNIT, timeout=15)
-    require("start" in job_line, "queued target job is not a start job")
-    require(REPAIR_UNIT in job_line, "queued target job names another unit")
+    require(waiting_start_job(job_line, REPAIR_UNIT),
+            "queued target job is not the exact waiting start job")
     queued_entries = read_completions(REPAIR_COMPLETIONS)
     require(len(queued_entries) == len(before),
             "queued target completed before cancellation")
+    recheck = jobs_observation()
+    require(not recheck["command"]["timeout"] and recheck["command"]["rc"] == 0
+            and any(waiting_start_job(line, REPAIR_UNIT)
+                    for line in recheck["lines"]),
+            "queued target is no longer the waiting start job before the stop")
     stopped = systemctl("stop", REPAIR_UNIT)
     require(not stopped["timeout"] and stopped["rc"] == 0,
             "queued target stop did not complete")
@@ -2297,8 +2371,8 @@ def activators_fence(args):
     target = systemctl("start", "--no-block", REPAIR_UNIT)
     require(target["rc"] == 0, "failed to queue the target before the fence")
     job_line, job_observation = wait_job(REPAIR_UNIT, timeout=15)
-    require("start" in job_line and REPAIR_UNIT in job_line,
-            "queued target job is not the expected start job")
+    require(waiting_start_job(job_line, REPAIR_UNIT),
+            "fence seed job is not the exact waiting start job")
     started = systemctl("start", REPAIR_TIMER)
     require(started["rc"] == 0, "failed to start timer before the fence")
     require(show(REPAIR_TIMER, ["ActiveState"])["ActiveState"] == "active",

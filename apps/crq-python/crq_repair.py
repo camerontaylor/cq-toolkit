@@ -306,8 +306,15 @@ def dispatch(config, role, job, wt, directory, judge=False):
                 return {'stop': 'budget', 'summary': 'repair dispatch wall-clock deadline reached'}
             if attempted and not judge:
                 retain(wt, baseline, previous_directory)
+                # Each fallback fixer gets a fresh checkout at the baseline:
+                # -x also removes ignored files, and the doubled -f removes
+                # nested git repositories, so nothing a throttled fixer left
+                # behind can reach the next provider's context. retain() above
+                # archived only the tracked and non-ignored state; ignored
+                # output (build output, caches, nested repos) is deliberately
+                # discarded here and is not recoverable.
                 git(wt, 'reset', '--hard', baseline)
-                git(wt, 'clean', '-fd')
+                git(wt, 'clean', '-ffdx')
                 # Retention and reset consume the shared budget; remeasure so
                 # the next provider never starts past the deadline.
                 remaining = deadline - time.monotonic()
@@ -697,6 +704,23 @@ def pending(job_id):
     return bool(prior.get('retry_after'))
 
 
+def unreadable_result(job_id):
+    """True when a result.json exists but cannot be classified as pending.
+
+    The malformed artifact stays untouched for tick reconciliation (harvest
+    fails the prepared run and retains it), so the drain only excludes the job
+    from dispatch: a missing result is still pending and a valid terminal
+    result is still not."""
+    path = ROOT / 'state/repair' / job_id / 'result.json'
+    if not path.exists():
+        return False
+    try:
+        json.loads(path.read_text()).get('retry_after')
+    except (OSError, ValueError, AttributeError):
+        return True
+    return False
+
+
 def mark_stale(job, reason):
     """Terminal, spend-free verdict for a superseded job; the tick harvests it."""
     directory = ROOT / 'state/repair' / job['job']
@@ -830,7 +854,9 @@ def triage_phase(config, dry_run=False):
     result = phase(inbox, repo, tip, judge, transport, utc(),
                    maximum=max(0, min(6, int(options.get('max_per_pass', 6)))),
                    seconds=config['repair']['budget']['wall_clock_min'] * 60, dry_run=dry_run)
-    write_result(result)
+    # The report returns to the caller instead of stdout: the drain folds it
+    # into its one JSON result and the triage dry-run returns it directly, so
+    # stdout stays exactly one JSON artifact.
     if result.get('stopped') == 'rate-limit' and not dry_run:
         rate_limit_pause(result.get('stop_report', {}), 'backfill-triage')
     return result
@@ -838,7 +864,8 @@ def triage_phase(config, dry_run=False):
 
 def drain(config):
     """Automatic inbox drain, minor-only items after critical/major items. Items use isolated worker
-    processes up to the configured cap, with serial findings within each item."""
+    processes up to the configured cap, with serial findings within each item. Returns the pass's
+    JSON result (None only on a narrated early exit), with the triage report inside when triage ran."""
     # Admission before any fetch, triage or write: a handed-over host must cost
     # nothing and leave the queue and inbox exactly as they are.
     if runner_disabled():
@@ -861,12 +888,18 @@ def drain(config):
     if runner_disabled():
         narrate(RUNNER_DISABLED + ': pass stopped before triage')
         return
+    triage = None
     try:
-        triage_phase(config)
+        triage = triage_phase(config)
     except Exception as exc:  # backfill deferral must not starve existing repair jobs
         narrate('backfill triage deferred: ' + str(exc)[:300])
+    # The triage report rides inside the drain's result, so a caller parsing
+    # stdout reads exactly one JSON value even on a pass triage ran.
+    result = {'status': 'drained'}
+    if triage is not None:
+        result['triage'] = triage
     if dispatch_paused(config):
-        return
+        return result
     groups = {}  # item -> job ids, items in order of their oldest job
     for job_id in drain_order(ROOT):
         try:
@@ -879,15 +912,86 @@ def drain(config):
     # Classify against the queue before sorting. Skipped, stale and completed
     # jobs cannot promote a minor-only item; stable sort retains inbox order.
     queue_path = ROOT / 'state/queue.json'
-    queue = json.loads(queue_path.read_text()) if queue_path.exists() else {'items': []}
+    try:
+        queue = json.loads(queue_path.read_text()) if queue_path.exists() else {'items': []}
+    except (OSError, ValueError) as exc:
+        # An unreadable queue must still yield one JSON artifact: keep the
+        # completed triage report and let run() exit non-zero. Nothing was
+        # admitted yet, so no spend or child is left behind.
+        narrate('repair drain failed: queue unreadable: ' + str(exc)[:300])
+        result['status'] = 'error'
+        result['error'] = 'queue unreadable: ' + str(exc)[:300]
+        return result
+    groups = hold_backfill_groups(groups, lambda item: dispatchable(config, queue, item, groups[item]))
     def priority(item):
         for job_id in groups[item]:
             status, job, _ = drain_job(ROOT, config, queue, job_id)
             if (status == 'run' and job and job.get('item') == item
-                    and pending(job_id) and job.get('finding', {}).get('severity') in ('critical', 'major')):
+                    and not unreadable_result(job_id) and pending(job_id)
+                    and job.get('finding', {}).get('severity') in ('critical', 'major')):
                 return 0
         return 1
     drain_items(config, groups, sorted(groups, key=priority))
+    return result
+
+
+BACKLOG_MAX_AGE_SECONDS = 3600
+
+
+def dispatchable(config, queue, item, job_ids):
+    """True when drain_item would run a repair for this group: a job of the
+    item is runnable, pending and has a readable result. Only such a group can
+    spend repair and end in a fix PR. Any other group costs drain_item nothing
+    but its existing stale marking and skip narration."""
+    for job_id in job_ids:
+        status, job, _ = drain_job(ROOT, config, queue, job_id)
+        if (status == 'run' and job and job.get('item') == item
+                and not unreadable_result(job_id) and pending(job_id)):
+            return True
+    return False
+
+
+def hold_backfill_groups(groups, dispatchable=lambda item: True):
+    """Soft budget: admit at most limit - open dispatchable backfill groups.
+
+    The drain never calls GitHub, so it reads the file the tick wrote. A
+    missing, unreadable, stale or future-dated file, or open >= limit, holds
+    every backfill group. Otherwise the first limit - open dispatchable groups
+    in drain order run; a group that cannot dispatch (its jobs are published,
+    completed or not queued) takes no slot and passes to drain_item as before.
+    Held jobs stay in the inbox: nothing is failed, marked stale or counted
+    as a retry.
+    """
+    held = [item for item in groups if item.startswith('backfill-finding-')]
+    if not held:
+        return groups
+    open_count = limit = None
+    try:
+        data = json.loads((ROOT / 'state/repair/fix-pr-backlog.json').read_text())
+        at = dt.datetime.fromisoformat(str(data['at']).replace('Z', '+00:00'))
+        age = (dt.datetime.now(dt.timezone.utc) - at).total_seconds()
+        if (0 <= age <= BACKLOG_MAX_AGE_SECONDS and not isinstance(data['open'], bool)
+                and not isinstance(data['limit'], bool)
+                and isinstance(data['open'], int) and isinstance(data['limit'], int)):
+            open_count, limit = data['open'], data['limit']
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    budget = 0 if open_count is None else max(0, limit - open_count)
+    if budget == 0:
+        drop = set(held)
+    else:
+        drop = set()
+        for item in held:
+            if not dispatchable(item):
+                continue
+            if budget > 0:
+                budget -= 1
+            else:
+                drop.add(item)
+    if drop:
+        shown = 'unknown' if open_count is None else str(open_count)
+        narrate('backfill repair held: %s open fix PRs, limit %s' % (shown, 'unknown' if limit is None else limit))
+    return {item: ids for item, ids in groups.items() if item not in drop}
 
 
 def drain_item(config, item, job_ids):
@@ -906,6 +1010,7 @@ def drain_item(config, item, job_ids):
     queue_path = ROOT / 'state/queue.json'
     queue = json.loads(queue_path.read_text()) if queue_path.exists() else {'items': []}
     jobs = []
+    held_runs = set()
     for job_id in job_ids:
         status, job, reason = drain_job(ROOT, config, queue, job_id)
         if not job or job.get('item') != item:
@@ -916,9 +1021,23 @@ def drain_item(config, item, job_ids):
             # It stays in its run's chain; process() returns the terminal result.
             jobs.append(job)
         elif status == 'run':
-            jobs.append(job)
+            if unreadable_result(job_id):
+                # A malformed result.json is tick-owned evidence: harvest fails
+                # the run and retains it, so the job is excluded from dispatch
+                # here and in the priority sort instead of crashing the drain.
+                narrate('repair ' + job_id + ': skipped: unreadable result.json preserved for tick reconciliation')
+                # Later jobs of the same run chain from this job's possible
+                # FIXED commit; without its result they would start from a
+                # base that omits it, so the whole run waits for the tick.
+                held_runs.add(job['run'])
+            else:
+                jobs.append(job)
         elif reason != 'no queued tick-owned repair run':
             narrate('repair ' + job_id + ': skipped: ' + reason)
+    if held_runs:
+        for run in sorted(held_runs):
+            narrate('repair run ' + str(run) + ': held: a job has an unreadable result.json')
+        jobs = [job for job in jobs if job['run'] not in held_runs]
     if not any(pending(job['job']) for job in jobs):
         return None
     try:
@@ -1297,8 +1416,7 @@ class UsageArgumentParser(argparse.ArgumentParser):
 
 
 def run(argv=None):
-    """Returns (exit code, result). A None result means the path already wrote its own JSON
-    (the triage dry-run does so only when triage ran; otherwise it reports no-triage)."""
+    """Returns (exit code, result); main writes result as the one JSON artifact on stdout."""
     parser = UsageArgumentParser(description='Drain eligible repair inbox jobs, or repair one explicit prepared job')
     parser.add_argument('--triage-dry-run', action='store_true')
     parser.add_argument('--job')
@@ -1321,20 +1439,24 @@ def run(argv=None):
     if repair.get('enabled') is not True or not isinstance(authorization, str) or not authorization.strip():
         narrate('repair dispatch disabled: repair.enabled and a recorded spend_authorization are required')
         return 0, {'status': 'disabled', 'reason': 'repair.enabled and a recorded spend_authorization are required'}
-    if args.triage_dry_run:
-        # triage_phase writes its own JSON result only when triage is configured
-        # and has a rollout; otherwise it returns None having written nothing,
-        # so report that explicitly to keep one JSON artifact per exit.
-        if triage_phase(config, dry_run=True) is None:
-            return 0, {'status': 'no-triage', 'reason': 'triage is not configured for this state directory'}
-        return 0, None
     selectors = (args.job, args.source_sha, args.finding_sha256)
     # Presence is separate from validity: an empty string was still supplied,
     # so it must select a job and refuse, never fall through to the drain.
     supplied = tuple(selector is not None for selector in selectors)
+    # Mode validation before any alternate path runs: recovery selects exactly
+    # one job and never combines with --job/--source-sha/--finding-sha256 or
+    # --triage-dry-run.
     if args.recover_job and (any(supplied) or args.triage_dry_run):
         narrate('repair dispatch refused: recovery selects exactly one job')
         return 2, {'status': 'refused', 'reason': 'recovery selects exactly one job'}
+    if args.triage_dry_run:
+        # triage_phase returns its report only when triage is configured and
+        # has a rollout; otherwise it returns None having written nothing, so
+        # report that explicitly to keep one JSON artifact per exit.
+        result = triage_phase(config, dry_run=True)
+        if result is None:
+            return 0, {'status': 'no-triage', 'reason': 'triage is not configured for this state directory'}
+        return 0, result
     if any(supplied) and not all(supplied):
         narrate('repair dispatch refused: --job, --source-sha and --finding-sha256 go together')
         return 2, {'status': 'refused', 'reason': '--job, --source-sha and --finding-sha256 go together'}
@@ -1391,8 +1513,10 @@ def run(argv=None):
             job = select_job(ROOT, config, args.job, args.source_sha, args.finding_sha256)
             outcome = process_item(config, [job])
             return 0, explicit_job_result(job, outcome)
-        drain(config)
-        return 0, {'status': 'drained'}
+        result = drain(config)
+        if result is None:
+            result = {'status': 'drained'}
+        return (1 if result.get('status') == 'error' else 0), result
 
 
 
