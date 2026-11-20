@@ -179,10 +179,13 @@ def run(python_root: Path, runner_root: Path, plan_path: Path, scratch: Path,
     ts = plan["value"]
     queue = runner_root / "state" / "queue.json"
     before = _digest(queue)
-    if ts.get("disabled") is True:
-        marker = (runner_root / "state" / "runner-disabled").exists()
-        diffs = [] if marker else [{"field": "disabled", "python": False, "ts": True}]
-        return {"identical": not diffs, "disabled": True, "diffs": diffs}
+    # The marker is read before anything else and compared with the TypeScript
+    # result either way: Python's tick() returns at once when it exists.
+    marker = (runner_root / "state" / "runner-disabled").exists()
+    ts_disabled = ts.get("disabled") is True
+    if marker or ts_disabled:
+        diffs = [] if marker == ts_disabled else [{"field": "disabled", "python": marker, "ts": ts_disabled}]
+        return {"identical": not diffs, "disabled": marker, "diffs": diffs}
     if not str(ts.get("reason", "")).startswith(INCOMPLETE_PREFIX):
         raise CompareError("plan reason is not the incomplete-effects reason")
     now = _pinned_now(plan)

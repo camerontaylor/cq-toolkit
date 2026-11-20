@@ -90,6 +90,14 @@ class TickShadowCompareTest(unittest.TestCase):
         result = compare.run(HERE, off, plan_file(self.tmp, value), self.tmp / "s3")
         self.assertFalse(result["identical"])
 
+    def test_disabled_marker_is_compared_even_when_the_ts_plan_is_a_normal_pass(self):
+        root = runner_root(self.tmp, {"items": [], "starts": []}, disabled=True)
+        value = {"complete": False, "reason": compare.INCOMPLETE_PREFIX + "a"}
+        mutations = [{"operation": "set", "target": "queue.json#/last_tick", "value": NOW}]
+        result = compare.run(HERE, root, plan_file(self.tmp, value, mutations), self.tmp / "s4")
+        self.assertFalse(result["identical"])
+        self.assertEqual(result["diffs"], [{"field": "disabled", "python": True, "ts": False}])
+
     def test_refuses_unusable_plans(self):
         root = runner_root(self.tmp, {"items": []})
         cases = [
