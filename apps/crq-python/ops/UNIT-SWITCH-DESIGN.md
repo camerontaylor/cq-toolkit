@@ -104,7 +104,7 @@ snapshot payload's schema-version-1 top-level keys and state shapes. It is
 composed by `unit-switch-factory.py` and reached through the controller CLI's
 `switch` verb. It has no live systemd binding in these offline tests. Node
 refuses unless the verified artifact's declaration lists the selected command;
-`watchdog` and `publish` are the declared commands.
+`watchdog`, `publish` and `backfill inventory` are the declared commands.
 
 The slice remains fail-closed: discovery must enumerate the exact declared
 paths and units and report no foreign activators; unknown entries, missing
