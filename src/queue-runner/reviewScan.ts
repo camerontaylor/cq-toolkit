@@ -152,10 +152,15 @@ export async function scanReviewDiff(
   }));
   const hits: { rule: string; file: string; diff_line: number }[] = [];
   const exempted: { rule: string; file: string; diff_line: number; reason: string }[] = [];
-  const candidates: { path: string; text: string; diffLine: number }[] = [];
+  const candidates: { path: string; text: string; diffLine: number; physicalLine: number }[] = [];
   let path: string | null = null;
   let header = false;
-  const handle = (line: string, diffLine: number, physicalStart = true): void => {
+  const handle = (
+    line: string,
+    diffLine: number,
+    physicalLine: number,
+    physicalStart = true,
+  ): void => {
     // Only a physical patch record can open a file section; a logical fragment
     // split out of hunk content (after U+2028 and similar) is never a header.
     if (physicalStart && line.startsWith('diff --git')) {
@@ -180,14 +185,23 @@ export async function scanReviewDiff(
     if (!line || (line[0] !== '+' && line[0] !== '-') || path === null) return;
     const currentPath = path;
     if (allow.some((p) => p.test(currentPath))) return;
-    candidates.push({ path, text: line.slice(1), diffLine });
+    candidates.push({ path, text: line.slice(1), diffLine, physicalLine });
   };
   // Headers and file labels split on physical patch lines only, so a literal
   // U+2028 in a filename survives until the path is decoded and matched.
-  // Hunk content keeps Python splitlines and its line numbering.
-  const physical = input.diff.split(/\r\n|\n|\r/);
+  // Hunk content keeps Python splitlines and its line numbering; gitleaks
+  // attribution keeps the LF-only physical number its reports carry.
+  const physical = input.diff.split(/(\r\n|\n|\r)/);
   let counted = 0;
-  for (const [index, piece] of physical.entries()) {
+  let physicalLine = 1;
+  for (const [index, token] of physical.entries()) {
+    // Odd positions hold the separator that closed the previous physical
+    // piece; a lone CR does not end the LF line gitleaks keeps counting.
+    if (index % 2 === 1) {
+      if (token !== '\r') physicalLine += 1;
+      continue;
+    }
+    const piece = token;
     const last = index === physical.length - 1;
     // A piece ending in a logical-only terminator (U+2028, ...) keeps the empty
     // logical line its physical LF then closes, as Python splitlines does.
@@ -196,14 +210,14 @@ export async function scanReviewDiff(
         ? 0
         : pythonSplitlines(`${piece}\n`).length - pythonSplitlines(piece).length;
     if (header || piece.startsWith('diff --git')) {
-      handle(piece, counted + 1);
+      handle(piece, counted + 1, physicalLine);
       counted += (piece === '' ? (last ? 0 : 1) : pythonSplitlines(piece).length) + gap;
     } else if (piece === '') {
       if (!last) counted += 1;
     } else {
       for (const [at, sub] of pythonSplitlines(piece).entries()) {
         counted += 1;
-        handle(sub, counted, at === 0);
+        handle(sub, counted, physicalLine, at === 0);
       }
       counted += gap;
     }
@@ -269,8 +283,11 @@ export async function scanReviewDiff(
           .filter((hit) => hit.rule === null || !EXEMPTIBLE_RULES.has(hit.rule))
           .map((hit) => hit.diff_line),
       );
+      // Gitleaks reports LF-only line numbers, so attribution maps a reported
+      // line to the file of the physical record starting there, however many
+      // extra lines Python numbering counted inside earlier records.
       const linePaths = new Map<number, string>();
-      for (const candidate of candidates) linePaths.set(candidate.diffLine, candidate.path);
+      for (const candidate of candidates) linePaths.set(candidate.physicalLine, candidate.path);
       glHits = [];
       for (const found of reported) {
         const file = found.diff_line === null ? undefined : linePaths.get(found.diff_line);

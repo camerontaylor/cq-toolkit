@@ -195,6 +195,32 @@ describe('review scan evidence', () => {
       denylist_hits: [{ file: 'x', diff_line: 7 }],
     });
   });
+  it('maps a gitleaks hit to the file of the LF line gitleaks reports', async () => {
+    const f = fixture();
+    // The trailing U+2028 makes Python numbering one line ahead of the LF-only
+    // line gitleaks reports, so attribution must use the physical LF number.
+    const text = [
+      'diff --git a/x b/x',
+      '--- a/x',
+      '+++ b/x',
+      '@@ -1 +1 @@',
+      '+one\u2028',
+      'diff --git a/y b/y',
+      '--- a/y',
+      '+++ b/y',
+      '@@ -1 +1 @@',
+      '+MARK1 y',
+    ].join('\n');
+    f.effects.gitleaks = async () => ({
+      kind: 'exit',
+      code: 0,
+      hits: [{ rule: 'generic-api-key', diffLine: 10 }],
+    });
+    await scanReviewDiff({ ...input, diff: text }, f.effects);
+    expect(JSON.parse(f.report())).toMatchObject({
+      gitleaks_hits: [{ rule: 'generic-api-key', diff_line: 10, file: 'y' }],
+    });
+  });
   it('never reads a logical fragment of hunk content as a diff header', async () => {
     const f = fixture();
     const text = [

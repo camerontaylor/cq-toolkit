@@ -605,7 +605,13 @@ def secret_scan_diff(diff: str, out: Path, *, base=None, head=None,
     line_paths: Dict[int, str] = {}
     path = None
     in_header = False  # ---/+++ are headers only between "diff --git" and the first "@@"
-    for n, line in enumerate(diff.splitlines(), 1):
+    # Gitleaks numbers its stdin lines by LF only, so attribution keys are the
+    # physical LF line each record starts on, not the splitlines() number the
+    # denylist hits report (the two diverge on U+2028 and friends).
+    lf_lines = 0
+    for n, (line, kept) in enumerate(zip(diff.splitlines(), diff.splitlines(True)), 1):
+        physical = lf_lines + 1
+        lf_lines += kept.count("\n")
         if line.startswith("diff --git"):
             m = re.match(r"diff --git a/(.*) b/(.*)$", line)
             path = m.group(2) if m else None
@@ -624,7 +630,7 @@ def secret_scan_diff(diff: str, out: Path, *, base=None, head=None,
             continue
         if any(a.search(path) for a in allow):
             continue
-        line_paths[n] = path
+        line_paths[physical] = path
         content = line[1:]
         for rid, rx, prx in compiled:
             if prx is not None and not prx.search(path):
