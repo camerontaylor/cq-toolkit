@@ -23,7 +23,7 @@ import {
   recordHas,
   type JsonRecordLike,
 } from './queueDoc.js';
-import { ReconcileRefused, normalizeInterval } from './reconcileCheckpoint.js';
+import { normalizeInterval, ReconcileRefused } from './reconcileCheckpoint.js';
 
 /** `queue_transport.MAX_BYTES`: one request or response frame, including the newline. */
 export const QUEUE_WIRE_BYTES = 8192;

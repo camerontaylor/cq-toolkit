@@ -8,6 +8,7 @@ are 4, so a non-primary repo defaults to 3 (between ordinary and backfill).
 """
 import datetime as dt
 import fnmatch
+from pathlib import Path
 import re
 from typing import Any, Dict, List, Optional
 
@@ -131,6 +132,21 @@ def by_repo(repos: List[Dict[str, Any]], slug: Optional[str]) -> Optional[Dict[s
         return None
     wanted = _identity(slug)
     return next((cfg for cfg in repos if _identity(cfg["repo"]) == wanted), None)
+
+
+def manual_clone(state: Any, slug: Any) -> Optional[Path]:
+    """On-demand clone path for a manual review of an unconfigured repository.
+
+    Manual review covers any repository (docs/multi-repo.md): a repo without a
+    configured entry is cloned under the runner state, keyed by its identity so
+    alternate spellings share one clone. It is never added to `repos`, so
+    automatic discovery stays limited to the configured list. None when the
+    slug is not a well-formed owner/name.
+    """
+    if not isinstance(slug, str) or not SLUG.fullmatch(slug):
+        return None
+    owner, name = _identity(slug).split("/")
+    return Path(state) / "review-repos" / owner / name
 
 
 def rank_for(item: Dict[str, Any], primary: str, repos: List[Dict[str, Any]]) -> Optional[int]:

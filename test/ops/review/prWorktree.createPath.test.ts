@@ -235,3 +235,36 @@ describe('PR-keyed branch labels', () => {
     }
   });
 });
+
+describe('create path unpushed-branch guard', () => {
+  test('an existing review label with unique commits and no holding tree refuses -B', async () => {
+    const repoRoot = await realTmpDir('cq-wt-unpushed-');
+    try {
+      const calls: string[][] = [];
+      const model = mkModel([{ path: `${REPO}`, branch: 'main', head: SHA_MAIN }], {
+        localBranches: { [LABEL]: { unique: 2 } },
+      });
+      await expect(
+        resolvePrWorktree(baseOpts(model, memRegistry(), { repoRoot, run: fakeGit(model, calls) })),
+      ).rejects.toThrow(/review branch .* holds commits not in the fetched PR head/);
+      expect(calls.some((args) => args.includes('add'))).toBe(false);
+    } finally {
+      await rm(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('an existing review label with no unique commits is reset by -B', async () => {
+    const repoRoot = await realTmpDir('cq-wt-unpushed-ok-');
+    try {
+      const model = mkModel([{ path: `${REPO}`, branch: 'main', head: SHA_MAIN }], {
+        localBranches: { [LABEL]: { unique: 0 } },
+      });
+      const result = await resolvePrWorktree(
+        baseOpts(model, memRegistry(), { repoRoot, run: fakeGit(model) }),
+      );
+      expect(result.reused).toBe(false);
+    } finally {
+      await rm(repoRoot, { recursive: true, force: true });
+    }
+  });
+});
