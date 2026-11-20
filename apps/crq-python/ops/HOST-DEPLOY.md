@@ -259,7 +259,9 @@ from this general sequence.
    Rollback is those saved definitions plus the same helper `switch`
    back to the prior SHA; no automatic rollback runs here. To roll
    back, including after a failed health check in step 5 (which starts
-   the units): repeat step 1 in full — claim the marker again first, then stop every `crq-*.timer`/`.path` and the
+   the units): repeat step 1 in full — keep the admission marker already claimed in
+   step 1 (it is still held until step 5 removes it; claim it again, with
+   step 1's exclusive create, only if step 5 already released it), then stop every `crq-*.timer`/`.path` and the
    records service again (including the repair and backfill triggers if
    they were active), because the helper refuses active units; wait for
    every `crq-*.service` to reach inactive or failed, and drain owned
@@ -280,7 +282,12 @@ from this general sequence.
    tick/watchdog timers and records service (and every other
    `crq-*.timer`/`.path` noted active in step 1, such as `crq-slot.timer`,
    `crq-publisher.path`/`.timer`, `crq-repair.timer`/`.path` and
-   `crq-backfill.timer`); accept only after
+   `crq-backfill.timer`) — but start only units the target still renders:
+   derive the owner-approved activation set from the step 4 template
+   comparison, skipping any unit the target removed and explicitly
+   enabling and starting any replacement for a renamed timer or path
+   (prepare enables nothing); keep the original step 1 set for
+   rollback; accept only after
    `last_tick` advances for two consecutive slots in the heartbeat
    and summary. Do not finish this target by re-running
    `deploy-runbook.py`: it refuses a target that is already the
