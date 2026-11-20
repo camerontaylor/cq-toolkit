@@ -1979,7 +1979,11 @@ def refuse_unfinished_transactions(effects, exclude=None):
     and a pending or unresolved unit transaction blocks checkout deploy/
     rollback. ``exclude`` names exactly the record the caller is about to
     recover, so a legitimate recovery does not block itself. Completed,
-    refused/no-change and completed/rolled-back unit history does not block.
+    refused/no-change and completed/rolled-back unit history that matches its
+    producer shape (a ``snapshot`` whose ``runtime`` equals ``prior_runtime``)
+    does not block; terminal history that fails that identity raises
+    ``Refused`` from ``_classify_record`` and blocks until the named record is
+    reconciled.
     A ``recovery_required`` record is never resolved from stored digests: those
     do not cover unit metadata, activation or live work. It remains unfinished
     (or unsupported legacy when its producer identity is incomplete). The guard
