@@ -45,6 +45,21 @@ describe('backfill usage context', () => {
     expect(failed.get('successful')).toBe(false);
     expect(failed.get('reflected_reservations')).toEqual([]);
   });
+  it('refuses an unhashable attempt_id as Python refuses a list or dict key', () => {
+    for (const attempt of ['["a"]', '{"a":1}']) {
+      expect(() =>
+        usageContext(
+          obj(`{"items":[{"attempt_id":${attempt}}],"backfill_reservations":{}}`),
+          usage,
+          [],
+          at,
+        ),
+      ).toThrow('attempt_id is unhashable');
+    }
+    // A scalar that is not a string is only a miss, never a refusal.
+    const miss = usageContext(obj('{"items":[{"attempt_id":7}]}'), usage, [], at);
+    expect((miss.get('backfill_usage') as JsonObject).get('successful')).toBe(true);
+  });
   it('refuses null reservation state and rounds fractional window at microsecond precision', () => {
     expect(() =>
       usageContext(obj('{"items":[],"backfill_reservations":null}'), usage, [], at),

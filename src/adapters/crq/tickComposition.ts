@@ -149,12 +149,6 @@ export const STAGED_GAPS: readonly TickGap[] = [
       'per-kind LaunchEffects and CoverageEffects (measureMerged, buildSynthetic, legacyOrigins) have no implementation',
   },
   {
-    id: 'usage-context',
-    phases: ['admit'],
-    python: 'backfill_runtime.usage_context in admit_available',
-    missing: 'bindAdmit never calls usageContext',
-  },
-  {
     id: 'review-child',
     phases: ['admit.startOne'],
     python: 'cmd_review_child, python3 crq.py _review <run_id> (crq.py:2202/:2150)',
