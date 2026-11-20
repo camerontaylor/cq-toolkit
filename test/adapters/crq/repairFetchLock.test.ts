@@ -154,6 +154,28 @@ describe('fileRepairFetchClone: the fetch call', () => {
     );
   });
 
+  it.skipIf(process.getuid?.() === 0)(
+    'names the clone for an unsearchable clone and git for an inaccessible git',
+    async () => {
+      const env = await fakeGit('exit 0');
+      const sealed = join(root, 'sealed');
+      await mkdir(sealed);
+      await chmod(sealed, 0o000);
+      try {
+        expect(await fileRepairFetchClone({ stateRoot, clone: sealed, env })()).toBe(
+          `clone fetch failed: [Errno 13] Permission denied: '${sealed}'`,
+        );
+      } finally {
+        await chmod(sealed, 0o755);
+      }
+      // Only `bin` on PATH: a non-executable `git` is otherwise skipped for a later one.
+      await chmod(join(bin, 'git'), 0o644);
+      expect(await fileRepairFetchClone({ stateRoot, clone, env: { PATH: bin } })()).toBe(
+        "clone fetch failed: [Errno 13] Permission denied: 'git'",
+      );
+    },
+  );
+
   it('turns an injected runner that throws into `clone fetch failed: <message>`', async () => {
     const fetch = fileRepairFetchClone({
       stateRoot,

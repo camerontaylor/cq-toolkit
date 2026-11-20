@@ -32,12 +32,16 @@
  * - the fetch child's stdin is `/dev/null` (Python inherits the daemon's);
  * - stderr is decoded as lossy UTF-8; Python's strict decode would instead
  *   surface a `UnicodeDecodeError` text. Both skip the pass;
+ * - a spawn failure names `git`, or the clone for an unsearchable clone
+ *   (EACCES with a failing `access(clone, X_OK)`). The one residual: an errno
+ *   `osErrorText` has no strerror for (EAGAIN from `execve`, say) renders Node's
+ *   own message, not Python's `[Errno 11] ...: 'git'`; both skip the pass;
  * - SIGTERM, then SIGKILL after 5 s, goes to the child's own process group, as
  *   `command()` does; the options expose the bounds only so tests can shrink
  *   them.
  */
 import { spawn } from 'node:child_process';
-import { statSync } from 'node:fs';
+import { accessSync, constants, statSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { JsonNumber, JsonObject, type JsonValue } from '../../policy/crq/jsonValue.js';
@@ -123,6 +127,23 @@ function timeoutText(timeoutMs: number): string {
   return `Command '${cmd}' timed out after ${String(timeoutMs / 1000)} seconds`;
 }
 
+/**
+ * The path Python's `OSError` names for a failed `Popen`. The child chdirs before
+ * it execs, so a clone that is a directory but not searchable raises EACCES
+ * naming the clone; every other failure names `git`. libuv reports both EACCES
+ * causes with the command name, so a failing `access(clone, X_OK)` is what tells
+ * them apart (the clone is checked first, as the child does).
+ */
+function spawnFailurePath(error: unknown, clone: string): string {
+  if ((error as NodeJS.ErrnoException | null)?.code !== 'EACCES') return 'git';
+  try {
+    accessSync(clone, constants.X_OK);
+    return 'git';
+  } catch {
+    return clone;
+  }
+}
+
 /** `command(['git', 'fetch', ...], cwd=clone, timeout=60)`. */
 function spawnFetch(
   options: Pick<RepairFetchCloneOptions, 'env' | 'fetchTimeoutMs' | 'termGraceMs'>,
@@ -167,7 +188,7 @@ function spawnFetch(
       child.once('error', (error) => {
         clearTimeout(timer);
         clearTimeout(killTimer);
-        reject(new Error(osErrorText(error, 'git')));
+        reject(new Error(osErrorText(error, spawnFailurePath(error, clone))));
       });
       child.once('close', (code) => {
         clearTimeout(timer);
