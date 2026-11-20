@@ -101,7 +101,13 @@ export interface FixRunReport {
         branch: string;
         sha: string;
       }
-    | { unit: string; task: string; outcome: FixTaskOutcome; gate: 'none'; reason: string }
+    | {
+        unit: string;
+        task: string;
+        outcome: FixTaskOutcome;
+        gate: import('../sweep/taskLoop.js').FailedAttemptGate;
+        reason: string;
+      }
   >;
   /** Every planned unit of work with its outcome, evidence and counters. */
   planned: PlannedTaskRow[];
