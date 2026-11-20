@@ -196,8 +196,20 @@ def fallback_roles(config, role):
                      if role['driver'] == 'cq' and model != role['model']]
 
 
+def role_provider(role):
+    """The cooldown key for a role: the model's provider prefix, or the driver's
+    real provider when the model is unprefixed (codex gpt-5.1 and gpt-5.2 are
+    both OpenAI and must share one cooldown)."""
+    prefix, sep, _ = role['model'].partition('/')
+    # A Paseo 'codex/...' model and the codex driver are the same OpenAI account.
+    aliases = {'codex': 'openai'}
+    if sep:
+        return aliases.get(prefix, prefix)
+    return aliases.get(role['driver'], role['driver'])
+
+
 def provider_ready(role):
-    provider = role['model'].split('/', 1)[0]
+    provider = role_provider(role)
     keys = {'zai': ('ZAI_API_KEY',), 'opencode-go': ('OPENCODE_GO_API_KEY', 'OPENCODE_GO_BASE_URL'),
             'deepseek': ('DEEPSEEK_API_KEY',)}
     return all(os.environ.get(key) for key in keys.get(provider, ()))
@@ -222,13 +234,20 @@ def valid_cooldown_stamp(stamp):
 
 def provider_cooldowns():
     path = ROOT / 'state/repair/provider-cooldowns.json'
-    if not path.exists():
+    try:
+        path.stat()
+    except FileNotFoundError:
         return {}
+    except OSError as exc:
+        # Path.exists() would read an unstatable file as absent, i.e. no cooldown.
+        raise CooldownStateError('provider-cooldowns.json cannot be inspected: ' + str(exc)[:200]) from exc
     # Corrupt state must not silently spend against a known exhausted provider:
     # validate the complete document and reject every invalid timestamp before a
     # caller compares one with utc().
     try:
         state = json.loads(path.read_text())
+    except OSError as exc:
+        raise CooldownStateError('provider-cooldowns.json is unreadable: ' + str(exc)[:200]) from exc
     except ValueError as exc:
         raise CooldownStateError('provider-cooldowns.json is not valid JSON: ' + str(exc)[:200]) from exc
     if not isinstance(state, dict) or not all(valid_cooldown_stamp(stamp) for stamp in state.values()):
@@ -273,7 +292,7 @@ def dispatch_paused(config):
         now = utc()
         roles = [candidate for role in config['repair']['roles'].values()
                  for candidate in fallback_roles(config, role) if provider_ready(candidate)]
-        if any(state.get(role['model'].split('/', 1)[0], '') <= now for role in roles):
+        if any(state.get(role_provider(role), '') <= now for role in roles):
             return None
     return paused()
 
@@ -295,7 +314,7 @@ def dispatch(config, role, job, wt, directory, judge=False):
     previous_directory = None
     with correlation(job, judge):
         for candidate in fallback_roles(config, role):
-            provider = candidate['model'].split('/', 1)[0]
+            provider = role_provider(candidate)
             if provider in seen or not provider_ready(candidate):
                 continue
             seen.add(provider)
