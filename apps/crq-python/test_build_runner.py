@@ -244,7 +244,7 @@ class BuildRunnerTests(unittest.TestCase):
     def test_run_command_timeout_kills_descendants_before_lock_release(self):
         # A timed-out command must not leave descendants that can write to the
         # checkout after the exclusive lock is released: record the PID of a
-        # grandchild spawned by the command and require it to be reaped while
+        # grandchild spawned by the command and require it to have exited while
         # the lock is still held, before run_command raises.
         repo = self.base / 'real'
         subprocess.run(['git', 'init', '-q', str(repo)], check=True)
@@ -255,8 +255,27 @@ class BuildRunnerTests(unittest.TestCase):
             with self.assertRaisesRegex(build_runner.BuildError, 'timed out'):
                 build_runner.run_command(command, cwd=repo, timeout=1)
             descendant = int(record.read_text())
-            with self.assertRaises(ProcessLookupError):
-                os.kill(descendant, 0)
+            if sys.platform == 'linux':
+                try:
+                    stat = Path(f'/proc/{descendant}/stat').read_bytes()
+                except (FileNotFoundError, ProcessLookupError):
+                    pass
+                else:
+                    self.assertIn(stat.rsplit(b') ', 1)[1].split()[0], (b'Z', b'X'))
+            else:
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(descendant, 0)
+
+    def test_run_command_interrupt_cleans_up_then_propagates(self):
+        process = mock.MagicMock()
+        interruption = KeyboardInterrupt()
+        process.communicate.side_effect = interruption
+        with mock.patch.object(build_runner.subprocess, 'Popen', return_value=process), \
+                mock.patch.object(build_runner, '_kill_process_group') as cleanup:
+            with self.assertRaises(KeyboardInterrupt) as caught:
+                build_runner.run_command(['build'], cwd=self.repo)
+        cleanup.assert_called_once_with(process)
+        self.assertIs(caught.exception, interruption)
 
     def test_build_rejects_pnpm_pin_mismatch(self):
         run, _ = self.fake(pnpm_version='12.18.0')

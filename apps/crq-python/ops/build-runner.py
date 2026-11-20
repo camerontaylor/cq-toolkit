@@ -73,14 +73,29 @@ def _tail(text):
     return text[-OUTPUT_TAIL:] if len(text) > OUTPUT_TAIL else text
 
 
+def _linux_group_has_live_members(pgid):
+    for entry in Path('/proc').iterdir():
+        if not entry.name.isdecimal():
+            continue
+        try:
+            stat = (entry / 'stat').read_bytes()
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        state, _, group, *_ = stat.rsplit(b') ', 1)[1].split()
+        if int(group) == pgid and state not in (b'Z', b'X'):
+            return True
+    return False
+
+
 def _kill_process_group(process):
-    """Kill a timed-out command and every descendant, confirming they exited.
+    """Kill a failed command and its process group, confirming they exited.
 
     run_command starts each command in its own session, so SIGKILL to the
     process group reaches the children and grandchildren pnpm forks. A caller
     holding an advisory lock must not release it while a killed process may
     still write to the guarded tree, so poll until every group member is
-    confirmed reaped before returning.
+    confirmed exited before returning. Linux zombies have already exited,
+    even if PID 1 has yet to reap them.
     """
     try:
         os.killpg(process.pid, signal.SIGKILL)
@@ -92,6 +107,8 @@ def _kill_process_group(process):
         try:
             os.killpg(process.pid, 0)
         except ProcessLookupError:
+            return
+        if sys.platform == 'linux' and not _linux_group_has_live_members(process.pid):
             return
         if time.monotonic() >= deadline:
             raise BuildError('command descendants survived SIGKILL: process group '
@@ -106,12 +123,16 @@ def run_command(argv, cwd, env=None, timeout=COMMAND_TIMEOUT):
                                    text=True, start_new_session=True)
     except FileNotFoundError as exc:
         raise BuildError('command not found: ' + argv[0]) from exc
-    try:
-        stdout, stderr = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
-        _kill_process_group(process)
-        raise BuildError('command timed out after ' + str(timeout) + 's: '
-                         + shlex.join(argv)) from exc
+    with process:
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            _kill_process_group(process)
+            raise BuildError('command timed out after ' + str(timeout) + 's: '
+                             + shlex.join(argv)) from exc
+        except BaseException:
+            _kill_process_group(process)
+            raise
     if process.returncode != 0:
         detail = ['command failed (' + str(process.returncode) + '): ' + shlex.join(argv)]
         if stdout:
