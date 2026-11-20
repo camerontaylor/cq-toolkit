@@ -587,6 +587,45 @@ class DiscoveryTests(PortFixture):
         self.assertEqual(evidence["supported"], False)
         self.assertIn("crq-tick.socket", " ".join(evidence["foreign"]))
 
+    def test_undeclared_upholds_enablement_link_is_unsupported(self):
+        declared = self.declare()
+        # systemd v257 records ``Upholds=`` as a link under
+        # ``<unit>.upholds/``, so a link there is an incoming activation edge
+        # exactly like ``*.wants``/``*.requires``: the upholding target
+        # restarts the selected unit whenever it becomes inactive.
+        upheld = self.link("ingress.target.upholds/crq-tick.service",
+                           self.unit_dir / "crq-tick.service")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("unexpected enablement link: " + str(upheld),
+                      " ".join(evidence["foreign"]))
+
+    def test_masked_upholds_child_is_ignored(self):
+        declared = self.declare()
+        self.link("ingress.target.upholds/crq-tick.service", os.devnull)
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["supported"], True)
+        self.assertEqual(evidence["foreign"], [])
+
+    def test_symlinked_enablement_directory_is_unsupported(self):
+        declared = self.declare()
+        real = self.unit_dir / "elsewhere"
+        real.mkdir()
+        (real / "crq-tick.service").symlink_to(self.unit_dir / "crq-tick.service")
+        for suffix in (".wants", ".requires", ".upholds"):
+            link = self.unit_dir / ("ingress.target" + suffix)
+            link.symlink_to(real, target_is_directory=True)
+            evidence = self.discover(declared)
+            self.assertEqual(evidence["supported"], False, suffix)
+            if suffix == ".upholds":
+                self.assertIn("symlinked enablement directory: " + str(link),
+                              " ".join(evidence["foreign"]))
+            else:
+                # .wants/.requires are refused as an incomplete discovery.
+                self.assertEqual(evidence["complete"], False, suffix)
+            link.unlink()
+
     def test_listing_failure_is_incomplete(self):
         declared = self.declare()
 
