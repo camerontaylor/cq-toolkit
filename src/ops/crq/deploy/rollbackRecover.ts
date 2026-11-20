@@ -147,7 +147,7 @@ export interface RecoveryDeps<E> {
   /** `Hold(root)`: a fresh admission marker handle. */
   newHold(): HoldLike;
   /** `helper.switch(root, overlay, overlay_raw, sha, None)`. */
-  switchCheckout(sha: string): Promise<void>;
+  switchCheckout(sha: string, rollbackConfig?: Uint8Array | null): Promise<void>;
   /** `git rev-parse HEAD`. */
   headSha(): Promise<string>;
   /** Live config bytes. */
@@ -403,7 +403,8 @@ export class RunRecovery<E> {
       await this.failStop(
         `admission ownership was lost before the rollback switch; the checkout was not switched (after: ${clip(reason, 200)})`,
       );
-    await d.switchCheckout(prior);
+    // Restore the recorded prior SHA and the measured pre-deploy config bytes verbatim.
+    await d.switchCheckout(prior, s.originalConfig);
     s.switched = false;
     require_((await d.headSha()) === prior, 'helper returned but HEAD is not the prior SHA');
     const live = await d.readConfig();

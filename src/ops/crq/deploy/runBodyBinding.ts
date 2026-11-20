@@ -256,8 +256,15 @@ export function bindRun<E, H, C extends BoundController<E>>(deps: RunDeps<E, H, 
     },
     units: deps.units,
     newHold: () => deps.newHold(),
-    switchCheckout: async (sha) => {
-      await switchCheckout(deps.switchEffects, cfg.root, need(loaded, 'overlay').overlay, sha);
+    switchCheckout: async (sha, rollbackConfig) => {
+      await switchCheckout(
+        deps.switchEffects,
+        cfg.root,
+        need(loaded, 'overlay').overlay,
+        sha,
+        null,
+        rollbackConfig ?? null,
+      );
     },
     headSha: () => deps.headSha(),
     readConfig: () => readConfig(deps.live, cfg.root),

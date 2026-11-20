@@ -319,25 +319,76 @@ class DeployTests(DeployFixture, unittest.TestCase):
         self.assertFalse(self.marker().exists())
         self.assertEqual(self.head(), unmerged)
 
-    def test_unrollbackable_prior_refuses_before_admission(self):
-        # Only the target was tested for merged-main ancestry, so a live prior
-        # SHA that is not merged to origin/main passed preflight and then
-        # failed the helper's same check inside the rollback switch, after the
-        # target was installed. The prior SHA must be refused up front, before
-        # admission and any switch.
+    def local_only_prior(self):
         self.command("commit", "--allow-empty", "-qm", "local only")
         local = self.head()
         self.assertNotEqual(
             subprocess.run(["git", "-C", str(self.root), "merge-base",
                             "--is-ancestor", local,
                             "refs/remotes/origin/main"]).returncode, 0)
+        return local
+
+    def test_local_only_prior_is_not_refused_and_deploys(self):
+        # The live prior SHA may be a local merge that is not on origin/main
+        # (a ceres deploy of main from a local wip merge). Only the target is
+        # verified as a deploy target; a prior that fails the target rule must
+        # not refuse admission.
+        local = self.local_only_prior()
         run = self.build(target_sha=self.target)
-        with self.assertRaisesRegex(rb.Refused, "rollback target check"):
-            run.run()
+        document = run.run()
+        self.assertEqual(document["outcome"], "completed")
+        self.assertEqual(self.head(), self.target)
+
+    def test_local_only_prior_still_rolls_back_by_recorded_sha(self):
+        local = self.local_only_prior()
+        live = (self.runner / "config.json").read_bytes()
+        run = self.build(target_sha=self.target,
+                         health=lambda: {"healthy": False,
+                                         "reason": "no advancing tick"})
+        document = run.run()
+        self.assertEqual(document["outcome"], "rolled_back")
         self.assertEqual(self.head(), local)
-        self.assertEqual(self.units.stopped, [])
-        self.assertEqual(self.units.started, [])
-        self.assertFalse(self.marker().exists())
+        self.assertEqual((self.runner / "config.json").read_bytes(), live)
+
+    def test_clone_on_a_branch_is_not_refused(self):
+        # The 2026-11-21 operator found the clone on `main` refused; the
+        # switch checks the target out detached, so a branch is deployable.
+        self.command("checkout", "-q", "-B", "main", self.prior)
+        self.assertEqual(
+            self.command("rev-parse", "--abbrev-ref", "HEAD").strip(), "main")
+        run = self.build(target_sha=self.target)
+        document = run.run()
+        self.assertEqual(document["outcome"], "completed")
+        self.assertEqual(self.head(), self.target)
+        self.assertEqual(
+            self.command("rev-parse", "--abbrev-ref", "HEAD").strip(), "HEAD")
+
+    def edit_live_config(self):
+        live = json.loads((self.runner / "config.json").read_text())
+        live["repair"]["enabled"] = True
+        data = host.encode(live)
+        (self.runner / "config.json").write_bytes(data)
+        return data
+
+    def test_drifted_live_config_is_backed_up_not_refused(self):
+        # A host edit (repair.enabled) makes the live config differ from the
+        # overlay's render of HEAD. That is not a refusal: the bytes are
+        # backed up before the switch and rollback reinstalls them verbatim.
+        edited = self.edit_live_config()
+        run = self.build(target_sha=self.target)
+        self.assertEqual(run.run()["outcome"], "completed")
+        backups = list(Path(self.overlay["record_dir"])
+                       .glob("config-before-switch-*"))
+        self.assertEqual([path.read_bytes() for path in backups], [edited])
+
+    def test_drifted_live_config_is_restored_exactly_on_rollback(self):
+        edited = self.edit_live_config()
+        run = self.build(target_sha=self.target,
+                         health=lambda: {"healthy": False,
+                                         "reason": "no advancing tick"})
+        self.assertEqual(run.run()["outcome"], "rolled_back")
+        self.assertEqual(self.head(), self.prior)
+        self.assertEqual((self.runner / "config.json").read_bytes(), edited)
 
     def test_foreign_marker_refuses_and_touches_no_unit(self):
         self.marker().write_text("someone else's hold\n")
