@@ -4172,6 +4172,7 @@ def cmd_run(args):
     vm.save_json(pathlib.Path(run["path"]) / "run.json", run)
     boot_lock_attempted = False
     boot_lock_held = False
+    launched = None
     try:
         run_dir = pathlib.Path(run["path"])
         host_source = pathlib.Path(__file__).resolve()
@@ -4206,7 +4207,23 @@ def cmd_run(args):
             vm.refuse_live_run(run)
             # Armed only after the live-run refusal: a refused run owns no guest.
             boot_lock_held = True
-            boot = vm.boot(run, recorder, args.tools, vm.host_stamp())
+            try:
+                boot = vm.boot(run, recorder, args.tools, vm.host_stamp())
+            except BaseException:
+                # A partial boot can leave a live guest with no recorded
+                # identity. Stop it while the boot lock is still held: once
+                # the lock is released another invocation can boot a
+                # replacement first, and an unguarded stop would kill that
+                # one. stop_owned_process would re-take the run lock this
+                # block already holds, so call its unguarded stop directly.
+                if not args.keep:
+                    try:
+                        vm._stop_owned_process(run, purge=False)
+                    except Exception as cleanup_error:
+                        print("cleanup after failed boot did not complete: %s"
+                              % cleanup_error, file=sys.stderr)
+                raise
+            launched = {"pid": boot["pid"], "starttime": boot["starttime"]}
         boot["ssh"] = vm.wait_ssh(run, recorder)
         uploads = upload_files(run, recorder, snapshot, commit, args.mode)
         provenance["uploads"] = uploads
@@ -4249,10 +4266,15 @@ def cmd_run(args):
         problems = report["problems"]
     except BaseException:
         # A boot rejected because another invocation holds run.lock owns no
-        # guest; cleaning up would stop that invocation's live guest.
-        if not args.keep and (boot_lock_held or not boot_lock_attempted):
+        # guest; cleaning up would stop that invocation's live guest. A boot
+        # that returned arms cleanup with this launch's identity, so the
+        # guarded stop leaves a replacement VM another invocation booted
+        # alone; a partial boot was already stopped inside the boot critical
+        # section above.
+        if not args.keep and ((boot_lock_held and launched is not None)
+                              or not boot_lock_attempted):
             try:
-                vm.stop_owned_process(run, purge=False)
+                vm.stop_owned_process(run, purge=False, launched=launched)
             except Exception as cleanup_error:
                 print("cleanup after failed run did not complete: %s"
                       % cleanup_error, file=sys.stderr)
