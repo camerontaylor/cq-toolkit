@@ -238,6 +238,7 @@ export function buildChildEnv(
   parentEnv: Readonly<Record<string, string | undefined>>,
   overrides?: Readonly<Record<string, string>>,
   extraAllowlist: readonly string[] = [],
+  platform: NodeJS.Platform = process.platform,
 ): Record<string, string> {
   for (const name of extraAllowlist) {
     if (!ENV_NAME.test(name)) {
@@ -262,7 +263,18 @@ export function buildChildEnv(
     child[name] = value;
   }
   if (overrides !== undefined) {
-    for (const [name, value] of Object.entries(overrides)) child[name] = value;
+    for (const [name, value] of Object.entries(overrides)) {
+      // Windows env names are case-insensitive and Node picks the first
+      // spelling it finds, so an override `Path` must replace an inherited
+      // `PATH` rather than sit beside it. POSIX names stay case-sensitive.
+      if (platform === 'win32') {
+        const lower = name.toLowerCase();
+        for (const existing of Object.keys(child)) {
+          if (existing !== name && existing.toLowerCase() === lower) delete child[existing];
+        }
+      }
+      child[name] = value;
+    }
   }
   // Direct op parent correlation (measurement M5b1): translate the
   // enclosing Paseo agent id into the derived `paseo:<id>` parent-work

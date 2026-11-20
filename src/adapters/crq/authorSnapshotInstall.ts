@@ -29,6 +29,7 @@ import {
 } from '../../ops/dev/denylist.js';
 import { AuthorRefused } from '../../policy/crq/authorWire.js';
 import { decodeSnapshot, type SnapshotObject } from '../../policy/crq/authorSnapshot.js';
+import { diffGitHeaderPath, patchHeaderOperandPath } from '../../ops/dev/denylist.js';
 import { GitPool, gitCall, gitOk, killProcessTree } from './gitExec.js';
 
 const SNAPSHOT_REF_PREFIX = 'refs/crq/author-snapshots/v1/';
@@ -287,6 +288,15 @@ async function readRules(
   return filtered;
 }
 
+/** Decode a header path; an undecodable quoted name is unattributable, so refuse. */
+function headerPath(decode: () => string | undefined): string | undefined {
+  try {
+    return decode();
+  } catch {
+    throw new AuthorRefused('snapshot path is not valid UTF-8');
+  }
+}
+
 /** Project-rule scan over the patch, including removed lines (`secret_scan_diff`). */
 function scanPatch(diff: string, rules: ReturnType<typeof parseDenylistPatterns>['rules']): void {
   const compiled = rules.map((rule) => ({
@@ -297,8 +307,7 @@ function scanPatch(diff: string, rules: ReturnType<typeof parseDenylistPatterns>
   let inHeader = false;
   for (const line of diff.split('\n')) {
     if (line.startsWith('diff --git ')) {
-      const match = /^diff --git a\/(.*) b\/(.*)$/.exec(line);
-      path = match === null ? null : (match[2] ?? null);
+      path = headerPath(() => diffGitHeaderPath(line, 'snapshot diff')) ?? null;
       inHeader = true;
       continue;
     }
@@ -310,10 +319,7 @@ function scanPatch(diff: string, rules: ReturnType<typeof parseDenylistPatterns>
       if (line.startsWith('+++ ') || line.startsWith('--- ')) {
         const candidate = line.slice(4);
         if (candidate !== '/dev/null') {
-          path =
-            candidate.startsWith('a/') || candidate.startsWith('b/')
-              ? candidate.slice(2)
-              : candidate;
+          path = headerPath(() => patchHeaderOperandPath(candidate, 'snapshot diff')) ?? null;
         }
       }
       continue;
