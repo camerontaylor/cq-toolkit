@@ -53,7 +53,11 @@ export interface RepairHarvestEffects {
    * `require_canonical_delivery(STATE.parent, job)`. A confirmed ownership
    * mismatch is a `ValueError` (the run terminalizes as `stale`); the literal
    * `canonical delivery state unavailable` read failure stays retryable
-   * without publishing.
+   * without publishing. It is Python's `written_back=True` form: a row an
+   * earlier job of this same run already wrote back (status `fixed`,
+   * `needs-retriage`, `needs-human` or `dismissed`, receipt still naming this
+   * task) is owned, so a replay reaches the later jobs; any row naming another
+   * task is still a mismatch.
    */
   requireCanonicalDelivery(job: Rec): Promise<void>;
   /** `Path(p).resolve()`: a non-string never reaches it; an embedded NUL is a `ValueError`. */

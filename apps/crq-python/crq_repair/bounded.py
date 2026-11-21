@@ -65,8 +65,17 @@ def validate_revalidation(config, old, source_sha, evidence):
     return expected
 
 
-def require_canonical_delivery(root, job):
-    """Read the existing atomic triage row; legacy jobs have no canonical owner."""
+# Statuses `mark_finding_outcome` leaves on a row after its repair task ends.
+WRITTEN_BACK_STATUSES = ('fixed', 'needs-retriage', 'needs-human', 'dismissed')
+
+
+def require_canonical_delivery(root, job, written_back=False):
+    """Read the existing atomic triage row; legacy jobs have no canonical owner.
+
+    `written_back` is for resuming a harvest: a sibling job of the same run may
+    already have recorded its own outcome, which moves its row off `delivered`
+    but leaves the receipt naming this task. Only that row is accepted; a row
+    that names another task, or never recorded an outcome, still mismatches."""
     if 'canonical_finding_id' not in job:
         return
     fid = job['canonical_finding_id']
@@ -76,7 +85,8 @@ def require_canonical_delivery(root, job):
         row = json.loads((Path(root) / 'state/backfill/findings/triage' / (fid + '.json')).read_text())
     except (OSError, ValueError) as exc:
         raise ValueError('canonical delivery state unavailable') from exc
-    if (not isinstance(row, dict) or row.get('status') != 'delivered'
+    statuses = ('delivered',) + (WRITTEN_BACK_STATUSES if written_back else ())
+    if (not isinstance(row, dict) or row.get('status') not in statuses
             or not isinstance(row.get('receipt'), dict)
             or row['receipt'].get('repair_task') != job.get('job')):
         raise ValueError('canonical finding is not delivered to this repair task')

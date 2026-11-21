@@ -83,7 +83,7 @@ def remove_worktree(path, branch):
     calls.append(['remove_worktree', path.name, branch])
 c.remove_worktree = remove_worktree
 
-def canonical(_root, job):
+def canonical(_root, job, **_kwargs):
     calls.append(['canonical', job['job']])
     raiser(spec.get('stale', {}).get(job['job']))
 repair_tick.require_canonical_delivery = canonical
