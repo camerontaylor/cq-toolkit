@@ -38,6 +38,8 @@ export const LEDGER_SCHEMA_VERSION = 'cq.review-ledger/v1';
 export const LEDGER_REPOSITORY = 'camerontaylor/cq-toolkit';
 
 const MAX_INTERVAL_LINE = 1_000_000n;
+/** `review_ledger.SCOPE_ENTRIES`: decoded entries one review record may carry. */
+const MAX_SCOPE_ENTRIES = 1_000_000n;
 
 /** `review_ledger.IntegrityError`: publication must stop and be reconciled. */
 export class LedgerIntegrityError extends Error {
@@ -566,6 +568,26 @@ export function ledgerIntervals(rows: JsonValue): Set<number> {
   return result;
 }
 
+/**
+ * `review_ledger.scope_entries`: decoded entries summed across the requested,
+ * input and reviewed scopes, from the interval bounds alone. Each row gets the
+ * same interval rules as `ledgerIntervalRanges` (so a row error still wins over
+ * the aggregate bound) without expanding a single line.
+ */
+function ledgerScopeEntries(payload: JsonObject): bigint {
+  let total = 0n;
+  for (const key of ['requested_scope', 'input_scope', 'reviewed_scope']) {
+    for (const row of arrayField(payload, key)) {
+      for (const [first, final] of ledgerIntervalRanges(
+        field(requireObject(row, 'scope row'), 'intervals'),
+      )) {
+        total += BigInt(final - first + 1);
+      }
+    }
+  }
+  return total;
+}
+
 /** `review_ledger.scope` with a chosen interval representation. */
 function ledgerScopeOf<T>(
   rows: JsonValue,
@@ -692,6 +714,7 @@ function validateReview(record: JsonObject, payload: JsonObject): void {
     if (supersedes === stringField(record, 'id')) fail('record cannot supersede itself');
   }
 
+  if (ledgerScopeEntries(payload) > MAX_SCOPE_ENTRIES) fail('scope entries exceed record bound');
   const requestedRows = arrayField(payload, 'requested_scope');
   // Validation only compares these three scopes, and a schema-valid record may
   // hold many bounded rows per scope. Keep them as ranges so the whole payload

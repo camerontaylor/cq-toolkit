@@ -5681,6 +5681,399 @@
             "error": "ValueError",
             "message": "day 30 must be in range 1..28 for month 2 in year 2026"
           }
+        },
+        {
+          "name": "scope-entries-at-bound",
+          "source": "review_ledger.validate",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "review",
+              "source_key": "camerontaylor/cq-toolkit:crq-runner-app:run-1",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "repo": "camerontaylor/cq-toolkit",
+                "subject_id": "subject",
+                "job_id": "subject:0",
+                "attempt_id": "subject:0:1",
+                "source": {
+                  "repo": "camerontaylor/cq-toolkit",
+                  "producer": "crq-runner-app",
+                  "type": "crq-run",
+                  "id": "run-1",
+                  "authenticated": true
+                },
+                "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "head_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "target_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "policy_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "scope_digest": "d4f7827c0026dd07b67a80658afc8d187ce05312595e2ef61ac9ed59233bd308",
+                "paths": [
+                  {
+                    "path": "src/\u96ea.ts",
+                    "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "mode": "100644",
+                    "disposition": "included",
+                    "reason": "verified",
+                    "baseline": {}
+                  }
+                ],
+                "requested_scope": [
+                  {
+                    "path": "src/\u96ea.ts",
+                    "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "intervals": [
+                      [
+                        1,
+                        400000
+                      ]
+                    ]
+                  }
+                ],
+                "input_scope": [
+                  {
+                    "path": "src/\u96ea.ts",
+                    "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "intervals": [
+                      [
+                        1,
+                        400000
+                      ]
+                    ]
+                  }
+                ],
+                "reviewed_scope": [
+                  {
+                    "path": "src/\u96ea.ts",
+                    "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "intervals": [
+                      [
+                        1,
+                        200000
+                      ]
+                    ]
+                  }
+                ],
+                "completion": {
+                  "terminal": true,
+                  "skipped": false,
+                  "scope_verified": true,
+                  "exit_code": 0,
+                  "errors": []
+                },
+                "outcome": "completed",
+                "artifacts": [
+                  {
+                    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                  }
+                ],
+                "findings": []
+              },
+              "id": "e5df16d890f195180eb072f421bfed6028ca7695dcde866a2d6d3891ae30fbce"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "review",
+              "source_key": "camerontaylor/cq-toolkit:crq-runner-app:run-1",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "repo": "camerontaylor/cq-toolkit",
+                "subject_id": "subject",
+                "job_id": "subject:0",
+                "attempt_id": "subject:0:1",
+                "source": {
+                  "repo": "camerontaylor/cq-toolkit",
+                  "producer": "crq-runner-app",
+                  "type": "crq-run",
+                  "id": "run-1",
+                  "authenticated": true
+                },
+                "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "head_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "target_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "policy_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "scope_digest": "d4f7827c0026dd07b67a80658afc8d187ce05312595e2ef61ac9ed59233bd308",
+                "paths": [
+                  {
+                    "path": "src/\u96ea.ts",
+                    "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "mode": "100644",
+                    "disposition": "included",
+                    "reason": "verified",
+                    "baseline": {}
+                  }
+                ],
+                "requested_scope": [
+                  {
+                    "path": "src/\u96ea.ts",
+                    "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "intervals": [
+                      [
+                        1,
+                        400000
+                      ]
+                    ]
+                  }
+                ],
+                "input_scope": [
+                  {
+                    "path": "src/\u96ea.ts",
+                    "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "intervals": [
+                      [
+                        1,
+                        400000
+                      ]
+                    ]
+                  }
+                ],
+                "reviewed_scope": [
+                  {
+                    "path": "src/\u96ea.ts",
+                    "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "intervals": [
+                      [
+                        1,
+                        200000
+                      ]
+                    ]
+                  }
+                ],
+                "completion": {
+                  "terminal": true,
+                  "skipped": false,
+                  "scope_verified": true,
+                  "exit_code": 0,
+                  "errors": []
+                },
+                "outcome": "completed",
+                "artifacts": [
+                  {
+                    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                  }
+                ],
+                "findings": []
+              },
+              "id": "e5df16d890f195180eb072f421bfed6028ca7695dcde866a2d6d3891ae30fbce"
+            }
+          }
+        },
+        {
+          "name": "scope-entries-over-bound",
+          "source": "review_ledger.validate",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "review",
+              "source_key": "camerontaylor/cq-toolkit:crq-runner-app:run-1",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "repo": "camerontaylor/cq-toolkit",
+                "subject_id": "subject",
+                "job_id": "subject:0",
+                "attempt_id": "subject:0:1",
+                "source": {
+                  "repo": "camerontaylor/cq-toolkit",
+                  "producer": "crq-runner-app",
+                  "type": "crq-run",
+                  "id": "run-1",
+                  "authenticated": true
+                },
+                "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "head_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "target_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "policy_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "scope_digest": "d4f7827c0026dd07b67a80658afc8d187ce05312595e2ef61ac9ed59233bd308",
+                "paths": [
+                  {
+                    "path": "src/\u96ea.ts",
+                    "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "mode": "100644",
+                    "disposition": "included",
+                    "reason": "verified",
+                    "baseline": {}
+                  }
+                ],
+                "requested_scope": [
+                  {
+                    "path": "src/\u96ea.ts",
+                    "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "intervals": [
+                      [
+                        1,
+                        400000
+                      ]
+                    ]
+                  }
+                ],
+                "input_scope": [
+                  {
+                    "path": "src/\u96ea.ts",
+                    "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "intervals": [
+                      [
+                        1,
+                        400000
+                      ]
+                    ]
+                  }
+                ],
+                "reviewed_scope": [
+                  {
+                    "path": "src/\u96ea.ts",
+                    "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "intervals": [
+                      [
+                        1,
+                        200001
+                      ]
+                    ]
+                  }
+                ],
+                "completion": {
+                  "terminal": true,
+                  "skipped": false,
+                  "scope_verified": true,
+                  "exit_code": 0,
+                  "errors": []
+                },
+                "outcome": "completed",
+                "artifacts": [
+                  {
+                    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                  }
+                ],
+                "findings": []
+              },
+              "id": "89a1fcda71146cace21870b9e0d0f76af462f94d23f60fe43354ebfa31d094cd"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "IntegrityError",
+            "message": "scope entries exceed record bound"
+          }
+        },
+        {
+          "name": "scope-entries-interval-error-precedes-bound",
+          "source": "review_ledger.validate",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "review",
+              "source_key": "camerontaylor/cq-toolkit:crq-runner-app:run-1",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "repo": "camerontaylor/cq-toolkit",
+                "subject_id": "subject",
+                "job_id": "subject:0",
+                "attempt_id": "subject:0:1",
+                "source": {
+                  "repo": "camerontaylor/cq-toolkit",
+                  "producer": "crq-runner-app",
+                  "type": "crq-run",
+                  "id": "run-1",
+                  "authenticated": true
+                },
+                "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "head_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "target_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "policy_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "scope_digest": "d4f7827c0026dd07b67a80658afc8d187ce05312595e2ef61ac9ed59233bd308",
+                "paths": [
+                  {
+                    "path": "src/\u96ea.ts",
+                    "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "mode": "100644",
+                    "disposition": "included",
+                    "reason": "verified",
+                    "baseline": {}
+                  }
+                ],
+                "requested_scope": [
+                  {
+                    "path": "src/\u96ea.ts",
+                    "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "intervals": [
+                      [
+                        1,
+                        400000
+                      ]
+                    ]
+                  }
+                ],
+                "input_scope": [
+                  {
+                    "path": "src/\u96ea.ts",
+                    "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "intervals": [
+                      [
+                        1,
+                        400000
+                      ]
+                    ]
+                  }
+                ],
+                "reviewed_scope": [
+                  {
+                    "path": "src/\u96ea.ts",
+                    "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "intervals": [
+                      [
+                        1,
+                        200001
+                      ]
+                    ]
+                  },
+                  {
+                    "path": "src/b.ts",
+                    "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "intervals": [
+                      [
+                        1,
+                        1000001
+                      ]
+                    ]
+                  }
+                ],
+                "completion": {
+                  "terminal": true,
+                  "skipped": false,
+                  "scope_verified": true,
+                  "exit_code": 0,
+                  "errors": []
+                },
+                "outcome": "completed",
+                "artifacts": [
+                  {
+                    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                  }
+                ],
+                "findings": []
+              },
+              "id": "01ace53689e127eb63eb22f24ff2978f185a8ef6c6e7b5bef0d83d5f5961d9e2"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "IntegrityError",
+            "message": "invalid or overlapping intervals"
+          }
         }
       ]
     },
