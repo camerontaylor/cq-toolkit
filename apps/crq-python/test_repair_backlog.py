@@ -35,7 +35,10 @@ class PublishCapTest(unittest.TestCase):
             if argv[:3] == ['gh', 'pr', 'create']:
                 branch = argv[argv.index('--head') + 1]
                 self.created.append(branch)
-                self.listed[branch] = [{'number': 100 + len(self.created), 'url': 'u', 'state': 'OPEN'}]
+                # The created PR sits at the prepared head: the fixture pairs
+                # branch 'crq/fix-run-<name>' with head 'h<name>'.
+                self.listed[branch] = [{'number': 100 + len(self.created), 'url': 'u', 'state': 'OPEN',
+                                        'headRefOid': 'h' + branch[len('crq/fix-run-'):]}]
 
         def gh_json(argv):
             return self.listed.get(argv[argv.index('--head') + 1], []) if '--head' in argv else []
@@ -114,6 +117,29 @@ class PublishCapTest(unittest.TestCase):
         self.assertEqual(self.created, ['crq/fix-run-p'])
         self.assertEqual(publication['pr_create_attempts'], 1)
         self.assertEqual(repair_tick.TICK_BACKLOG['open'], 50)
+
+    def test_existing_singleton_pr_at_an_unrelated_head_is_refused(self):
+        # A PR sharing the branch name but sitting on another head is not the
+        # repair's fix PR: never record or enroll it, exactly like recovery.
+        repair_tick.TICK_BACKLOG.update(open=0, limit=10)
+        parts = self.publication('backfill-finding-a', 'a')
+        self.listed['crq/fix-run-a'] = [{'number': 77, 'url': 'u', 'state': 'OPEN', 'headRefOid': 'other'}]
+        with self.assertRaisesRegex(ValueError, 'prepared head mismatch'):
+            self.finalize(parts)
+        self.assertEqual(self.created, [])
+        self.assertNotIn('fix_pr', parts[2])
+
+    def test_created_singleton_pr_listed_at_an_unrelated_head_is_refused(self):
+        repair_tick.TICK_BACKLOG.update(open=9, limit=10)
+        parts = self.publication('backfill-finding-a', 'a')
+
+        def create(argv):
+            # The create lands, but the PR it reports sits on another head.
+            self.listed['crq/fix-run-a'] = [{'number': 78, 'url': 'u', 'state': 'OPEN', 'headRefOid': 'other'}]
+        self.c.run = create
+        with self.assertRaisesRegex(ValueError, 'prepared head mismatch'):
+            self.finalize(parts)
+        self.assertNotIn('fix_pr', parts[2])
 
 
 class BacklogFileTest(unittest.TestCase):
