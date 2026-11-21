@@ -1,5 +1,5 @@
 /**
- * `repair_tick.recover_publication` (repair_tick.py:732-770): offline recovery
+ * `repair_tick.recover_publication` (repair_tick.py:756-801): offline recovery
  * of a journaled repair publication after a crash between the journal write
  * and the remote effects. Inactive: nothing imports this outside tests.
  *
@@ -18,7 +18,10 @@
  *   verified remote tip otherwise, an absent branch leasing the empty value;
  * - a lease that is not an ancestor of the journaled `head` refuses before any
  *   push, so a reset to an ancestor is never resurrected;
- * - a present branch that differs from the journal without an open PR refuses.
+ * - a present branch that differs from the journal without an open PR refuses;
+ * - an open PR still at the journaled `target` while the earlier remote read
+ *   says the prepared `head` is published refuses instead of finalizing on the
+ *   stale read (a reset or a lagging PR view); a later tick re-reads both.
  */
 import { truthy } from './repairBackfill.js';
 import { PyError } from './pyErrors.js';
@@ -60,6 +63,7 @@ export const STALE_NOT_PUBLISHABLE = 'PR no longer publishable';
 export const STALE_HEAD_MOVED = 'head moved after prepared publication; needs new review';
 export const REFUSE_PR_IDENTITY = 'fix PR identity or prepared head mismatch';
 export const REFUSE_BRANCH_DIFFERS = 'existing fix branch differs from prepared publication';
+export const REFUSE_STALE_REMOTE_READ = 'remote branch read is stale against the open PR head';
 export const REFUSE_NOT_FAST_FORWARD = 'publication would not fast-forward the checked remote head';
 
 /** `publication[key]`: a missing key is a `KeyError`, a non-string SHA a `TypeError`. */
@@ -111,6 +115,12 @@ export async function recoverPublication(
       Object.assign(record, { state: 'stale', error: STALE_HEAD_MOVED });
       return;
     }
+    // The earlier ls-remote read says the prepared head is published but the
+    // open PR, read later, is still at the journaled target: the branch was
+    // reset (or the PR view lags our own push) in between. Finalizing would
+    // record commits as published that are not on the branch; refuse so a
+    // later tick re-reads both.
+    if (remoteHead === head) throw new PyError('ValueError', REFUSE_STALE_REMOTE_READ);
   } else {
     const prs = await effects.listBranchPrs(branch);
     if (prs.length > 0) {

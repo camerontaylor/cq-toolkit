@@ -143,10 +143,32 @@ describe('recoverPublication: open PR', () => {
     expect(r.calls).not.toContain('finalize');
   });
 
-  it('skips the push but still finalizes when the remote already holds head', async () => {
-    const r = await run({ remote: HEAD, pr: openPr(TARGET) }, true);
+  it('refuses instead of finalizing when the remote read says head but the PR is still at the target', async () => {
+    // ls-remote saw the prepared head, then a maintainer reset the branch to the
+    // journaled target before the PR read: the remote read is stale.
+    const r = await run({ remote: HEAD, pr: openPr(TARGET), ancestors: [[TARGET, HEAD]] }, true);
+    expect(r.thrown).toBeInstanceOf(PyError);
+    expect((r.thrown as PyError).kind).toBe('ValueError');
+    expect((r.thrown as PyError).message).toBe(
+      'remote branch read is stale against the open PR head',
+    );
     expect(r.pushes).toEqual([]);
+    expect(r.record).toEqual({});
+    expect(r.calls).toEqual(['ls-remote', 'pr-info', 'is-ancestor']);
+  });
+
+  it('after the reset is observed on a later tick, pushes leased on the target and finalizes', async () => {
+    const r = await run({ remote: TARGET, pr: openPr(TARGET), ancestors: [[TARGET, HEAD]] }, true);
+    expect(r.thrown).toBeUndefined();
+    expect(r.pushes).toEqual([{ branch: BRANCH, expected: TARGET, sha: HEAD }]);
     expect(r.calls.at(-1)).toBe('finalize');
+  });
+
+  it('after the PR view catches up to head on a later tick, finalizes without pushing', async () => {
+    const r = await run({ remote: HEAD, pr: openPr(HEAD) }, true);
+    expect(r.thrown).toBeUndefined();
+    expect(r.pushes).toEqual([]);
+    expect(r.calls).toEqual(['ls-remote', 'pr-info', 'finalize']);
   });
 });
 
