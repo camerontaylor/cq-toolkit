@@ -95,7 +95,8 @@ journaled `target`, and the stale and finalize outcomes. What
 - The first-publication arm of `publish` (journal absent): its decision
   sequence is ported, see S6-j. The real cherry-pick replay and the scans stay
   unbound. `publish` with an existing journal is `recoverPublication`.
-- The journal read (`publication.json`) and `record`/`queue` persistence.
+- The journal read (`publication.json`) and the journal, patch, fix-PR body and
+  queue writes: bound offline in S6-k (below).
 
 S6-i (inactive): `finalizePublication`
 (`src/queue-runner/publicationFinalize.ts`) is `repair_tick.finalize_publication`
@@ -144,10 +145,34 @@ Effects still unbound, all in the publish worktree or state tree: `makeWorktree`
 and `removeWorktree` (`c.make_worktree`), the Git reads and `cherryPick`,
 `verify` (`crq_repair.verify`), `hackDetector` (`crq_repair.hack_detector` over
 `cq gates.hackDetector`, 120 KB argv cap), `secretScan` (`c.secret_scan`),
-`updateRef`, `readJournal`/`writeJournal`/`writePatch`, `saveQueue`, `push` and the
-`FixPrBacklog`. Narrowings: a non-list `commits` is a `TypeError` where Python
+`updateRef`, `push` and the `FixPrBacklog` (the journal, patch and queue file
+effects are bound in S6-k). Narrowings: a non-list `commits` is a `TypeError` where Python
 would iterate a string, a non-string commit or SHA likewise, and `bool(info)` is
 modelled as a non-null PR view.
+
+S6-k (inactive): `filePublicationEffects` (`src/adapters/crq/publicationFiles.ts`)
+binds the five file seams of `publishRepair` (`readJournal`, `writeJournal`,
+`writePatch`, `saveQueue`) and `finalizePublication` (`writeFixPrBody`,
+`writeJournal`, `saveQueue`) over an injected `stateRoot`. `recoverPublication`
+declares none of them: `publishRepair` hands it the journal it read. Nothing
+imports it outside tests. Two Python
+writers are mirrored, not unified: `crq_repair.atomic` (journal, queue) is
+`atomicWrite` over `atomicJsonText` (mkdir -p, 0600 temp, fsync, rename, directory
+fsync); `Path.write_text` (patch, fix-pr.md) is an in-place truncating write with
+no `mkdir`, so a missing job directory fails and a lone surrogate leaves an empty
+file. `readJournal` reads `null` only when the journal does not exist; a present
+journal that is unreadable (`OSError`), malformed or over the digit limit
+(`ValueError`) or not a JSON object (`TypeError`) throws, so a corrupt journal is
+never replayed as a first publication. `test/adapters/crq/publicationFiles.test.ts`
+runs the same temp trees through the real `crq_repair.atomic` and the Python
+one-liners (oracle `test/helpers/publicationFilesOracle.py`, bytes, modes and
+leftovers) and composes the effects with `publishRepair`: a push failure leaves a
+journal the next call recovers from. Narrowings: `jobs[0]` must match
+`crq-[A-Za-z0-9._-]+` (Python would join `../x`); journal numbers read as plain
+values, so an integral float (`2.0`) is rewritten as `2`; `save_queue`'s
+compaction log is not reproduced; exception text is Node's. Still unbound: the
+Git, forge and worktree effects, `verify`, `hackDetector`, `secretScan`,
+`FixPrBacklog`, and the wiring of this binding into `tick`.
 
 Closed in S6-g, kept here as the record:
 
