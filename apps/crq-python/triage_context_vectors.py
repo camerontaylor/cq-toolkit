@@ -198,6 +198,16 @@ def cases() -> list[dict]:
     out: list[dict] = []
     add = out.append
 
+    # --- numbers in the finding survive packing exactly ------------------------
+    # JSON.parse rounds 2**53 + 1, so these only hold when the port retains
+    # the integer lexeme and the float kind through to the packed context.
+    add(case("finding-keeps-integers-beyond-two-to-the-53",
+             make_row(metadata={"sequence": 9007199254740993, "negative": -9007199254740993,
+                                "huge": 10 ** 40, "small": 7})))
+    add(case("finding-keeps-float-kind-and-repr",
+             make_row(metadata={"whole": 1.0, "exponent": 1e22, "tenth": 0.1, "negative_zero": -0.0,
+                                "nested": [{"score": 2.50}, 3]})))
+
     # --- the window around the carried lines ---------------------------------
     add(case("anchored-window-around-carried-lines", carry={"path": PATH, "lines": [30, 33]}))
     add(case("window-clamps-at-file-start", carry={"path": PATH, "lines": [2]}))

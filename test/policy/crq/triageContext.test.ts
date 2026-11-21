@@ -25,7 +25,13 @@ import {
 } from '../../../src/policy/crq/triageContext.js';
 import * as findings from '../../../src/policy/crq/prReviewFindings.js';
 import { planTriageDryRun, type TriageRepo } from '../../../src/policy/crq/triagePlan.js';
-import { JsonObject, parseJsonValue, type JsonValue } from '../../../src/policy/crq/jsonValue.js';
+import {
+  JsonObject,
+  parseJsonValue,
+  type JsonValue,
+  type PythonJsonInput,
+} from '../../../src/policy/crq/jsonValue.js';
+import { pythonJsonText } from '../../../src/policy/crq/pythonJson.js';
 
 // Wrap, never replace: the spy counts digit conversions so the digit-limit
 // regression below measures work done, not wall-clock time.
@@ -37,6 +43,8 @@ vi.mock('../../../src/policy/crq/prReviewFindings.js', async (importOriginal) =>
 
 interface Spec {
   row: Record<string, unknown>;
+  /** The same row parsed exactly (integers past 2**53, float spellings). */
+  exactRow: JsonObject;
   tip: string;
   escalate: boolean;
   carry: { path: string | null; lines: number[] };
@@ -54,6 +62,8 @@ interface Case {
   raises?: string;
   error?: { type: string };
   result?: Record<string, unknown>;
+  /** The expected packed context, parsed exactly. */
+  exactResult?: JsonValue;
   calls: unknown[][];
 }
 
@@ -62,19 +72,31 @@ const FIXTURE_URL = new URL(
   import.meta.url,
 );
 
-const fixture = JSON.parse(readFileSync(FIXTURE_URL, 'utf8')) as {
+const fixtureText = readFileSync(FIXTURE_URL, 'utf8');
+const fixture = JSON.parse(fixtureText) as {
   schema: string;
   cases: Case[];
 };
 
-function json(value: unknown): JsonValue {
-  return parseJsonValue(JSON.stringify(value));
+// JSON.parse rounds integers past 2**53 and turns `1.0` into `1`, so the row
+// fed to the port and the expected result come from the exact parser; the
+// lossy parse above only supplies the plain facts the replay reads.
+{
+  const exact = parseJsonValue(fixtureText) as JsonObject;
+  (exact.get('cases') as JsonObject[]).forEach((entry, index) => {
+    const item = fixture.cases[index] as Case;
+    item.input.exactRow = (entry.get('input') as JsonObject).get('row') as JsonObject;
+    if (entry.has('result')) item.exactResult = entry.get('result') as JsonValue;
+  });
 }
 
-function object(value: unknown): JsonObject {
-  const parsed = json(value);
-  if (!(parsed instanceof JsonObject)) throw new Error('fixture value is not an object');
-  return parsed;
+/** Both sides through the Python encoder the fixture was written with. */
+function canonical(value: unknown): string {
+  return pythonJsonText(value as PythonJsonInput, {
+    asciiOnly: true,
+    sortKeys: true,
+    keyOrder: 'code-point',
+  });
 }
 
 function bytes(encoded: string): Uint8Array {
@@ -144,7 +166,7 @@ function replayReads(spec: Spec, calls: unknown[][]): TriageContextReads {
 }
 
 function request(spec: Spec): Parameters<typeof assembleTriageContext>[1] {
-  const row = object(spec.row);
+  const row = spec.exactRow;
   const recovered = row.get('recovered_anchor');
   return {
     row,
@@ -155,14 +177,14 @@ function request(spec: Spec): Parameters<typeof assembleTriageContext>[1] {
 }
 
 type Outcome =
-  | { kind: 'result'; value: Record<string, unknown> }
+  | { kind: 'result'; text: string }
   | { kind: 'failure'; type: string }
   | { kind: 'refusal' };
 
 function run(spec: Spec, calls: unknown[][]): Outcome {
   try {
     const context = assembleTriageContext(replayReads(spec, calls), request(spec));
-    return { kind: 'result', value: triageContextToPlain(context) };
+    return { kind: 'result', text: canonical(triageContextToPlain(context)) };
   } catch (error) {
     if (error instanceof TriageContextFailure) return { kind: 'failure', type: error.pythonType };
     if (error instanceof TriageContextRefusal) return { kind: 'refusal' };
@@ -189,11 +211,34 @@ describe('triage context assembly: differential against crq_repair.triage.contex
       if (item.error !== undefined) {
         expect(outcome).toEqual({ kind: 'failure', type: item.error.type });
       } else {
-        expect(outcome).toEqual({ kind: 'result', value: item.result });
+        expect(outcome).toEqual({ kind: 'result', text: canonical(item.exactResult) });
       }
       expect(calls).toEqual(item.calls);
     });
   }
+});
+
+describe('the packed finding keeps its numbers exactly', () => {
+  const pack = (name: string): string => {
+    const item = fixture.cases.find((c) => c.name === name) as Case;
+    const context = assembleTriageContext(replayReads(item.input, []), request(item.input));
+    return canonical(triageContextToPlain(context));
+  };
+
+  test('integers past 2**53 are not rounded through a JavaScript number', () => {
+    const text = pack('finding-keeps-integers-beyond-two-to-the-53');
+    expect(text).toContain('"sequence":9007199254740993');
+    expect(text).toContain('"negative":-9007199254740993');
+    expect(text).toContain(`"huge":${10n ** 40n}`);
+  });
+
+  test('a float keeps its float spelling', () => {
+    const text = pack('finding-keeps-float-kind-and-repr');
+    expect(text).toContain('"whole":1.0');
+    expect(text).toContain('"exponent":1e+22');
+    expect(text).toContain('"negative_zero":-0.0');
+    expect(text).toContain('"score":2.5');
+  });
 });
 
 describe('triage context preparer seam', () => {
@@ -234,7 +279,7 @@ describe('triage context preparer seam', () => {
   });
 
   test('the planner records a context failure as a row error through the preparer', () => {
-    const row = object(ready.input.row);
+    const row = ready.input.exactRow;
     const repo: TriageRepo = {
       beginInvocation: () => undefined,
       commitDate: () => '2026-01-01T00:00:00+00:00\n',

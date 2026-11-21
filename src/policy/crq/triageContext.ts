@@ -16,7 +16,12 @@
  * port is deliberately stricter about than Python, is a
  * {@link TriageContextRefusal} and is never converted into a recorded error.
  */
-import { JsonObject, JsonNumber, type JsonValue, toPlainJson } from './jsonValue.js';
+import {
+  JsonObject,
+  JsonNumber,
+  type JsonValue,
+  toPlainJsonRetainingNumbers,
+} from './jsonValue.js';
 import { decodeReplaced } from './backfillAccounting.js';
 import { decimalDigitValue, scanDigits } from './prReviewFindings.js';
 import { pythonIsSpace, pythonLength, pythonStrip, pythonTruthy } from './repairBinding.js';
@@ -573,7 +578,14 @@ export function triageContextPreparer(
   };
 }
 
-/** Python's packed context shape (snake_case keys), for comparison and the judge pack. */
+/**
+ * Python's packed context shape (snake_case keys), for comparison and the judge pack.
+ *
+ * `finding` keeps its numbers as {@link JsonNumber} leaves, not JavaScript
+ * numbers: an integer past 2**53 and a float's `1.0` spelling would otherwise
+ * change on the way out. Serialise the result with `pythonJsonText`, which
+ * writes a `JsonNumber` exactly; `JSON.stringify` cannot.
+ */
 export function triageContextToPlain(context: TriageContext): Record<string, unknown> {
   const contract = context.currentContract;
   return {
@@ -589,7 +601,7 @@ export function triageContextToPlain(context: TriageContext): Record<string, unk
     },
     original_region: context.originalRegion,
     content_search: context.contentSearch,
-    finding: toPlainJson(context.finding),
+    finding: toPlainJsonRetainingNumbers(context.finding),
     target: context.target,
     tip: context.tip,
     current_path: context.currentPath,
