@@ -168,12 +168,12 @@ export async function scanReviewDiff(
       header = true;
       return;
     }
-    if (line.startsWith('@@')) {
+    if (physicalStart && line.startsWith('@@')) {
       header = false;
       return;
     }
     if (header) {
-      if (line.startsWith('+++ ') || line.startsWith('--- ')) {
+      if (physicalStart && (line.startsWith('+++ ') || line.startsWith('--- '))) {
         // Git appends one literal tab to an unquoted label that holds a space;
         // drop only that, never a filename's own spaces or escaped tabs.
         const raw = line.slice(4);
@@ -194,11 +194,15 @@ export async function scanReviewDiff(
   const physical = input.diff.split(/(\r\n|\n|\r)/);
   let counted = 0;
   let physicalLine = 1;
+  // True when the piece begins an LF-delimited record; a lone CR or a logical
+  // terminator never opens a header, hunk or file label.
+  let lfStart = true;
   for (const [index, token] of physical.entries()) {
     // Odd positions hold the separator that closed the previous physical
     // piece; a lone CR does not end the LF line gitleaks keeps counting.
     if (index % 2 === 1) {
       if (token !== '\r') physicalLine += 1;
+      lfStart = token !== '\r';
       continue;
     }
     const piece = token;
@@ -209,15 +213,15 @@ export async function scanReviewDiff(
       last || piece === ''
         ? 0
         : pythonSplitlines(`${piece}\n`).length - pythonSplitlines(piece).length;
-    if (header || piece.startsWith('diff --git')) {
-      handle(piece, counted + 1, physicalLine);
+    if (header || (lfStart && piece.startsWith('diff --git'))) {
+      handle(piece, counted + 1, physicalLine, lfStart);
       counted += (piece === '' ? (last ? 0 : 1) : pythonSplitlines(piece).length) + gap;
     } else if (piece === '') {
       if (!last) counted += 1;
     } else {
       for (const [at, sub] of pythonSplitlines(piece).entries()) {
         counted += 1;
-        handle(sub, counted, physicalLine, at === 0);
+        handle(sub, counted, physicalLine, lfStart && at === 0);
       }
       counted += gap;
     }

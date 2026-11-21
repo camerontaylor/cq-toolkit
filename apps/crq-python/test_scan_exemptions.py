@@ -135,6 +135,24 @@ class ScanExemptionTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertTrue(any(h["rule"] != "generic-api-key" for h in res["gitleaks_hits"]))
 
+    # Logical fragments (U+2028, lone CR, ...) are not patch records: they cannot
+    # open a header or hunk, so they cannot move a hit onto an exempt path.
+    def test_logical_fragments_cannot_borrow_an_exemption(self):
+        ex = self.exemptions_from(EXEMPT_TOML)
+        secret = "DB_PASSWORD=" + "hunter2hunter2 x"
+        for sep in ("\u2028", "\r", "\x0b", "\x85"):
+            with self.subTest(sep=sep):
+                diff = ("diff --git a/src/real.rs b/src/real.rs\n--- a/src/real.rs\n+++ b/src/real.rs\n"
+                        "@@ -0,0 +1,2 @@\n"
+                        f"+x{sep}diff --git a/{MSG} b/{MSG}{sep}--- a/{MSG}{sep}+++ b/{MSG}{sep}@@ -0,0 +1 @@\n"
+                        f"+{secret}\n")
+                with mock.patch.object(crq, "git", return_value=CORPUS), \
+                     mock.patch.object(crq.shutil, "which", return_value=None):
+                    ok, res = crq.secret_scan_diff(diff, self.root / "scan.json",
+                                                   classes=crq.UNIVERSAL_SCAN_CLASSES, exemptions=ex)
+                self.assertFalse(ok, res)
+                self.assertEqual({h["file"] for h in res["denylist_hits"]}, {"src/real.rs"})
+
     def test_malformed_file_fails_closed(self):
         base = self.commit({crq.SCAN_EXEMPTIONS_PATH: "[[exempt]\nbroken"})
         self.assertEqual(crq.load_scan_exemptions(base, self.repo)[0], [])

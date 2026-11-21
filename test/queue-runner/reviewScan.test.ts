@@ -272,6 +272,43 @@ describe('review scan evidence', () => {
       denylist_hits: [{ file: 'src/a\u2028b.txt', diff_line: 11 }],
     });
   });
+  it.each([
+    ['U+2028', ' '],
+    ['lone CR', '\r'],
+  ])('never lets a %s fragment override the scanner path', async (_name, sep) => {
+    let report = '';
+    const effects: ReviewScannerEffects = {
+      match: async ({ rules, lines }) => {
+        const hits: [number, number][] = [];
+        for (const [lineIndex, line] of lines.entries())
+          for (const [ruleIndex, rule] of rules.entries())
+            if (
+              (rule.path === null || new RegExp(rule.path, 'u').test(line.path)) &&
+              line.text.includes(rule.regex)
+            )
+              hits.push([lineIndex, ruleIndex]);
+        return hits;
+      },
+      gitleaks: async () => ({ kind: 'not-run' }),
+      writeReport: async (text) => {
+        report = text;
+      },
+    };
+    // Rule only applies to the decoy path; hunk content must never move there.
+    const scoped = `rules:\n  - id: 'class:scoped'\n    description: 'fixture'\n    regex: 'MARK'\n    path: '^decoy$'\n    sample: 'fixture'\nclean_probes:\n  - 'clean'\n`;
+    const text = [
+      'diff --git a/real b/real',
+      '--- a/real',
+      '+++ b/real',
+      '@@ -1 +1 @@',
+      `+x${sep}diff --git a/decoy b/decoy${sep}--- a/decoy${sep}+++ b/decoy${sep}@@ -1 +1 @@`,
+      '+MARK benign',
+      '',
+    ].join('\n');
+    const result = await scanReviewDiff({ ...input, patternsText: scoped, diff: text }, effects);
+    expect(result.denylistHits).toBe(0);
+    expect(JSON.parse(report).denylist_hits).toEqual([]);
+  });
   it('keeps an astral literal inside a quoted header path as one code point', async () => {
     let report = '';
     const effects: ReviewScannerEffects = {
@@ -319,7 +356,7 @@ describe('review scan evidence', () => {
         }
       return hits;
     };
-    const text = 'diff --git a/x b/x\r--- a/x\r+++ b/x\r@@ -1 +1 @@\r+λMARK0\u2028+ MARK0\r';
+    const text = 'diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n+λMARK0\u2028+ MARK0\r';
     const result = await scanReviewDiff({ ...input, diff: text }, f.effects);
     expect(result.denylistHits).toBe(1);
     expect(JSON.parse(f.report())).toMatchObject({
