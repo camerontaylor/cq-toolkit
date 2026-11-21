@@ -195,10 +195,39 @@ only `<root>/<prefix><name>` with branch `crq/<name>` is owned, 40-hex commits,
 publication refs only, and the recursive delete never removes a symlink or
 non-directory. Nothing imports it outside tests.
 
-Still unwired after S6-l and S6-m: the network and runtime effects, namely
-`lsRemoteHeads` and `push` (remote), `prInfo`, `listBranchPrs` and `createPr`
-(forge), `verify`, `hackDetector`, `secretScan` and `repairProvenance`,
-`newItem` and the `FixPrBacklog`, plus the binding of any of these into `tick`.
+S6-n (inactive): `forgePublicationReads`
+(`src/adapters/crq/publicationForgeReads.ts`) binds the two read-only forge calls
+of the publication path: `prInfo` (`crq.pr_info`, `gh pr view <pr> --json
+number,state,isDraft,headRefName,headRefOid,baseRefName,updatedAt,mergeCommit,mergedAt`)
+and `listBranchPrs` (`gh pr list --head <branch> --state all --json
+number,url,state,headRefOid`), both in the primary clone. It reuses the existing
+`GhFn` runner and `ForgeBudget`: with `options.budget` each request takes
+`budget.take()` seconds (and `RefreshExhausted` refuses before any request),
+without it 120 seconds, as `crq.gh_json` does. A non-zero exit is Python's
+`RuntimeError` text (first six argv words, stripped stderr cut at 400 code
+points); the time bound and a missing `gh` are `OSError` (never a miss), as
+`TimeoutExpired` and `FileNotFoundError` are not `RuntimeError`; output that is not
+JSON is `ValueError`. Keys `gh` did not print raise `KeyError` at the read, not
+before (a closed PR without `headRefName` is still `stale`), and a non-object
+answer raises Python's subscript `TypeError`.
+`test/adapters/crq/publicationForgeReads.test.ts` replaces `subprocess.run` with a
+scripted fake in the Python oracle (`test/helpers/publicationForgeReadsOracle.py`)
+and runs the real `crq.pr_info`, `crq.gh_json` and `repair_tick.recover_publication`
+against the port driving the real `recoverPublication`: argv, directory, timeout,
+outcome class, text and consumer events agree on every scripted transcript. No real
+forge call is made. Narrowings: the PR is a non-negative integer and the branch and
+repository are validated (Python would pass `str()` of anything to `gh`); a branch
+listing that is not an array is a `TypeError` where Python reads `null`, `{}`, `0`
+and `""` as "no PR" and would go on to create one, and a falsy non-object `pr view`
+answer is refused where `publish` would read it as no PR; integral floats read as
+integers; invalid UTF-8 in `gh` output cannot be detected through `GhFn` (Python
+raises `UnicodeDecodeError`); JSON error text is the parser's, not CPython's; a
+missing clone directory reads as a missing `gh`. Nothing imports it outside tests.
+
+Still unwired after S6-l, S6-m and S6-n: the network and runtime effects, namely
+`lsRemoteHeads` and `push` (remote), `createPr` (forge write), `verify`,
+`hackDetector`, `secretScan` and `repairProvenance`, `newItem` and the
+`FixPrBacklog`, plus the binding of any of these into `tick`.
 
 Closed in S6-g, kept here as the record:
 
