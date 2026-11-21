@@ -1,5 +1,5 @@
 /**
- * `repair_tick.recover_publication` (repair_tick.py:732-770): offline recovery
+ * `repair_tick.recover_publication` (repair_tick.py:756-801): offline recovery
  * of a journaled repair publication after a crash between the journal write
  * and the remote effects. Inactive: nothing imports this outside tests.
  *
