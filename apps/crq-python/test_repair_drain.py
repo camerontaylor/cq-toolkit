@@ -2044,6 +2044,42 @@ class RepairDrainTest(unittest.TestCase):
         self.assertIsNone(self.result('crq-run1-F1'))
         self.assertIsNone(self.result('crq-run2-F1'))
 
+    def test_worker_crash_turns_the_drain_result_into_an_error_with_the_report(self):
+        # A forked worker that dies with a non-zero exit must reach the caller:
+        # after reaping the child the drain keeps the triage report and returns
+        # a non-zero error outcome instead of a clean 'drained'.
+        report = {'status': 'triaged', 'processed': 1}
+        self.config['repair']['max_concurrent_items'] = 2
+        stderr = io.StringIO()
+        with mock.patch.object(service, 'fetch_clone', return_value=None), \
+             mock.patch.object(service, 'triage_phase', return_value=report), \
+             mock.patch.object(service, 'dispatch_paused', return_value=None), \
+             mock.patch.object(service.os, 'fork', return_value=4242), \
+             mock.patch.object(service.os, 'waitpid', return_value=(4242, 1 << 8)), \
+             contextlib.redirect_stderr(stderr):
+            result = service.drain(self.config)
+        self.assertEqual(result['status'], 'error')
+        self.assertEqual(result['triage'], report)
+        self.assertIn('worker failures', result['error'])
+        self.assertIn('worker exited with code 1', stderr.getvalue())
+
+    def test_rate_limited_worker_stops_admission_without_an_error_result(self):
+        # The exclusion half of the aggregate: a worker that stops on the
+        # provider pause exits code 2. Admission stops, but the pass stays a
+        # clean 'drained' with the triage report and exit code 0.
+        report = {'status': 'triaged', 'processed': 1}
+        self.config['repair']['max_concurrent_items'] = 2
+        stderr = io.StringIO()
+        with mock.patch.object(service, 'fetch_clone', return_value=None), \
+             mock.patch.object(service, 'triage_phase', return_value=report), \
+             mock.patch.object(service, 'dispatch_paused', return_value=None), \
+             mock.patch.object(service.os, 'fork', return_value=4242), \
+             mock.patch.object(service.os, 'waitpid', return_value=(4242, 2 << 8)), \
+             contextlib.redirect_stderr(stderr):
+            result = service.drain(self.config)
+        self.assertEqual(result, {'status': 'drained', 'triage': report})
+        self.assertIn('provider pause; stopping new admission', stderr.getvalue())
+
     def test_marker_during_triage_defers_later_judgments(self):
         # The triage phase judges candidates one at a time; a marker that
         # appears between two judgments must defer the rest instead of starting
@@ -2305,7 +2341,7 @@ class RepairDrainTest(unittest.TestCase):
              mock.patch.object(service, 'blocked', return_value=False), \
              mock.patch.object(service, 'fetch_clone', return_value=None), \
              mock.patch.object(service, 'triage_phase', return_value=report), \
-             mock.patch.object(service, 'drain_items'), \
+             mock.patch.object(service, 'drain_items', return_value=[]), \
              mock.patch.dict(os.environ, {'ZAI_API_KEY': 'unused-fixture'}), \
              contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
             code = service.main([])
@@ -2342,7 +2378,7 @@ class RepairDrainTest(unittest.TestCase):
              mock.patch.object(service, 'dispatch_paused', return_value=None), \
              mock.patch.object(service, 'fetch_clone', return_value=None), \
              mock.patch.object(service, 'git', return_value='a' * 40), \
-             mock.patch.object(service, 'drain_items'), \
+             mock.patch.object(service, 'drain_items', return_value=[]), \
              mock.patch('crq_repair.triage.phase', return_value=report), \
              mock.patch.object(backfill_runtime, 'settings', return_value={'rollout': 1}), \
              mock.patch.object(backfill_runtime, 'services', return_value=('repo', None, 'outbox', None)), \
