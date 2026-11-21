@@ -307,7 +307,7 @@ describe('review scan evidence', () => {
     ].join('\n');
     const result = await scanReviewDiff({ ...input, patternsText: scoped, diff: text }, effects);
     expect(result.denylistHits).toBe(0);
-    expect(JSON.parse(report).denylist_hits).toEqual([]);
+    expect(JSON.parse(report)).toMatchObject({ denylist_hits: [] });
   });
   it('keeps an astral literal inside a quoted header path as one code point', async () => {
     let report = '';

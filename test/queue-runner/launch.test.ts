@@ -291,6 +291,28 @@ describe('launch: foreign repos and scan classes', () => {
     expect(h.metas[0]?.profile).toEqual({ flags: ['--plain', '--x'] });
   });
 
+  it('a normal review with a plan profile appends the profile flags after --base-commit', async () => {
+    const h = harness();
+    const it1 = item({});
+    await launch(
+      h.queue,
+      it1,
+      plan({ profile: { flags: ['--plain', '--x'] }, config_digest: 'd' }),
+      h.fx,
+    );
+    expect(h.metas[0]?.cmd).toEqual([
+      'coderabbit',
+      'review',
+      '--agent',
+      '--deep',
+      '--committed',
+      '--base-commit',
+      BASE,
+      '--plain',
+      '--x',
+    ]);
+  });
+
   it('push items use the projection scan in the configured clone; unconfigured is an error', async () => {
     const h = harness({}, repos);
     const push = item({
