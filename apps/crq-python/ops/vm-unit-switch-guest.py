@@ -142,7 +142,8 @@ def require(condition, message):
         raise RuntimeError(message)
 
 
-def _starttime(pid):
+def _stat_sample(pid):
+    """One /proc/<pid>/stat sample: process state and starttime together."""
     try:
         text = (pathlib.Path("/proc") / str(pid) / "stat").read_text()
     except OSError:
@@ -150,7 +151,9 @@ def _starttime(pid):
     # The comm field may contain spaces and parentheses; fields after the
     # final ')' begin at state (field 3), so starttime (field 22) is index 19.
     tail = text.rsplit(")", 1)[1].split()
-    return tail[19] if len(tail) > 19 else None
+    if len(tail) < 20:
+        return None
+    return {"state": tail[0], "starttime": tail[19]}
 
 
 def process_state(pid):
@@ -158,19 +161,29 @@ def process_state(pid):
     state = {"pid": pid, "alive": False, "cmdline": "", "starttime": None}
     if not isinstance(pid, int) or pid <= 0:
         return state
-    try:
-        raw = (pathlib.Path("/proc") / str(pid) / "cmdline").read_bytes()
-    except OSError:
+    # State and starttime come from one /proc/<pid>/stat sample. A successful
+    # /proc/<pid>/cmdline read does not prove liveness: Linux keeps the file
+    # readable with an empty command line for a zombie, so liveness is decided
+    # by the stat state and a zombie or dead process is never a surviving
+    # fixture process even though its /proc entry and start time remain.
+    sample = _stat_sample(pid)
+    if sample is None:
+        return state
+    state["starttime"] = sample["starttime"]
+    if sample["state"] in ("Z", "X", "x"):
         return state
     state["alive"] = True
-    state["cmdline"] = raw.replace(b"\0", b" ").decode("utf-8", "replace").strip()
-    state["starttime"] = _starttime(pid)
     try:
         state["pgid"] = os.getpgid(pid)
         state["sid"] = os.getsid(pid)
     except OSError:
         state["pgid"] = None
         state["sid"] = None
+    try:
+        raw = (pathlib.Path("/proc") / str(pid) / "cmdline").read_bytes()
+    except OSError:
+        return state
+    state["cmdline"] = raw.replace(b"\0", b" ").decode("utf-8", "replace").strip()
     return state
 
 
@@ -236,11 +249,14 @@ def stop_process(proc):
     before = process_state(proc.pid)
     if before["alive"]:
         proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5)
+    # Reap even when the child already exited: process_state does not count a
+    # zombie as alive, but an owned child that has not been waited on yet must
+    # still be reaped here. wait() returns immediately for an exited child.
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
     after = process_state(proc.pid)
     require(not after["alive"], "harness cleanup did not stop a seeded process")
     return {"before": before, "after": after, "terminated": True,
