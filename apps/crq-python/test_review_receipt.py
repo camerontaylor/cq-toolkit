@@ -30,7 +30,7 @@ class ReceiptTest(unittest.TestCase):
             item = dict(kind=receipt.KIND, subject=doc["source"], capture=doc["capture"],
                         receipt_id=rid, repair_runs={"run": record})
             info = dict(number=9, state="MERGED", baseRefName="main", headRefOid="b" * 40,
-                        mergeCommit={"oid": "c" * 40})
+                        mergeCommit={"oid": "b" * 40})
             c = SimpleNamespace(STATE=Path(td), pr_info=lambda _: info,
                                 git=lambda *args: "d" * 40, is_ancestor=lambda *args: True,
                                 iso=lambda: dt.datetime.now(dt.timezone.utc).isoformat())
@@ -83,7 +83,7 @@ class ReceiptTest(unittest.TestCase):
             item = dict(kind=receipt.KIND, state='done', receipt_id=rid, subject=doc['source'],
                         capture=doc['capture'], repair_runs={'r': record})
             info = dict(number=9, state="MERGED", baseRefName="main", headRefOid="b" * 40,
-                        mergeCommit={"oid": "c" * 40})
+                        mergeCommit={"oid": "b" * 40})
             c = SimpleNamespace(STATE=Path(td), pr_info=mock.Mock(return_value=info),
                                 git=mock.Mock(return_value="d" * 40), is_ancestor=lambda *args: True,
                                 iso=lambda: dt.datetime.now(dt.timezone.utc).isoformat())
