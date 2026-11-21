@@ -7,8 +7,8 @@
  * branch's PRs, and ancestry) and performs at most one push and one finalize.
  * Every read and effect is injected; this module has no Git or forge access.
  * Binding `push` to the real leased push (`src/adapters/git/leasedPush.ts`) and
- * `finalize` to `finalize_publication` is the remaining runtime work, see
- * `docs/crq/tick-slot-missing-effects.md`.
+ * `finalize` to `finalizePublication` (`publicationFinalize.ts`) is the
+ * remaining runtime work, see `docs/crq/tick-slot-missing-effects.md`.
  *
  * The invariants pinned here are the ones the Python lease test pins
  * (`test_repair_publication_lease.py`):
