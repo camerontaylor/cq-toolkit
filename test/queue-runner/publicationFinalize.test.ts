@@ -4,6 +4,7 @@ import { isPyError, PyError } from '../../src/queue-runner/pyErrors.js';
 import {
   finalizePublication,
   PR_CREATE_ATTEMPTS,
+  REFUSE_FIX_PR_IDENTITY,
   type CreatePrRequest,
   type FixPrRow,
   type PublicationFinalizeEffects,
@@ -266,6 +267,32 @@ describe('finalizePublication: unique prepared-head PR (#2290)', () => {
     expect(q.repair_own_commits).toEqual(['c-p']);
     expect(p.record.state).toBe('ready');
     expect(p.item.state).toBe('repairing');
+  });
+
+  it('refuses when the create lands but the re-list is empty, recording and enrolling nothing', async () => {
+    const h = harness();
+    const p = parts('pr77', 'p');
+    // gh pr create succeeded, yet the forge still lists no PR on the branch.
+    h.createImpl = () => {};
+    const out = await finalize(h, backlogOf(0, 10), p);
+    expect(out.thrown).toMatchObject({
+      kind: 'ValueError',
+      message: REFUSE_FIX_PR_IDENTITY,
+    });
+    expect(h.calls).toEqual([
+      'list',
+      'provenance',
+      'write-body',
+      'write-journal',
+      'save',
+      'create',
+      'list',
+    ]);
+    expect(p.record).not.toHaveProperty('fix_pr');
+    expect(p.record.state).toBe('ready');
+    expect(h.items).toEqual([]);
+    // The pending journal and attempt stay, so the next tick sees the attempt counted.
+    expect(p.publication).toMatchObject({ pr_create_pending: true, pr_create_attempts: 1 });
   });
 
   it('a KeyError, not a mismatch, when the sole PR row lacks headRefOid', async () => {
@@ -536,6 +563,87 @@ describe('finalizePublication: bookkeeping', () => {
     const out = await finalize(h, backlogOf(0, 10), p);
     expect(out.thrown).toMatchObject({ kind: 'IndexError' });
     expect(h.calls).toEqual(['list', 'provenance']);
+  });
+});
+
+// Documented narrowings (module header, docs/crq/tick-slot-missing-effects.md
+// S6-i): where Python would carry on with a value the queue never holds, the
+// port refuses loudly instead of guessing. Pinning them means loosening one is
+// a deliberate edit, not a silent drift from Python's `str()` and iteration.
+describe('finalizePublication: documented input narrowings', () => {
+  it.each([
+    ['a float', 1.5],
+    ['a bool', true],
+    ['None', null],
+  ])('refuses %s as the open-PR number, before fix_pr is recorded', async (_name, pr) => {
+    const h = harness();
+    const p = parts('pr77', 'p');
+    p.item.pr = pr;
+    p.publication.open_pr = true;
+    const out = await finalize(h, backlogOf(0, 10), p);
+    expect(out.thrown).toBeInstanceOf(Error);
+    expect(out.thrown).not.toBeInstanceOf(PyError);
+    expect((out.thrown as Error).message).toBe('unsupported PR number representation');
+    expect(p.record).not.toHaveProperty('fix_pr');
+    expect(p.record.state).toBe('ready');
+    expect(h.calls).toEqual([]);
+  });
+
+  it('refuses a non-integer listed PR number when enrolling, before the item exists', async () => {
+    const h = harness();
+    const p = parts('pr77', 'p');
+    h.listed.set(p.publication.branch as string, [
+      { number: 1.5, url: 'u', state: 'OPEN', headRefOid: 'hp' },
+    ]);
+    const out = await finalize(h, backlogOf(0, 10), p);
+    expect((out.thrown as Error).message).toBe('unsupported PR number representation');
+    expect(h.items).toEqual([]);
+    expect(h.saves).toEqual([]);
+    expect(p.record.state).toBe('ready');
+  });
+
+  it('accepts integral numbers in every shape the queue can hold', async () => {
+    for (const [pr, text] of [
+      [7, '7'],
+      [7n, '7'],
+      ['7', '7'],
+      [{ kind: 'int', integer: 7n }, '7'],
+    ] as const) {
+      const h = harness();
+      const p = parts('pr77', 'p');
+      p.item.pr = pr;
+      p.publication.open_pr = true;
+      const out = await finalize(h, backlogOf(0, 10), p);
+      expect(out.thrown).toBeUndefined();
+      expect(p.record.fix_pr).toEqual({ number: pr, url: `https://github.com/o/r/pull/${text}` });
+    }
+  });
+
+  it('a non-list commits is a TypeError after record.publication is set, with nothing else touched', async () => {
+    const h = harness();
+    const p = parts('pr77', 'p');
+    // Python would iterate this string and own each character as a commit.
+    p.publication.commits = 'abc';
+    const q: Rec = { items: [], repair_own_commits: ['x'] };
+    const out = await finalize(h, backlogOf(0, 10), p, q);
+    expect(out.thrown).toBeInstanceOf(TypeError);
+    expect((out.thrown as Error).message).toBe('commits must be a list');
+    expect(p.record.publication).toBe(p.publication);
+    expect(p.record).not.toHaveProperty('published_commits');
+    expect(q.repair_own_commits).toEqual(['x']);
+    expect(h.calls).toEqual([]);
+  });
+
+  it('a non-list repair_own_commits is a TypeError before the record is read for state', async () => {
+    const h = harness();
+    const p = parts('pr77', 'p');
+    const q: Rec = { items: [], repair_own_commits: 'abc' };
+    const out = await finalize(h, backlogOf(0, 10), p, q);
+    expect(out.thrown).toBeInstanceOf(TypeError);
+    expect((out.thrown as Error).message).toBe('repair_own_commits must be a list');
+    expect(p.record).not.toHaveProperty('publication');
+    expect(q.repair_own_commits).toBe('abc');
+    expect(h.calls).toEqual([]);
   });
 });
 
