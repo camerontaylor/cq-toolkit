@@ -321,9 +321,12 @@ S6-r (inactive): `filePublicationProvenance`
 (`src/adapters/crq/publicationProvenance.ts`) binds `repairProvenance`,
 `repair_tick.repair_provenance(c, record, run)`, the provenance table
 `finalizePublication` appends after the verdict rows and before `writeFixPrBody`.
-It is read-only and reuses the existing readers: `readJsonValue` and `pathExists`
-(`repairStateSource.ts`) for the job files and `Path.exists()`,
-`checkBackfillRollout` (now split out of `readBackfillRollout`) and `sortedJsonNames`
+It is read-only and reuses the existing readers: `readJsonValue`
+(`repairStateSource.ts`) for the job files, a local `exists` for `Path.exists()`
+(it stats the `os.fsencode` bytes, so a lone `U+DC80..U+DCFF` is the raw byte and
+any other lone surrogate does not exist, never Node's `U+FFFD`), pathlib-style
+joins that keep `..` (a symlinked state root resolves through the kernel),
+Python `str.strip()` blankness for the spool key, `checkBackfillRollout` (now split out of `readBackfillRollout`) and `sortedJsonNames`
 (now exported from `triageRows.ts`) for the retained-reviews lookup, `ledgerLoads`,
 `validate` and the ledger record path for the link. Pinned in order and text: the
 five header lines, then one row per job in record order; the finding-id and
