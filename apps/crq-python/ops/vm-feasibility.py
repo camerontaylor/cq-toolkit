@@ -1345,6 +1345,30 @@ def cmd_run(args) -> int:
     if not isinstance(source_commit, str) or not COMMIT_RE.fullmatch(source_commit):
         raise UsageRefusal("run requires --source-commit with the full git commit "
                            "whose tree produced the executed scripts")
+    # Provenance must bind to the bytes Python executes. The interpreter
+    # loaded this file at process start, and image preparation below can
+    # restore the checkout, so a disk read taken after that point would
+    # verify and retain bytes the running program never executed. When this
+    # process is the CLI itself, act as a launcher: read each script once,
+    # verify the pair against the stated commit before anything is prepared,
+    # and execute this run from that one verified host buffer. The
+    # relaunched pipeline takes the buffer from its namespace and retains
+    # exactly those bytes below, mirroring the guest path that uploads its
+    # verified byte buffer.
+    host_source = pathlib.Path(__file__).resolve()
+    guest_source = host_source.with_name("vm-guest-probe.py")
+    buffer = globals().get("_VERIFIED_HOST_BUFFER")
+    if buffer is None:
+        buffer = (host_source.read_bytes(), guest_source.read_bytes())
+    if __name__ == "__main__":
+        verify_source_scripts(source_commit, host_source, guest_source,
+                              buffer[0], buffer[1])
+        namespace = {"__name__": "crq_vm_verified_host",
+                     "__file__": str(host_source),
+                     "_VERIFIED_HOST_BUFFER": buffer}
+        exec(compile(buffer[0], str(host_source), "exec"), namespace)
+        return namespace["main"](sys.argv[1:])
+    host_bytes, guest_bytes = buffer
     recorder = Recorder(state)
     stamps = {"start": host_stamp()}
     image = fetch_image(state, recorder)
@@ -1354,10 +1378,6 @@ def cmd_run(args) -> int:
     launched = None
     try:
         run_dir = pathlib.Path(run["path"])
-        host_source = pathlib.Path(__file__).resolve()
-        guest_source = host_source.with_name("vm-guest-probe.py")
-        host_bytes = host_source.read_bytes()
-        guest_bytes = guest_source.read_bytes()
         verify_source_scripts(source_commit, host_source, guest_source,
                               host_bytes, guest_bytes)
         host_artifact = run_dir / "executed-host-script.py"
