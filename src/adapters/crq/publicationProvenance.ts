@@ -49,8 +49,7 @@
  * - Retained records sort by file name as Python 3.14's `glob` does (code
  *   point order, undecodable bytes as surrogate escapes), via `triageRows`.
  */
-import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { readFile, stat } from 'node:fs/promises';
 import {
   JsonNumber,
   JsonObject,
@@ -73,7 +72,7 @@ import { PyError } from '../../queue-runner/pyErrors.js';
 import { checkBackfillRollout, readOptionalFile } from './backfillRollout.js';
 import { SpoolConfigError } from './publisherSpool.js';
 import { checkRepairJobId } from './repairPreparation.js';
-import { pathExists, readJsonValue, StateFileUnreadable } from './repairStateSource.js';
+import { readJsonValue, StateFileUnreadable } from './repairStateSource.js';
 import { sortedJsonNames } from './triageRows.js';
 
 type Rec = Record<string, unknown>;
@@ -133,6 +132,37 @@ function relativeTo(path: PyPath, root: PyPath): string {
   }
   const rest = path.parts.slice(root.parts.length);
   return rest.length === 0 ? '.' : rest.join('/');
+}
+
+/**
+ * `os.fsencode` on POSIX (UTF-8, `surrogateescape`): a lone `U+DC80..U+DCFF` is
+ * the raw byte, and any other lone surrogate is a `UnicodeEncodeError`
+ * (`ValueError`), which `Path.exists()` reports as absent.
+ */
+function fsEncode(text: string): Buffer | null {
+  const parts: Buffer[] = [];
+  for (const char of text) {
+    const code = char.codePointAt(0) as number;
+    if (code >= 0xd800 && code <= 0xdfff) {
+      if (code < 0xdc80 || code > 0xdcff) return null;
+      parts.push(Buffer.from([code - 0xdc00]));
+    } else {
+      parts.push(Buffer.from(char));
+    }
+  }
+  return Buffer.concat(parts);
+}
+
+/** `Path.exists()` on 3.14: any `stat` or encoding failure is "does not exist". */
+async function exists(path: PyPath): Promise<boolean> {
+  const bytes = fsEncode(pathText(path));
+  if (bytes === null) return false;
+  try {
+    await stat(bytes);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // ------------------------------------------------------- python semantics
@@ -248,8 +278,8 @@ async function readJob(path: string): Promise<JsonValue> {
  * the lookup before any record is keyed; a review without `id` is a `KeyError`
  * and an unhashable one a `TypeError`, in file order.
  */
-async function retainedReviews(stateRoot: string): Promise<Map<string, JsonObject>> {
-  const rollout = await readOptionalFile(join(stateRoot, 'backfill-rollout.json'));
+async function retainedReviews(state: PyPath): Promise<Map<string, JsonObject>> {
+  const rollout = await readOptionalFile(pathText(joinPath(state, 'backfill-rollout.json')));
   // `settings` is `None` when the file is absent, and `finding_inbox` raises `ValueError`.
   if (rollout === null)
     throw new LedgerIntegrityError('backfill requires existing ledger configuration');
@@ -265,7 +295,8 @@ async function retainedReviews(stateRoot: string): Promise<Map<string, JsonObjec
     throw new PyError('TypeError', 'durable_artifact_root must be a str');
   if (root.includes('\0')) throw new LedgerIntegrityError('embedded null byte');
 
-  const pending = join(stateRoot, 'backfill', 'publication', 'pending');
+  // `pathlib` keeps `..`, so a symlinked segment before it resolves in the kernel, not lexically.
+  const pending = pathText(joinPath(state, 'backfill/publication/pending'));
   const prefix = Buffer.from(`${pending}/`);
   const records: JsonValue[] = [];
   for (const name of await sortedJsonNames(pending)) {
@@ -360,7 +391,7 @@ export function filePublicationProvenance(
           () => runText,
         );
         const raw = joinPath(joinPath(joinPath(state, 'runs'), sourceRun), 'review.ndjson');
-        let local = (await pathExists(real(raw))) ? raw : jobFile;
+        let local = (await exists(raw)) ? raw : jobFile;
         const pr = dget(job, 'pr');
         let link = pythonTruthy(pr)
           ? `https://github.com/${repo}/pull/${pyStr(pr as JsonValue)}`
@@ -371,11 +402,11 @@ export function filePublicationProvenance(
             joinPath(state, 'backfill/findings/triage'),
             `${asText(fid, 'finding id')}.json`,
           );
-          local = (await pathExists(real(row))) ? row : jobFile;
+          local = (await exists(row)) ? row : jobFile;
           link = `threadless; local source \`${relativeTo(local, root)}\``;
           if (reviews === undefined) {
             try {
-              reviews = await retainedReviews(stateRoot);
+              reviews = await retainedReviews(state);
             } catch (error) {
               if (!lookupFailure(error)) throw error;
               reviews = new Map();

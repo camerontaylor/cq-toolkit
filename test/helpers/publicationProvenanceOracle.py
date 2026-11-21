@@ -7,8 +7,16 @@ Reads {"cases": [case]} on stdin and writes {"results": [result]}. A case is one
 
   {"op": "provenance", "repo": str, "run": <json>, "record": <json>,
    "files": {"<path under state/>": text | {"hex": "<bytes>"} | {"dir": true}},
-   "outside": {"<path under the sibling outside/ dir>": text}}
+   "outside": {"<path under the sibling outside/ dir>": text},
+   "state_alias": bool}
   {"op": "review", "source": str, "findings": [{"title": str}]}
+
+With "state_alias" the state tree lives at `actual/state` and `STATE` is the
+lexical path `alias/../state`, where `alias` is a symlink to `actual/child`: the
+kernel resolves it to `actual/state`, while a lexically normalised join would
+reach the empty decoy `state` beside `alias`.
+
+Lone surrogates in a path (U+DC80..U+DCFF) are the raw byte under `surrogateescape`.
 
 `${OUT}` anywhere in a "provenance" case is replaced by the absolute path of
 the `outside/` directory, a sibling of the repository root, so a source run can
@@ -67,10 +75,18 @@ def provenance(case):
         state = root / 'state'
         state.mkdir(parents=True)
         outside.mkdir()
+        c_state = state
+        if case.get('state_alias'):
+            (tmp / 'actual' / 'child').mkdir(parents=True)
+            (tmp / 'alias').symlink_to(tmp / 'actual' / 'child')
+            (tmp / 'state').mkdir()
+            state = tmp / 'actual' / 'state'
+            state.mkdir()
+            c_state = tmp / 'alias' / '..' / 'state'
         case = json.loads(json.dumps(case).replace('${OUT}', str(outside)))
         lay_out(state, case.get('files', {}))
         lay_out(outside, case.get('outside', {}))
-        c = SimpleNamespace(STATE=state, REPO=case['repo'])
+        c = SimpleNamespace(STATE=c_state, REPO=case['repo'])
         return repair_tick.repair_provenance(c, case['record'], case['run'])
 
 

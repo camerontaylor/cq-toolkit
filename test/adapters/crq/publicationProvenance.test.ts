@@ -6,9 +6,10 @@
 // Python ledger itself. Tmp state only: no network, git, forge, provider, queue
 // or service state.
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
 import {
   filePublicationProvenance,
@@ -21,10 +22,13 @@ import {
   type PublicationFinalizeEffects,
 } from '../../../src/queue-runner/publicationFinalize.js';
 
-const ORACLE = new URL('../../helpers/publicationProvenanceOracle.py', import.meta.url).pathname;
-const APPS = new URL('../../../apps/crq-python', import.meta.url).pathname;
-const SOURCE = new URL('../../../src/adapters/crq/publicationProvenance.ts', import.meta.url)
-  .pathname;
+const ORACLE = fileURLToPath(
+  new URL('../../helpers/publicationProvenanceOracle.py', import.meta.url),
+);
+const APPS = fileURLToPath(new URL('../../../apps/crq-python', import.meta.url));
+const SOURCE = fileURLToPath(
+  new URL('../../../src/adapters/crq/publicationProvenance.ts', import.meta.url),
+);
 
 /** `review_ledger.REPO`, the repository every Python-built review is for. */
 const REPO = 'camerontaylor/cq-toolkit';
@@ -40,6 +44,8 @@ interface Case {
   record?: Rec;
   files?: Record<string, FileSpec>;
   outside?: Record<string, string>;
+  /** The state root is `alias/../state` through a symlink; see the oracle. */
+  stateAlias?: boolean;
 }
 interface Outcome {
   ok?: unknown;
@@ -69,16 +75,27 @@ const wire = (item: Case): Rec => ({
   record: item.record ?? { jobs: [] },
   files: item.files ?? {},
   outside: item.outside ?? {},
+  state_alias: item.stateAlias ?? false,
 });
+
+/** `os.fsencode` for a relative path: a lone `U+DC80..U+DCFF` is the raw byte. */
+function fsBytes(text: string): Buffer {
+  const parts: Buffer[] = [];
+  for (const char of text) {
+    const code = char.codePointAt(0) as number;
+    parts.push(code >= 0xdc80 && code <= 0xdcff ? Buffer.from([code - 0xdc00]) : Buffer.from(char));
+  }
+  return Buffer.concat(parts);
+}
 
 async function layOut(base: string, files: Record<string, FileSpec> | undefined): Promise<void> {
   for (const [rel, spec] of Object.entries(files ?? {})) {
-    const path = join(base, rel);
+    const path = Buffer.concat([Buffer.from(`${base}/`), fsBytes(rel)]);
     if (typeof spec === 'object' && 'dir' in spec) {
       await mkdir(path, { recursive: true });
       continue;
     }
-    await mkdir(join(path, '..'), { recursive: true });
+    await mkdir(path.subarray(0, path.lastIndexOf(0x2f)), { recursive: true });
     await writeFile(path, typeof spec === 'string' ? spec : Buffer.from(spec.hex, 'hex'));
   }
 }
@@ -86,10 +103,20 @@ async function layOut(base: string, files: Record<string, FileSpec> | undefined)
 async function runTs(item: Case): Promise<Outcome> {
   const tmp = await realpath(await mkdtemp(join(tmpdir(), 'crq-provenance-')));
   cleanups.push(tmp);
-  const state = join(tmp, 'root', 'state');
   const outside = join(tmp, 'outside');
-  await mkdir(state, { recursive: true });
   await mkdir(outside);
+  await mkdir(join(tmp, 'root', 'state'), { recursive: true });
+  let state = join(tmp, 'root', 'state');
+  // `node:path.join` would collapse `alias/..`; the string below keeps it, as pathlib does.
+  let stateRoot = state;
+  if (item.stateAlias) {
+    await mkdir(join(tmp, 'actual', 'child'), { recursive: true });
+    await symlink(join(tmp, 'actual', 'child'), join(tmp, 'alias'));
+    await mkdir(join(tmp, 'state'));
+    state = join(tmp, 'actual', 'state');
+    await mkdir(state);
+    stateRoot = `${tmp}/alias/../state`;
+  }
   const spec = JSON.parse(JSON.stringify(wire(item)).replaceAll('${OUT}', outside)) as {
     repo: string;
     run: string;
@@ -99,7 +126,7 @@ async function runTs(item: Case): Promise<Outcome> {
   };
   await layOut(state, spec.files);
   await layOut(outside, spec.outside);
-  const binding = filePublicationProvenance({ stateRoot: state, repo: spec.repo });
+  const binding = filePublicationProvenance({ stateRoot, repo: spec.repo });
   try {
     return { ok: await binding.repairProvenance(spec.record, spec.run) };
   } catch (error) {
@@ -195,7 +222,12 @@ const ledgerUrl = (id: string): string =>
 /** A canonical-finding job over review A and its finished state tree. */
 function reviewed(
   name: string,
-  patch: { job?: Rec; files?: Record<string, FileSpec>; repo?: string } = {},
+  patch: {
+    job?: Rec;
+    files?: Record<string, FileSpec>;
+    repo?: string;
+    stateAlias?: boolean;
+  } = {},
 ): Case {
   const { a } = reviews();
   return jobCase(
@@ -203,6 +235,7 @@ function reviewed(
     { 'crq-r': { canonical_finding_id: a.finding_ids[0], review_id: a.record.id, ...patch.job } },
     {
       ...(patch.repo === undefined ? {} : { repo: patch.repo }),
+      ...(patch.stateAlias ? { stateAlias: true } : {}),
       files: {
         'backfill-rollout.json': rollout(),
         ...Object.fromEntries([pendingFile(a.record)]),
@@ -668,6 +701,78 @@ describe('repairProvenance parity: the retained review lookup and ledger link', 
       ),
     ]);
     expect(lines(out)).toHaveLength(7);
+  });
+});
+
+describe('repairProvenance parity: state root, filename bytes and key blankness', () => {
+  it('a state root with a symlinked segment before `..` is resolved by the kernel, not lexically', async () => {
+    const { a } = reviews();
+    const [linked, plain] = await expectParity([
+      reviewed('aliased state root', { stateAlias: true }),
+      jobCase('aliased state root, plain job', { 'crq-a': { pr: 3 } }, { stateAlias: true }),
+    ]);
+    expect(rows(linked)[0]).toContain(ledgerUrl(a.record.id));
+    expect(rows(plain)).toEqual([`| \`crq-a\` | \`run-1\` | https://github.com/${REPO}/pull/3 |`]);
+  });
+
+  it('a lone surrogate-escape code unit probes the raw byte, never U+FFFD', async () => {
+    const out = await expectParity([
+      jobCase(
+        'byte directory exists',
+        { 'crq-a': { source: { run: 'a\udcffb' } } },
+        { files: { 'runs/a\udcffb/review.ndjson': '' } },
+      ),
+      jobCase(
+        'only the U+FFFD directory exists',
+        { 'crq-a': { source: { run: 'a\udcffb' } } },
+        { files: { 'runs/a\ufffdb/review.ndjson': '' } },
+      ),
+      jobCase(
+        'a surrogate outside the escape range cannot be encoded',
+        { 'crq-a': { source: { run: 'a\ud800b' } }, 'crq-b': { source: { run: 'a\udc7fb' } } },
+        { files: { 'runs/a\ufffdb/review.ndjson': '' } },
+      ),
+      jobCase(
+        'triage row named by a surrogate-escaped id',
+        { 'crq-a': { canonical_finding_id: 'F\udcff' } },
+        { files: { 'backfill/findings/triage/F\udcff.json': '{}' } },
+      ),
+      jobCase(
+        'triage: only the U+FFFD row exists',
+        { 'crq-a': { canonical_finding_id: 'F\udcff' } },
+        { files: { 'backfill/findings/triage/F\ufffd.json': '{}' } },
+      ),
+    ]);
+    expect(rows(out[0])[0]).toContain('state/runs/a\udcffb/review.ndjson');
+    expect(rows(out[1])[0]).toContain('state/repair/inbox/crq-a.json');
+    expect(rows(out[2]).map((row) => row.split('`').at(-2))).toEqual([
+      'state/repair/inbox/crq-a.json',
+      'state/repair/inbox/crq-b.json',
+    ]);
+    expect(rows(out[3])[0]).toContain('triage/F\udcff.json');
+    expect(rows(out[4])[0]).toContain('state/repair/inbox/crq-a.json');
+  });
+
+  it('a spool key is blank by Python str.strip(), not by JavaScript trim()', async () => {
+    const spool = (key: string, field = 'key'): Record<string, FileSpec> => ({
+      'backfill-rollout.json': rollout({
+        publisher_spool: { ssh_alias: 'runner@example.com', [field]: key },
+      }),
+    });
+    const blank = ['\u0085', '\u001c', '\u001f', '\u00a0', ' \t\u3000', '\u2028', '\u2029'];
+    const filled = ['\ufeff', ' /key ', 'k'];
+    const out = await expectParity([
+      ...blank.map((key) => reviewed(`blank key ${JSON.stringify(key)}`, { files: spool(key) })),
+      ...filled.map((key) => reviewed(`key ${JSON.stringify(key)}`, { files: spool(key) })),
+      reviewed('ssh_key U+0085', { files: spool('\u0085', 'ssh_key') }),
+    ]);
+    for (const result of out.slice(0, blank.length)) {
+      expect(rows(result)[0]).toContain('threadless; local source');
+    }
+    for (const result of out.slice(blank.length, blank.length + filled.length)) {
+      expect(rows(result)[0]).toContain('[ledger review]');
+    }
+    expect(rows(out.at(-1))[0]).toContain('threadless; local source');
   });
 });
 
