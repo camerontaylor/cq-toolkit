@@ -91,24 +91,24 @@ export interface PublicationGitReadsOptions {
 }
 
 /** `str[:n]` by code point. */
-function clip(text: string, n: number): string {
+export function clip(text: string, n: number): string {
   const points = Array.from(text);
   return points.length <= n ? text : points.slice(0, n).join('');
 }
 
 /** Text-mode stderr: universal newlines, as `subprocess` text mode applies to both pipes. */
-function pyStderr(call: GitCall): string {
+export function pyStderr(call: GitCall): string {
   return call.stderr.replace(/\r\n?/g, '\n');
 }
 
 /** `Path` spelling: no trailing separator, except for the filesystem root. */
-function canonicalDir(path: string): string {
+export function canonicalDir(path: string): string {
   const normalized = normalize(path);
   return normalized.length > 1 ? normalized.replace(/\/+$/, '') : normalized;
 }
 
 /** A call that never reported an exit code did not answer: it is not a miss. */
-function answered(call: GitCall): number {
+export function answered(call: GitCall): number {
   if (call.code === null) {
     throw new PyError(
       'OSError',
@@ -119,7 +119,7 @@ function answered(call: GitCall): number {
 }
 
 /** `subprocess` text mode: strict UTF-8, then universal newlines. */
-function pyText(call: GitCall): string {
+export function pyText(call: GitCall): string {
   let text: string;
   try {
     text = strictUtf8.decode(call.stdout);
@@ -129,7 +129,7 @@ function pyText(call: GitCall): string {
   return text.replace(/\r\n?/g, '\n');
 }
 
-function commit(value: string, what: string): string {
+export function commit(value: string, what: string): string {
   if (!OID.test(value)) throw new PyError('ValueError', `${what} is not a 40-hex object id`);
   return value;
 }
