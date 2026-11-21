@@ -141,12 +141,11 @@ queue save, then the fast-forward refusal (after the journal, so the next tick
 recovers and refuses again), then the leased push (the PR target, `''` for a new
 branch), then finalize, with the worktree always removed. Composed with
 `finalizePublication` the tests show a backfill item taking and holding a slot.
-Effects still unbound, all in the publish worktree or state tree: `makeWorktree`
-and `removeWorktree` (`c.make_worktree`), the Git reads and `cherryPick`,
+Effects still unbound (when S6-j landed; the local Git reads and writes are bound
+in S6-l and S6-m below, the journal, patch and queue file effects in S6-k):
 `verify` (`crq_repair.verify`), `hackDetector` (`crq_repair.hack_detector` over
-`cq gates.hackDetector`, 120 KB argv cap), `secretScan` (`c.secret_scan`),
-`updateRef`, `push` and the `FixPrBacklog` (the journal, patch and queue file
-effects are bound in S6-k). Narrowings: a non-list `commits` is a `TypeError` where Python
+`cq gates.hackDetector`, 120 KB argv cap), `secretScan` (`c.secret_scan`), `push`
+and the `FixPrBacklog`. Narrowings: a non-list `commits` is a `TypeError` where Python
 would iterate a string, a non-string commit or SHA likewise, and `bool(info)` is
 modelled as a non-null PR view.
 
@@ -171,8 +170,35 @@ journal the next call recovers from. Narrowings: `jobs[0]` must match
 `crq-[A-Za-z0-9._-]+` (Python would join `../x`); journal numbers read as plain
 values, so an integral float (`2.0`) is rewritten as `2`; `save_queue`'s
 compaction log is not reproduced; exception text is Node's. Still unbound: the
-Git, forge and worktree effects, `verify`, `hackDetector`, `secretScan`,
-`FixPrBacklog`, and the wiring of this binding into `tick`.
+remote and forge effects, `verify`, `hackDetector`, `secretScan`, `FixPrBacklog`,
+and the wiring of this binding into `tick` (the local Git effects are S6-l and
+S6-m).
+
+S6-l (inactive): `gitPublicationReads` (`src/adapters/crq/publicationGitReads.ts`,
+#2298) binds the read-only local Git calls of `repair_tick.publish`:
+`revParseDefaultRef` and `isAncestor` in the primary clone, and `revParseHead`,
+`verifyCherryPickHead`, `conflictedFiles`, `stagedFiles`, `revListSince` and
+`diffSince` in the publish worktree. A non-zero Git exit is Python's `RuntimeError`
+text, a call with no exit code is `OSError` (never a miss), and text decodes as
+`text=True` does. Narrowings: 40-hex operands, worktrees only as direct children of
+the root, and a hardened full diff. Nothing imports it outside tests.
+
+S6-m (inactive): `gitPublicationWorktrees`
+(`src/adapters/crq/publicationWorktrees.ts`, #2299) binds the four local Git
+writes: `makeWorktree` and `removeWorktree` (`c.make_worktree`, `c.remove_worktree`
+with their pre-clean and cleanup-on-failure), `cherryPick` (`wt_git`) and
+`updateRef` (`refs/crq/publication/<run>`). `test/adapters/crq/publicationWorktrees.test.ts`
+runs the real Python functions and the port on paired disposable repositories
+(oracle `test/helpers/publicationWorktreesOracle.py`) and compares per-step failure
+class and text and the final repository state. Narrowings: safe worktree names,
+only `<root>/<prefix><name>` with branch `crq/<name>` is owned, 40-hex commits,
+publication refs only, and the recursive delete never removes a symlink or
+non-directory. Nothing imports it outside tests.
+
+Still unwired after S6-l and S6-m: the network and runtime effects, namely
+`lsRemoteHeads` and `push` (remote), `prInfo`, `listBranchPrs` and `createPr`
+(forge), `verify`, `hackDetector`, `secretScan` and `repairProvenance`,
+`newItem` and the `FixPrBacklog`, plus the binding of any of these into `tick`.
 
 Closed in S6-g, kept here as the record:
 
