@@ -17,9 +17,12 @@
  * each Git read in the primary clone:
  * 1. `git diff --unified=0 <base> <head>` (the scanned patch);
  * 2. `load_scan_exemptions(base)`: `cat-file -s <base>:.crq/scan-exemptions.toml`,
- *    then `cat-file blob` of it. Absent is no exemptions and no error; any
- *    failure to read, decode or parse the blob is `exemption_error` and no
- *    exemptions, so it fails closed;
+ *    then `cat-file blob` of it. Absent is no exemptions and no error. A blob
+ *    read that never answers, or output that cannot be decoded or parsed, is
+ *    `exemption_error` and no exemptions. A blob read that exits non-zero is
+ *    not checked, as in Python (`check=False`): its empty output is an empty
+ *    document, so no exemptions and no error. Either way exemptions are only
+ *    lost, which adds hits, so the scan never fails open;
  * 3. `git show origin/main:policy/denylist/patterns.yml` (the rules);
  * 4. the scan, then the report written with `Path.write_text` semantics
  *    (truncated in place, no `mkdir`: a missing job directory is a failure).
@@ -28,8 +31,11 @@
  * Failure classes, which `publishRepair` branches on:
  * - A clean verdict is `true`; a dirty one is `false`, which `publishRepair`
  *   turns into `ValueError('publication secret scan failed')`. Anything this
- *   seam throws propagates unchanged and the worktree is removed; nothing is
- *   journaled or pushed after a scan, so a refused scan leaves no state.
+ *   seam throws propagates unchanged and the worktree is removed. A refusal
+ *   skips the ref update, the journal, the queue save and the push; it does not
+ *   remove what was already written: `publishRepair` writes `publication.patch`
+ *   before it calls the seam, and the seam writes the report for a dirty
+ *   verdict too.
  * - A Git read that exits non-zero is `PyError('RuntimeError')` with Python's
  *   `c.git` text, `git <argv[:6]> … exit <n>: <stderr[:400]>`. A process that
  *   never produced an exit code is `PyError('OSError')`, as in the sibling
@@ -151,7 +157,7 @@ export function gitPublicationSecretScan(
       const blob = await read(['cat-file', 'blob', spec], ['cat-file', 'blob', spec], false);
       return loadScanExemptions(blob.text);
     } catch (error) {
-      // Any failure to read, decode or parse fails closed: no exemptions at all.
+      // A read with no answer, or text that cannot be decoded or parsed: no exemptions at all.
       const message = error instanceof Error ? error.message : String(error);
       return { entries: [], error: `${SCAN_EXEMPTIONS_PATH}: ${message}` };
     }

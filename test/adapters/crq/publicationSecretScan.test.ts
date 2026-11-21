@@ -247,7 +247,12 @@ const HEADS: Record<string, Files> = {
   },
   secretFixtureOnly: { 'fixtures/s.txt': 'FAKE_SECRET_ONE=value1\n' },
   secretAndDeny: { 'fixtures/s.txt': 'FAKE_SECRET_ONE=value1\ndenyword\n' },
-  selfExempt: { '.crq/scan-exemptions.toml': EXEMPTIONS, 'src/s.txt': 'FAKE_SECRET_ONE=v\n' },
+  // The finding sits where the head's own exemption would cover it (`fixtures/**`), so a
+  // lookup in the head instead of the base would answer clean and fail the differential.
+  selfExempt: {
+    '.crq/scan-exemptions.toml': EXEMPTIONS,
+    'fixtures/s.txt': 'FAKE_SECRET_ONE=value1\n',
+  },
   multi: {
     'a.txt': 'l1\ndenyword two\nl3\nl4 denyword\n',
     'old.txt': 'keep\nkeep\n',
