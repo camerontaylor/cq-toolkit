@@ -46,6 +46,11 @@ def closed_marker_due(marker):
 PR_CREATE_ATTEMPTS = 3
 BACKFILL_ITEM = 'backfill-finding-'
 BACKFILL_BRANCH = 'crq/fix-backfill-'
+# Prepared retries run under a revalidated- run id; before the branch prefix
+# followed the item's backfill status they were published as
+# crq/fix-revalidated-<run>. Those open PRs still hold a backfill slot, so
+# the backlog keeps counting them; ordinary crq/fix-<run> PRs never count.
+LEGACY_RETRY_BRANCH = 'crq/fix-revalidated-'
 BACKLOG_WINDOW_HOURS = 72
 BACKLOG_HOURS_OF_CAPACITY = 4
 # The tick's view of open backfill fix PRs, set by refresh_fix_pr_backlog and
@@ -612,7 +617,8 @@ def refresh_fix_pr_backlog(c):
     try:
         prs = c.gh_json(['pr', 'list', '--repo', c.REPO, '--state', 'open', '--limit', '1000',
                          '--json', 'headRefName'])
-        open_count = sum(1 for pr in prs if str(pr.get('headRefName', '')).startswith(BACKFILL_BRANCH))
+        counted = (BACKFILL_BRANCH, LEGACY_RETRY_BRANCH)
+        open_count = sum(1 for pr in prs if str(pr.get('headRefName', '')).startswith(counted))
         limit = review_start_limit(c)
         atomic(c.STATE / 'repair' / 'fix-pr-backlog.json',
                {'at': dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
@@ -708,7 +714,12 @@ def publish(c, q, item, run, record, fixed):
                 raise ValueError('PR moved during publication; retry on fresh head')
             remote_branch = record['branch']
         else:
-            remote_branch = 'crq/fix-' + run
+            # The item's backfill status, not the run id, picks the prefix: a
+            # prepared retry (revalidated- run) on a backfill item must keep
+            # the counted backfill prefix or its PR escapes the cap on later
+            # ticks, while ordinary fix PRs stay outside it.
+            prefix = BACKFILL_BRANCH if str(item.get('id', '')).startswith(BACKFILL_ITEM) else 'crq/fix-'
+            remote_branch = prefix + run
         publication = {'head': head, 'target': target, 'branch': remote_branch,
                        'commits': translated, 'open_pr': bool(info), 'at': c.iso()}
         journal = c.STATE / 'repair' / record['jobs'][0] / 'publication.json'
