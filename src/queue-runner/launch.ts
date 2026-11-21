@@ -19,7 +19,7 @@ import {
   REVIEW_RECEIPT_KIND as RECEIPT_KIND,
 } from '../policy/crq/tickSchedule.js';
 import { ReviewSpawnError } from './reviewLaunch.js';
-import { ReviewCheckoutError } from './reviewPreparation.js';
+import { ReviewCheckoutError, assertProfileSetsNoReviewScope } from './reviewPreparation.js';
 
 export const PUSH_KIND = 'push-current';
 const AUTHOR_FAILED = 'author_failed';
@@ -168,6 +168,17 @@ export async function launch(
 ): Promise<string> {
   const kind = String(item.kind);
   if (kind === AUTHOR_KIND) fx.checkAuthor(item, fx.nowIso());
+  // The ranged command below adds --committed itself, so a profile that also
+  // names a review scope would give the CLI conflicting selectors. Refuse it
+  // before any run directory or worktree exists, as preparation does.
+  if (
+    truthy(plan.profile) &&
+    (kind === AUTHOR_KIND ||
+      kind === RECEIPT_KIND ||
+      kind === PUSH_KIND ||
+      truthy(plan.range_policy))
+  )
+    assertProfileSetsNoReviewScope(flagList(record(plan.profile).flags));
   const runId = `${String(item.id)}-${fx.runStamp()}`;
   const rdir = await fx.allocateRun(runId);
   const base = requireString(plan.base, 'base');
@@ -273,7 +284,7 @@ export async function launch(
     const flags = record(plan.profile).flags;
     meta.profile = plan.profile;
     meta.config_digest = plan.config_digest;
-    meta.cmd = ['coderabbit', 'review', ...flagList(flags)];
+    meta.cmd = [...cliCmd, '--base-commit', base, ...flagList(flags)];
   }
   if (kind === LOCAL_REVIEW_KIND) {
     const flags = record(item.profile).flags;

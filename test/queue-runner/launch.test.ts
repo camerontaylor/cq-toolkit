@@ -291,6 +291,44 @@ describe('launch: foreign repos and scan classes', () => {
     expect(h.metas[0]?.profile).toEqual({ flags: ['--plain', '--x'] });
   });
 
+  it('a normal review with a plan profile appends the profile flags after --base-commit', async () => {
+    const h = harness();
+    const it1 = item({});
+    await launch(
+      h.queue,
+      it1,
+      plan({ profile: { flags: ['--plain', '--x'] }, config_digest: 'd' }),
+      h.fx,
+    );
+    expect(h.metas[0]?.cmd).toEqual([
+      'coderabbit',
+      'review',
+      '--agent',
+      '--deep',
+      '--committed',
+      '--base-commit',
+      BASE,
+      '--plain',
+      '--x',
+    ]);
+  });
+
+  it('a ranged review refuses a profile that names a review scope before allocating anything', async () => {
+    for (const flag of ['--uncommitted', '--type=uncommitted', '-t', '--include-untracked']) {
+      const h = harness();
+      await expect(
+        launch(
+          h.queue,
+          item({}),
+          plan({ profile: { flags: ['--plain', flag] }, config_digest: 'd' }),
+          h.fx,
+        ),
+      ).rejects.toThrow('review profile must not set a review scope');
+      expect(h.calls).toEqual([]);
+      expect(h.metas).toEqual([]);
+    }
+  });
+
   it('push items use the projection scan in the configured clone; unconfigured is an error', async () => {
     const h = harness({}, repos);
     const push = item({

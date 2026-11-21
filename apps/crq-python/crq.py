@@ -605,17 +605,30 @@ def secret_scan_diff(diff: str, out: Path, *, base=None, head=None,
     line_paths: Dict[int, str] = {}
     path = None
     in_header = False  # ---/+++ are headers only between "diff --git" and the first "@@"
-    for n, line in enumerate(diff.splitlines(), 1):
-        if line.startswith("diff --git"):
+    # Gitleaks numbers its stdin lines by LF only, so attribution keys are the
+    # physical LF line each record starts on, not the splitlines() number the
+    # denylist hits report (the two diverge on U+2028 and friends).
+    lf_lines = 0
+    # Patch structure (file headers, hunk starts) is read only at the start of
+    # an LF-delimited record. splitlines() also splits on U+2028, lone CR and
+    # similar, but git emits one record per LF, so a fragment after such a
+    # character is hunk content and can never change the attributed path.
+    record_start = True
+    for n, (line, kept) in enumerate(zip(diff.splitlines(), diff.splitlines(True)), 1):
+        physical = lf_lines + 1
+        lf_lines += kept.count("\n")
+        starts_record = record_start
+        record_start = kept.endswith("\n")
+        if starts_record and line.startswith("diff --git"):
             m = re.match(r"diff --git a/(.*) b/(.*)$", line)
             path = m.group(2) if m else None
             in_header = True
             continue
-        if line.startswith("@@"):
+        if starts_record and line.startswith("@@"):
             in_header = False
             continue
         if in_header:
-            if line.startswith("+++ ") or line.startswith("--- "):
+            if starts_record and (line.startswith("+++ ") or line.startswith("--- ")):
                 p = line[4:]
                 if p != "/dev/null":
                     path = p[2:] if p[:2] in ("a/", "b/") else p
@@ -624,7 +637,7 @@ def secret_scan_diff(diff: str, out: Path, *, base=None, head=None,
             continue
         if any(a.search(path) for a in allow):
             continue
-        line_paths[n] = path
+        line_paths[physical] = path
         content = line[1:]
         for rid, rx, prx in compiled:
             if prx is not None and not prx.search(path):
