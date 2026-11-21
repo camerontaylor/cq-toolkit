@@ -412,10 +412,13 @@ export async function repairHarvest(
       try {
         expected = dict(await fx.readJob(jobId), 'inbox job');
       } catch (e) {
-        // A malformed inbox can neither validate a result nor name a finding,
-        // so it fails this run alone: nothing derived from the file is written
-        // and the item's later runs still harvest.
-        if (!isPyError(e, 'OSError', 'ValueError') && !(e instanceof TypeError)) throw e;
+        // A malformed inbox (undecodable, unparsable or not a dict) can neither
+        // validate a result nor name a finding, so it fails this run alone:
+        // nothing derived from the file is written and the item's later runs
+        // still harvest. An OSError is not a content defect (descriptor
+        // exhaustion, a transient I/O fault): it propagates so the tick retries
+        // the read, as Python's uncaught read error does.
+        if (!isPyError(e, 'ValueError') && !(e instanceof TypeError)) throw e;
         if (!dry) await recordTerminalFailure(fx, q, item, record, verdicts, null, jobId, e);
         break;
       }

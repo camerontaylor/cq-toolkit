@@ -449,10 +449,11 @@ describe('repairEnqueue vs the real repair_tick.enqueue', () => {
   });
 
   // crq review (F3) supersedes the older parity pin: a completed slot belonging
-  // to a different finding must not be reused for this finding, so the port now
-  // deliberately deviates from Python (repair_tick still binds the blocker) and
-  // pins its own behavior on the TS side.
-  it('preserves a completed inbox job for another finding without reusing it or its blocker', async () => {
+  // to a different finding must not be reused for this finding, and a record that
+  // omits the finding would read as complete. The port deliberately deviates from
+  // Python (repair_tick still binds the blocker): it refuses the enqueue before any
+  // write, and the backfill test below shows the cycle recorded as debt.
+  it('refuses to enqueue over a completed inbox job for another finding', async () => {
     const out = await runTs(
       enqueue({
         queue: { items: [openItem({ blocking: [{ run: 'r1', run_finding: 1 }] })] },
@@ -464,10 +465,10 @@ describe('repairEnqueue vs the real repair_tick.enqueue', () => {
       }),
     );
     expect(out.error).toBe(false);
-    expect(out.ret).toBe(true);
+    expect(out.ret).toBe(false);
     expect(out.files['state/repair/inbox/crq-r1-F1.json']).toContain('fix a'); // still finding A
     expect(out.queue).not.toContain('"repair_job"'); // never bound to another finding's job
-    expect(out.queue).toContain('"jobs":[]'); // the run claims no job it does not own
+    expect(out.queue).not.toContain('"repair_runs":{"r1"'); // no record that claims completeness
   });
 
   // crq review (F4, F10) flagged the next one as a defect. Python behaves exactly
@@ -618,11 +619,29 @@ describe('repairBackfill vs the real repair_tick.backfill', () => {
       }),
     );
     expect(out.error).toBe(false);
-    expect(JSON.parse(out.queue).legacy_repair_missing).toEqual([
+    const queue = JSON.parse(out.queue) as Record<string, unknown>;
+    expect(queue.legacy_repair_missing).toEqual([
       { item: 'pr-5', run: 'r1', reason: 'meta names another run' },
     ]);
-    expect(JSON.parse(out.queue).legacy_repair_backfilled).toBeUndefined();
+    expect(queue.legacy_repair_backfilled).toBeUndefined();
     expect(Object.keys(out.files)).toEqual(['runs/r1/meta.json', 'runs/r1/review.ndjson']);
+  });
+
+  it("records debt, not a short record, when a slot holds another finding's completed job", async () => {
+    const out = await runTs(
+      backfill({
+        findings: { r1: rows(F2) },
+        runs: { r1: evidence() },
+        state: {
+          'repair/inbox/crq-r1-F1.json': { job: 'crq-r1-F1', finding: F1, repair_base: 'b0' },
+          'repair/crq-r1-F1/result.json': { verdict: 'FIXED' },
+        },
+      }),
+    );
+    expect(out.error).toBe(false);
+    const queue = JSON.parse(out.queue) as Record<string, unknown>;
+    expect(queue.legacy_repair_missing).toHaveLength(1);
+    expect(queue.legacy_repair_backfilled).toBeUndefined();
   });
 
   it('raises on a cycle without a run_id and on unreadable meta', async () => {

@@ -316,6 +316,23 @@ export async function repairEnqueue(
     item.last_error = 'repair not enqueued: run id outside the job-id grammar';
     return false;
   }
+  // A slot holding a different finding's completed job can neither be reused
+  // nor rebound, and a record that silently omits that finding would read as
+  // complete (empty or short `jobs`) and let the ledger archive over it. Refuse
+  // the whole enqueue before any write so the cycle has no repair record and
+  // the backfill records it as unresolved debt.
+  for (let n = 1; n <= actionable.length; n++) {
+    const slot = `crq-${runId}-F${n}`;
+    const held = await fx.readInbox(slot);
+    if (
+      held !== null &&
+      !pyEq(get(held, 'finding'), actionable[n - 1]) &&
+      (await fx.resultExists(slot))
+    ) {
+      item.last_error = `repair not enqueued: ${slot} holds a different finding's completed job`;
+      return false;
+    }
+  }
   for (let n = 1; n <= actionable.length; n++) {
     const finding = actionable[n - 1] as Rec;
     const jobId = `crq-${runId}-F${n}`;
@@ -346,9 +363,6 @@ export async function repairEnqueue(
       source: sources[n - 1],
     };
     const prev = await fx.readInbox(jobId);
-    // The slot counts toward this run only when it ends up holding a job for
-    // this finding: fresh, same-finding reuse, or a rebound never-ran orphan.
-    let ownsSlot = true;
     if (prev === null) {
       await fx.writeInbox(jobId, job);
     } else {
@@ -363,22 +377,12 @@ export async function repairEnqueue(
       ) {
         // Stale orphan that never ran: rebind to this record.
         await fx.writeInbox(jobId, job);
-      } else if (!sameFinding) {
-        // The slot holds a different finding's completed job: keep that job and
-        // its result untouched, and do not reuse them for this finding — its
-        // blocker stays unresolved unless it receives a distinct job.
-        ownsSlot = false;
       }
     }
-    if (ownsSlot) (record.jobs as string[]).push(jobId);
+    (record.jobs as string[]).push(jobId);
     for (const blocker of list(get(item, 'blocking', []), 'blocking')) {
       const b = dict(blocker, 'blocker');
-      if (
-        ownsSlot &&
-        pyEq(get(b, 'run'), runId) &&
-        pyEq(get(b, 'run_finding'), n)
-      )
-        b.repair_job = jobId;
+      if (pyEq(get(b, 'run'), runId) && pyEq(get(b, 'run_finding'), n)) b.repair_job = jobId;
     }
   }
   if (isReceipt) {

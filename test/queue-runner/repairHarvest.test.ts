@@ -579,8 +579,32 @@ describe('repairHarvest result validation (differential)', () => {
         ],
       ),
     });
-    expect(out.calls).not.toContain('"sibling"');
-    expect(out.calls).toContain('"invalid repair result: sibling identity mismatch"');
+    expect(out.calls).not.toContain('["sibling"');
+    expect(out.calls).toContain('invalid repair result: sibling identity mismatch');
+  });
+
+  // TS-only: Python raises on any unreadable inbox. A malformed document is a
+  // deterministic defect and fails its run without a finding write; a read
+  // fault is not a content defect, so the run stays open for the next tick.
+  it('terminalizes a malformed inbox without any finding write', async () => {
+    const out = await runTs({
+      item: item({}, { jobs: [J1] }),
+      files: files([J1, '[]', fixed(J1)]),
+    });
+    expect(out.error).toBeUndefined();
+    expect(out.queue).toContain('invalid repair inbox');
+    expect(out.queue).toContain('"state":"failed"');
+    expect(out.calls).not.toContain('["mark"');
+  });
+
+  it('keeps the run open when the inbox read fails with an I/O error', async () => {
+    const out = await runTs({
+      item: item({}, { jobs: [J1] }),
+      files: { [`repair/${J1}/result.json`]: fixed(J1) }, // inbox file absent: readFile fails
+    });
+    expect(out.error).toBe('other');
+    expect(out.queue).not.toContain('"state":"failed"');
+    expect(out.calls).not.toContain('["mark"');
   });
 
   it('records a sibling FAILED outcome even with retry_after set (as Python does)', async () => {
