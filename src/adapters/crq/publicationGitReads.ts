@@ -96,12 +96,23 @@ function clip(text: string, n: number): string {
   return points.length <= n ? text : points.slice(0, n).join('');
 }
 
+/** Text-mode stderr: universal newlines, as `subprocess` text mode applies to both pipes. */
+function pyStderr(call: GitCall): string {
+  return call.stderr.replace(/\r\n?/g, '\n');
+}
+
+/** `Path` spelling: no trailing separator, except for the filesystem root. */
+function canonicalDir(path: string): string {
+  const normalized = normalize(path);
+  return normalized.length > 1 ? normalized.replace(/\/+$/, '') : normalized;
+}
+
 /** A call that never reported an exit code did not answer: it is not a miss. */
 function answered(call: GitCall): number {
   if (call.code === null) {
     throw new PyError(
       'OSError',
-      `git ${call.args[0] ?? ''} did not complete: ${clip(call.stderr.trim(), 200) || 'no exit status'}`,
+      `git ${call.args[0] ?? ''} did not complete: ${clip(pyStrip(pyStderr(call)), 200) || 'no exit status'}`,
     );
   }
   return call.code;
@@ -125,19 +136,19 @@ function commit(value: string, what: string): string {
 
 export function gitPublicationReads(options: PublicationGitReadsOptions): PublicationGitReads {
   const runGitFor = options.runGitFor ?? runGitIn;
-  const root = normalize(options.worktreeRoot);
+  const root = canonicalDir(options.worktreeRoot);
   if (!isAbsolute(root)) throw new PyError('ValueError', 'worktree root must be absolute');
 
   /** `wt_git`: stripped stdout; a non-zero exit is `RuntimeError`. */
   const wtGit = async (worktree: GitReadWorktree, args: readonly string[]): Promise<string> => {
-    const path = normalize(worktree.path);
+    const path = canonicalDir(worktree.path);
     if (!isAbsolute(path) || dirname(path) !== root || path === root) {
       throw new PyError('ValueError', 'publish worktree is outside the worktree root');
     }
     const call = await runGitFor(path)(args);
     const text = pyText(call);
     if (answered(call) !== 0) {
-      throw new PyError('RuntimeError', `git ${args[0]} failed: ${clip(call.stderr, 200)}`);
+      throw new PyError('RuntimeError', `git ${args[0]} failed: ${clip(pyStderr(call), 200)}`);
     }
     return pyStrip(text);
   };
@@ -151,7 +162,7 @@ export function gitPublicationReads(options: PublicationGitReadsOptions): Public
       if (code !== 0) {
         throw new PyError(
           'RuntimeError',
-          `git ${args.join(' ')} … exit ${code}: ${clip(call.stderr.trim(), 400)}`,
+          `git ${args.join(' ')} … exit ${code}: ${clip(pyStrip(pyStderr(call)), 400)}`,
         );
       }
       return pyStrip(text);

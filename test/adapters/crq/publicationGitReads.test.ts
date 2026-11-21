@@ -9,6 +9,7 @@
 import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
@@ -24,8 +25,10 @@ import {
 } from '../../../src/queue-runner/publicationPublish.js';
 import { scrubbedGitEnv } from '../../helpers/git-env.js';
 
-const ORACLE = new URL('../../helpers/publicationGitReadsOracle.py', import.meta.url).pathname;
-const APPS = new URL('../../../apps/crq-python', import.meta.url).pathname;
+const ORACLE = fileURLToPath(
+  new URL('../../helpers/publicationGitReadsOracle.py', import.meta.url),
+);
+const APPS = fileURLToPath(new URL('../../../apps/crq-python', import.meta.url));
 
 // The structural subset the publish orchestration declares.
 type Pinned = Pick<PublicationPublishEffects, keyof PublicationGitReads>;
@@ -398,6 +401,43 @@ describe('publication Git reads: hardening and refusals', () => {
     });
   });
 
+  it.each(['/wt/', '/wt//', '/wt/./'])(
+    'accepts a direct child of the root spelled %j, and still refuses non-children',
+    async (spelling) => {
+      const calls: string[] = [];
+      const reads = gitPublicationReads({
+        clone: '/clone',
+        worktreeRoot: spelling,
+        runGitFor: (cwd) => async () => {
+          calls.push(cwd);
+          return call(0, `${'a'.repeat(40)}\n`);
+        },
+      });
+      await expect(reads.revParseHead({ path: '/wt/x' })).resolves.toBe('a'.repeat(40));
+      await expect(reads.revParseHead({ path: '/wt/x/' })).resolves.toBe('a'.repeat(40));
+      expect(calls).toEqual(['/wt/x', '/wt/x']);
+      for (const path of ['/wt', '/wt/', '/wt/x/y', '/other/x', '/wt/..', '/wt/x/..']) {
+        await expect(reads.revParseHead({ path }), path).rejects.toMatchObject({
+          kind: 'ValueError',
+        });
+      }
+      expect(calls).toHaveLength(2);
+    },
+  );
+
+  it('keeps the filesystem root a valid worktree root', async () => {
+    const reads = gitPublicationReads({
+      clone: '/clone',
+      worktreeRoot: '/',
+      runGitFor: () => async () => call(0, 'ok\n'),
+    });
+    await expect(reads.revParseHead({ path: '/x' })).resolves.toBe('ok');
+    await expect(reads.revParseHead({ path: '/x/y' })).rejects.toMatchObject({
+      kind: 'ValueError',
+    });
+    await expect(reads.revParseHead({ path: '/' })).rejects.toMatchObject({ kind: 'ValueError' });
+  });
+
   it.each(['', '-x', '--output=/tmp/x', 'HEAD', 'abc', 'g'.repeat(40), `${'a'.repeat(40)}\n`])(
     'refuses the operand %j before any process runs',
     async (operand) => {
@@ -444,7 +484,7 @@ describe('publication Git reads: scripted process', () => {
       (cwd: string): RunGit =>
       async (args) => {
         log.push({ cwd, args });
-        return reply(cwd, args);
+        return { ...reply(cwd, args), args };
       };
     return { log, reads: gitPublicationReads({ clone: '/clone', worktreeRoot: '/wt', runGitFor }) };
   }
@@ -533,6 +573,27 @@ describe('publication Git reads: scripted process', () => {
     );
     await expect(reads.revParseHead({ path: '/wt/x' })).rejects.toThrow(
       `git rev-parse failed: ${'e'.repeat(200)}`,
+    );
+  });
+
+  it('translates and strips stderr as Python text mode does', async () => {
+    const stderr = '\u0085fatal: one\r\ntwo\rthree\r\n\u0085';
+    const { reads } = scripted(() => call(128, '', stderr));
+    // crq.git: p.stderr.strip()[:400] after universal newlines; U+FEFF is not Python whitespace.
+    await expect(reads.revParseDefaultRef()).rejects.toThrow(
+      'git rev-parse origin/main … exit 128: fatal: one\ntwo\nthree',
+    );
+    // wt_git: p.stderr[:200], translated but not stripped.
+    await expect(reads.revParseHead({ path: '/wt/x' })).rejects.toThrow(
+      'git rev-parse failed: \u0085fatal: one\ntwo\nthree\n\u0085',
+    );
+    const kept = scripted(() => call(128, '', '\ufefffatal\ufeff\n'));
+    await expect(kept.reads.revParseDefaultRef()).rejects.toThrow(
+      'git rev-parse origin/main … exit 128: \ufefffatal\ufeff',
+    );
+    const unfinished = scripted(() => call(null, '', '\u0085spawn\r\nfailed\r\n'));
+    await expect(unfinished.reads.revParseHead({ path: '/wt/x' })).rejects.toThrow(
+      'git rev-parse did not complete: spawn\nfailed',
     );
   });
 
