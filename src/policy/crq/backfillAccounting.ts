@@ -321,7 +321,7 @@ export function parseBlame(raw: Uint8Array): BlameRow[] {
   return rows;
 }
 
-function decodeReplaced(data: Uint8Array): string {
+export function decodeReplaced(data: Uint8Array): string {
   return new TextDecoder('utf-8', { fatal: false, ignoreBOM: true }).decode(data);
 }
 

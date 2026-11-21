@@ -724,7 +724,7 @@ function parseHunkHeader(patch: string, at: number): readonly [number, number, n
   return [Number(startValue), Number(lengthValue), index + 3];
 }
 
-function scanDigits(text: string, start: number): number {
+export function scanDigits(text: string, start: number): number {
   let index = start;
   while (index < text.length) {
     const codePoint = text.codePointAt(index) as number;
@@ -741,7 +741,7 @@ function isDecimalDigit(codePoint: number): boolean {
 }
 
 /** Unicode `Nd` code points occur in aligned runs of ten. */
-function decimalDigitValue(codePoint: number): number {
+export function decimalDigitValue(codePoint: number): number {
   if (codePoint >= 0x30 && codePoint <= 0x39) return codePoint - 0x30;
   let start = codePoint;
   while (start > 0 && DECIMAL_DIGIT.test(String.fromCodePoint(start - 1))) start -= 1;
