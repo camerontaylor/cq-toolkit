@@ -1,4 +1,6 @@
-import { describe, expect, test } from 'vitest';
+import { afterAll, beforeAll, describe, expect, test } from 'vitest';
+import { runGitIn } from '../../../src/adapters/crq/publishSource.js';
+import { createMergeTreeRepo, type MergeTreeRepo } from '../../helpers/mergeTreeRepo.js';
 import {
   JsonObject,
   parseJsonValue,
@@ -88,7 +90,7 @@ describe('proveMerge', () => {
         isAncestor: async () => true,
       },
     });
-    const result = await proveMerge(ctx, record(), info(actual), e);
+    const result = await proveMerge(ctx, record(), info(actual), e, merge);
     expect(result.projected).toBe(true);
     expect(result.proof?.entries.map(([k]) => k)).toEqual([
       'published_head',
@@ -108,7 +110,7 @@ describe('proveMerge', () => {
         isAncestor: async () => true,
       },
     });
-    await expect(proveMerge(ctx, record(), info(actual), e)).rejects.toThrow(
+    await expect(proveMerge(ctx, record(), info(actual), e, merge)).rejects.toThrow(
       'canonical fixed finding changed before source feedback',
     );
   });
@@ -123,19 +125,21 @@ describe('proveMerge', () => {
         isAncestor: async () => true,
       },
     });
-    await expect(proveMerge(ctx, record(), info(actual), e)).rejects.toThrow('changed before');
+    await expect(proveMerge(ctx, record(), info(actual), e, merge)).rejects.toThrow(
+      'changed before',
+    );
   });
 
   test('without a publication there is no merge-head proof and no journal read', async () => {
     const { e, events } = effects();
-    const result = await proveMerge(ctx, record({ publication: undefined }), info(), e);
+    const result = await proveMerge(ctx, record({ publication: undefined }), info(), e, merge);
     expect(result).toEqual({ proof: null, projected: false });
     expect(events).toEqual([]);
   });
 
   test('an unchanged head yields the trivial merge-head proof', async () => {
     const { e } = effects();
-    const result = await proveMerge(ctx, record(), info(published), e);
+    const result = await proveMerge(ctx, record(), info(published), e, published);
     expect(result.projected).toBe(false);
     expect(result.proof?.get('published_head')).toBe(published);
     expect(result.proof?.get('actual_head')).toBe(published);
@@ -150,9 +154,9 @@ describe('proveMerge', () => {
           obj({ job: id, item: ctx.itemId, run: ctx.run, finding: { path: 'src/a.ts' } }),
       },
     });
-    await expect(proveMerge(ctx, record({ jobs: ['crq-j2'] }), info(published), e)).rejects.toThrow(
-      'identity mismatch',
-    );
+    await expect(
+      proveMerge(ctx, record({ jobs: ['crq-j2'] }), info(published), e, merge),
+    ).rejects.toThrow('identity mismatch');
     const other = effects({
       evidence: {
         ...effects().e.evidence,
@@ -160,7 +164,7 @@ describe('proveMerge', () => {
           obj({ job: id, item: 'other', run: ctx.run, finding: { path: 'src/a.ts' } }),
       },
     });
-    await expect(proveMerge(ctx, record(), info(published), other.e)).rejects.toThrow(
+    await expect(proveMerge(ctx, record(), info(published), other.e, merge)).rejects.toThrow(
       'identity mismatch',
     );
   });
@@ -169,7 +173,7 @@ describe('proveMerge', () => {
     const saved = obj({ ...publication, fixed_revalidation: { reason: 'r' } });
     const { e } = effects({ journal: saved });
     // The revalidation path runs validateFixedEvidence, which refuses a non-published record.
-    await expect(proveMerge(ctx, record({ state: 'merged' }), info(), e)).rejects.toThrow(
+    await expect(proveMerge(ctx, record({ state: 'merged' }), info(), e, merge)).rejects.toThrow(
       'expected one unresolved published FIXED job',
     );
   });
@@ -181,7 +185,7 @@ describe('proveMerge', () => {
       fixed_revalidation: { reason: 'r' },
     });
     const { e } = effects({ journal: saved });
-    await expect(proveMerge(ctx, record(), info(), e)).rejects.toThrow(
+    await expect(proveMerge(ctx, record(), info(), e, merge)).rejects.toThrow(
       'publication journal identity mismatch',
     );
   });
@@ -195,7 +199,7 @@ describe('proveMerge', () => {
         readJob: async (id) => obj({ job: id, item: ctx.itemId, run: 'other', finding: {} }),
       },
     });
-    await expect(proveMerge(ctx, record(), info(), e)).rejects.toThrow(
+    await expect(proveMerge(ctx, record(), info(), e, merge)).rejects.toThrow(
       'legacy repair job identity mismatch',
     );
   });
@@ -203,7 +207,7 @@ describe('proveMerge', () => {
   test('a FIXED verdict whose job the record does not own is refused', async () => {
     const saved = obj({ ...publication, fixed_revalidation: { reason: 'r' } });
     const { e } = effects({ journal: saved });
-    await expect(proveMerge(ctx, record({ jobs: ['crq-j2'] }), info(), e)).rejects.toThrow(
+    await expect(proveMerge(ctx, record({ jobs: ['crq-j2'] }), info(), e, merge)).rejects.toThrow(
       'legacy repair job identity mismatch',
     );
   });
@@ -211,7 +215,7 @@ describe('proveMerge', () => {
   test('a journal without revalidation falls back to merge-head evidence', async () => {
     const saved = obj({ ...publication });
     const { e } = effects({ journal: saved });
-    const result = await proveMerge(ctx, record(), info(published), e);
+    const result = await proveMerge(ctx, record(), info(published), e, published);
     expect(result.proof?.has('source_blobs')).toBe(true);
   });
 });
@@ -260,5 +264,86 @@ describe('recheckRevalidation', () => {
     await expect(recheckRevalidation(ctx, record(), evidence, e)).rejects.toThrow(
       'publication resolutions contradict journal',
     );
+  });
+});
+
+describe('proveMerge verifies the forge merge commit tree', () => {
+  let repo: MergeTreeRepo;
+  beforeAll(async () => {
+    repo = await createMergeTreeRepo();
+  });
+  afterAll(async () => {
+    await repo.cleanup();
+  });
+  const prove = (merge: string) => {
+    const { e } = effects({ git: runGitIn(repo.dir) });
+    const pub = {
+      ...publication,
+      head: repo.published,
+      commits: [repo.published],
+    };
+    const rec = record({ publication: pub });
+    const pr = obj({
+      number: 42,
+      state: 'MERGED',
+      headRefOid: repo.published,
+      mergeCommit: { oid: merge },
+    });
+    return proveMerge(
+      ctx,
+      rec,
+      pr,
+      {
+        ...e,
+        evidence: {
+          ...e.evidence,
+          readJob: async (id) =>
+            obj({ job: id, item: ctx.itemId, run: ctx.run, finding: { path: repo.path } }),
+        },
+      },
+      merge,
+    );
+  };
+  test.each([
+    ['a plain merge that keeps the repair', 'kept', true],
+    ['a squash merge', 'squashed', true],
+    ['a merge that drops the repair', 'dropped', false],
+    ['a merge reverted afterwards', 'reverted', false],
+    ['a reachable commit with no repair', 'wrong', false],
+    ['an unreachable merge', 'unreachable', false],
+  ] as const)('%s', async (_name, shape, credited) => {
+    const merge = repo[shape];
+    if (credited) {
+      const result = await prove(merge);
+      expect(result.projected).toBe(false);
+      expect(toPlainJson(result.proof ?? null)).toMatchObject({
+        published_head: repo.published,
+        actual_head: repo.published,
+        match: 'containment',
+      });
+    } else await expect(prove(merge)).rejects.toThrow(/needs revalidation|evidence unavailable/);
+  });
+  test('the merge commit reaches the git evidence calls, not only the PR head', async () => {
+    const calls: string[][] = [];
+    const real = runGitIn(repo.dir);
+    const { e } = effects({
+      git: async (args, options) => {
+        calls.push([...args]);
+        return real(args, options);
+      },
+    });
+    await proveMerge(
+      ctx,
+      record({ publication: { ...publication, head: repo.published, commits: [repo.published] } }),
+      obj({
+        number: 42,
+        state: 'MERGED',
+        headRefOid: repo.published,
+        mergeCommit: { oid: repo.kept },
+      }),
+      e,
+      repo.kept,
+    );
+    expect(calls.some((a) => a[0] === 'ls-tree' && a[2] === repo.kept)).toBe(true);
   });
 });

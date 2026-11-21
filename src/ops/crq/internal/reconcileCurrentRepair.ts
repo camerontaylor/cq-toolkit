@@ -16,6 +16,13 @@ export interface CurrentRepairEffects {
   targetRef(selector: string): string;
   resolveRef(ref: string): Promise<string>;
   isAncestor(ancestor: string, descendant: string): Promise<boolean>;
+  /**
+   * Python's `merge_head_evidence(c, record, head, merge=merge)`: resolves when the
+   * forge merge commit's tree retains the published repair, throws otherwise.
+   * Identity, ancestry and the receipt checks have already passed; this is the
+   * tree evidence, so a merge that dropped or reverted the repair is never credited.
+   */
+  proveMergeTree(record: JsonObject, head: string, merge: string): Promise<void>;
 }
 
 export interface CurrentRepairResult {
@@ -36,7 +43,8 @@ function sortedDigests(values: readonly JsonValue[]): string[] {
 /**
  * Python's reconcile_current_fix. The caller must install the returned item in
  * its tick-owned queue before persisting it. No prior remediation is trusted:
- * every pass rechecks ancestry against the observed target tip.
+ * every pass rechecks ancestry against the observed target tip and the repair
+ * against the merge commit's tree.
  */
 export async function reconcileCurrentRepair(
   original: JsonObject,
@@ -168,6 +176,7 @@ export async function reconcileCurrentRepair(
       state !== 'MERGED' ||
       !pythonValueEqual(info.get('number'), number) ||
       info.get('baseRefName') !== ref.replace(/^origin\//, '') ||
+      !published ||
       head !== published ||
       !merge ||
       !captureTarget ||
@@ -189,6 +198,16 @@ export async function reconcileCurrentRepair(
       continue;
     }
     if (!ancestry) continue;
+    try {
+      await effects.proveMergeTree(record, published, merge);
+    } catch (error) {
+      // Not credited: a refusal and a failed read both retry on the next tick.
+      if (error instanceof RefreshExhausted) starved += 1;
+      else deferred += 1;
+      if (errors.length < 2)
+        errors.push(error instanceof Error ? `${error.name}: ${error.message}` : String(error));
+      continue;
+    }
     const evidence = new JsonObject([
       ['receipt_id', id],
       ['subject', subject],

@@ -387,7 +387,7 @@ export function fileFixRunSeams(
       return found;
     };
     return {
-      proveMerge: (rec, info) => proveMerge(context, rec, info, proofEffects),
+      proveMerge: (rec, info, merge) => proveMerge(context, rec, info, proofEffects, merge),
       recheckRevalidation: (rec, _info, evidence) =>
         recheckRevalidation(context, rec, evidence, proofEffects),
       markFixedOutcome: (job, merge, prUrl, proof) =>

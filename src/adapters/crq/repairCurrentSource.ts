@@ -2,6 +2,8 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { JsonNumber, JsonObject, parseJsonValue } from '../../policy/crq/jsonValue.js';
+import { sourcePath } from '../../policy/crq/repairBinding.js';
+import { mergeHeadEvidence } from '../../ops/crq/internal/mergeHeadEvidence.js';
 import {
   ForgeBudget,
   RECONCILE_FORGE_REQUESTS,
@@ -11,6 +13,31 @@ import type { CurrentRepairEffects } from '../../ops/crq/internal/reconcileCurre
 import { makeGhRunner, type GhFn } from '../forge-github/gh.js';
 import { runGitIn } from './publishSource.js';
 import type { RunGit } from './ledgerGit.js';
+
+const JOB = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/** `inbox/<job>.json` finding source path, one per FIXED verdict (Python `source_path`). */
+async function fixedAnchors(stateRoot: string, record: JsonObject): Promise<string[]> {
+  const verdicts = record.get('verdicts');
+  const anchors = new Set<string>();
+  for (const verdict of Array.isArray(verdicts) ? verdicts : []) {
+    if (!(verdict instanceof JsonObject) || verdict.get('verdict') !== 'FIXED') continue;
+    const job = verdict.get('job');
+    if (typeof job !== 'string' || !JOB.test(job) || job.includes('..'))
+      throw new Error('invalid repair job id');
+    const value = parseJsonValue(
+      new TextDecoder('utf-8', { fatal: true }).decode(
+        await readFile(join(stateRoot, 'repair', 'inbox', `${job}.json`)),
+      ),
+      { duplicates: 'last' },
+    );
+    if (!(value instanceof JsonObject)) throw new Error('repair job is not an object');
+    const path = sourcePath(value.get('finding') ?? null);
+    if (!path.ok) throw new Error('invalid repair source path');
+    anchors.add(path.path);
+  }
+  return [...anchors];
+}
 
 export interface CurrentRepairSourceOptions {
   readonly stateRoot: string;
@@ -85,6 +112,28 @@ export function fileCurrentRepairEffects(
       const value = new TextDecoder('utf-8', { fatal: true }).decode(call.stdout).trim();
       if (!/^[0-9a-f]{40}$/.test(value)) throw new Error('invalid target ref');
       return value;
+    },
+    async proveMergeTree(record, head, merge) {
+      const publication = record.get('publication');
+      if (!(publication instanceof JsonObject)) throw new Error('publication unavailable');
+      const published = publication.get('head');
+      if (typeof published !== 'string' || !published)
+        throw new Error('publication head unavailable');
+      // Nothing moved: no source is read, as in Python's early return.
+      if (published === head && head === merge) return;
+      const commits = publication.get('commits');
+      await mergeHeadEvidence(
+        {
+          published,
+          actual: head,
+          merge,
+          commits: Array.isArray(commits)
+            ? commits.map((c) => (typeof c === 'string' ? c : ''))
+            : [],
+          anchors: await fixedAnchors(options.stateRoot, record),
+        },
+        git,
+      );
     },
     async isAncestor(ancestor, descendant) {
       if (!/^[0-9a-f]{40}$/.test(ancestor) || !/^[0-9a-f]{40}$/.test(descendant))

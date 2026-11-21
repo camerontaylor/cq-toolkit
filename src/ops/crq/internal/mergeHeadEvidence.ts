@@ -50,6 +50,14 @@ type Entry = readonly [string, string] | null;
 export interface MergeHeadInput {
   readonly published: string | undefined;
   readonly actual: string;
+  /**
+   * The forge merge commit, already bound by the caller to the promoted ref.
+   * Its tree, not the PR head's, is what must retain the repair: a squash merge
+   * leaves the head outside the merge's ancestry, and a `-s ours` merge drops
+   * the head's changes while still containing it. The head must still descend
+   * from the published fix. Omitted only by callers that have no merge commit.
+   */
+  readonly merge?: string;
   readonly commits: readonly string[];
   readonly anchors: readonly string[];
 }
@@ -80,7 +88,8 @@ export async function mergeHeadEvidence(
     actual_head: input.actual,
     source_blobs: {},
   };
-  if (published === input.actual) return evidence;
+  const comparison = input.merge ?? input.actual;
+  if (published === input.actual && input.actual === comparison) return evidence;
   const run = async (args: string[]): Promise<Uint8Array> => {
     const result = await git(args);
     if (result.code !== 0) throw new Error('git evidence unavailable');
@@ -98,6 +107,8 @@ export async function mergeHeadEvidence(
     !(await ancestor(published, input.actual))
   )
     throw new Error('merged repair head is not a descendant of the published fix');
+  if (!sha.test(comparison))
+    throw new Error('merged repair commit unavailable; needs revalidation');
   if (!input.commits.length || input.commits.length > 64)
     throw new Error('published repair commits unavailable or exceed bound');
   const changed = new Set<string>();
@@ -202,7 +213,7 @@ export async function mergeHeadEvidence(
     const normalized = sourcePath(new JsonObject([['path', path]]));
     if (!normalized.ok || normalized.path !== path) throw new Error('invalid repair source path');
     const before = await entry(published, path);
-    const after = await entry(input.actual, path);
+    const after = await entry(comparison, path);
     const prior = parent ? await entry(parent, path) : null;
     blobs[path] = before?.[1] ?? null;
     modes[path] = before?.[0] ?? null;
@@ -243,7 +254,7 @@ export async function mergeHeadEvidence(
     const modeChanged = !!before && (!prior || prior[0] !== before[0]);
     if (!added.length && !removed.length && !modeChanged)
       throw new Error('merged repair source changed; needs revalidation: ' + path);
-    const extra = await patch(['diff', ...options, published, input.actual, '--', path]);
+    const extra = await patch(['diff', ...options, published, comparison, '--', path]);
     const extraText = patchText(extra);
     if (
       pythonSplitlines(extraText).some(

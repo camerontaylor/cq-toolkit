@@ -1,4 +1,6 @@
-import { describe, expect, test } from 'vitest';
+import { afterAll, beforeAll, describe, expect, test } from 'vitest';
+import { runGitIn } from '../../../src/adapters/crq/publishSource.js';
+import { createMergeTreeRepo, type MergeTreeRepo } from '../../helpers/mergeTreeRepo.js';
 import { mergeHeadEvidence } from '../../../src/ops/crq/internal/mergeHeadEvidence.js';
 import type { RunGit } from '../../../src/adapters/crq/ledgerGit.js';
 
@@ -228,5 +230,83 @@ describe('root publication with real Git', () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('merge-tree credit with real Git', () => {
+  let repo: MergeTreeRepo;
+  beforeAll(async () => {
+    repo = await createMergeTreeRepo();
+  });
+  afterAll(async () => {
+    await repo.cleanup();
+  });
+  const prove = (merge: string | undefined, over: Record<string, unknown> = {}) =>
+    mergeHeadEvidence(
+      {
+        published: repo.published,
+        actual: repo.published,
+        commits: [repo.published],
+        anchors: [repo.path],
+        ...(merge === undefined ? {} : { merge }),
+        ...over,
+      },
+      runGitIn(repo.dir),
+    );
+
+  test('the fixture shapes are what the cases below claim', () => {
+    const ancestor = (a: string, b: string): boolean => {
+      try {
+        repo.git('merge-base', '--is-ancestor', a, b);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    expect(ancestor(repo.published, repo.kept)).toBe(true);
+    expect(ancestor(repo.published, repo.dropped)).toBe(true);
+    expect(ancestor(repo.published, repo.squashed)).toBe(false);
+    expect(repo.git('rev-parse', `${repo.dropped}^{tree}`)).toBe(
+      repo.git('rev-parse', `${repo.target}^{tree}`),
+    );
+  });
+  test('credits a merge whose tree keeps the repair, with an unrelated target change', async () => {
+    expect((await prove(repo.kept))?.containment?.[repo.path]).toMatchObject({
+      status: 'contained',
+      actual: ['100644', expect.stringMatching(/^[0-9a-f]{40}$/)],
+    });
+  });
+  test('credits a squash merge whose PR head is not an ancestor of the merge', async () => {
+    expect((await prove(repo.squashed))?.containment?.[repo.path]).toMatchObject({
+      status: 'contained',
+    });
+  });
+  test('refuses a merge that contains the PR head but drops the repair from its tree', async () => {
+    // The PR head equals the published head, so a head-only comparison would credit this.
+    await expect(prove(repo.dropped)).rejects.toThrow('source changed');
+    expect((await prove(undefined))?.published_head).toBe(repo.published);
+  });
+  test('refuses a merge that was followed by a revert of the repaired line', async () => {
+    await expect(prove(repo.reverted)).rejects.toThrow('source changed');
+  });
+  test('refuses a reachable merge commit that never carried the repair', async () => {
+    await expect(prove(repo.wrong)).rejects.toThrow('source changed');
+  });
+  test('refuses an unreachable or malformed merge commit rather than falling back to the head', async () => {
+    await expect(prove(repo.unreachable)).rejects.toThrow('git evidence unavailable');
+    for (const merge of ['', 'not-a-commit', 'A'.repeat(40), repo.kept.slice(0, 39)])
+      await expect(prove(merge)).rejects.toThrow('merged repair commit unavailable');
+  });
+  test('still requires the observed PR head to descend from the published fix', async () => {
+    await expect(prove(repo.squashed, { actual: repo.base })).rejects.toThrow(
+      'not a descendant of the published fix',
+    );
+  });
+  test('an untouched head and merge need no source reads', async () => {
+    expect(await prove(repo.published)).toEqual({
+      published_head: repo.published,
+      actual_head: repo.published,
+      source_blobs: {},
+    });
   });
 });
