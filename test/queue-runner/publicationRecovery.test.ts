@@ -55,20 +55,20 @@ function fake(world: World) {
   return { effects, calls, pushes };
 }
 
-const journal = (openPr: boolean) => ({
+const journal = (openPr: boolean, withTarget = true) => ({
   head: HEAD,
-  target: TARGET,
+  ...(withTarget ? { target: TARGET } : {}),
   branch: BRANCH,
   open_pr: openPr,
   commits: [HEAD],
 });
 
-async function run(world: World, openPr: boolean) {
+async function run(world: World, openPr: boolean, withTarget = true) {
   const f = fake(world);
   const record: Record<string, unknown> = {};
   let thrown: unknown;
   try {
-    await recoverPublication(f.effects, { pr: 7 }, record, journal(openPr));
+    await recoverPublication(f.effects, { pr: 7 }, record, journal(openPr, withTarget));
   } catch (e) {
     thrown = e;
   }
@@ -206,6 +206,33 @@ describe('recoverPublication: journal shape', () => {
       kind: 'KeyError',
       message: "'pr'",
     });
+  });
+});
+
+// Python reads `publication['target']` lazily: only the open-PR "head moved"
+// comparison (after the ancestry read) and the open-PR push lease touch it. A
+// journal without `target` therefore recovers on every path that never reads
+// it, and an eager read would change which of these outcomes happens.
+describe('recoverPublication: target is read lazily, as in Python', () => {
+  it('finalizes a PR already at head without reading target', async () => {
+    const r = await run({ remote: STALE, pr: openPr(HEAD) }, true, false);
+    expect(r.thrown).toBeUndefined();
+    expect(r.calls).toEqual(['ls-remote', 'pr-info', 'finalize']);
+  });
+
+  it('raises KeyError(target) for a moved PR only after the ancestry read', async () => {
+    const r = await run({ remote: OTHER, pr: openPr(OTHER) }, true, false);
+    expect(r.thrown).toMatchObject({ kind: 'KeyError', message: "'target'" });
+    expect(r.calls).toEqual(['ls-remote', 'pr-info', 'is-ancestor']);
+    expect(r.pushes).toEqual([]);
+    expect(r.record).toEqual({});
+  });
+
+  it('pushes an absent branch with an empty lease without reading target', async () => {
+    const r = await run({}, false, false);
+    expect(r.thrown).toBeUndefined();
+    expect(r.pushes).toEqual([{ branch: BRANCH, expected: '', sha: HEAD }]);
+    expect(r.calls).toEqual(['ls-remote', 'pr-list', 'push', 'finalize']);
   });
 });
 
