@@ -597,6 +597,37 @@ describe('repairHarvest result validation (differential)', () => {
     expect(out.calls).not.toContain('["mark"');
   });
 
+  it('terminalizes a mismatched inbox identity and still harvests a later run', async () => {
+    const swapped = await runTs({
+      item: item({}, { jobs: [J1] }),
+      files: files([J1, job(J1, { job: 'crq-other', canonical_finding_id: 'F1' }), fixed(J1)]),
+    });
+    expect(swapped.error).toBeUndefined();
+    expect(swapped.queue).toContain('invalid repair inbox: repair job identity mismatch');
+    expect(swapped.queue).toContain('"state":"failed"');
+    expect(swapped.calls).not.toContain('["mark"');
+    const wrongItem = await runTs({
+      item: item({}, { jobs: [J1] }),
+      files: files([J1, job(J1, { item: 'zzz', canonical_finding_id: 'F1' }), fixed(J1)]),
+    });
+    expect(wrongItem.error).toBeUndefined();
+    expect(wrongItem.queue).toContain('"state":"failed"');
+    expect(wrongItem.calls).not.toContain('["mark"');
+
+    // A later run on the same item is not blocked by the swapped inbox.
+    const two = item({}, { jobs: [J1] }) as { repair_runs: Record<string, unknown> };
+    two.repair_runs.R2 = { state: 'queued', base: 'b0', jobs: [J2] };
+    const later = await runTs({
+      item: two,
+      files: files(
+        [J1, job(J1, { job: 'crq-other' }), fixed(J1)],
+        [J2, job(J2, { canonical_finding_id: 'F2' }), verdict(J2, 'FAILED')],
+      ),
+    });
+    expect(later.error).toBeUndefined();
+    expect(later.calls).toContain('"mark","crq-R-F2"');
+  });
+
   it('keeps the run open when the inbox read fails with an I/O error', async () => {
     const out = await runTs({
       item: item({}, { jobs: [J1] }),

@@ -423,9 +423,23 @@ export async function repairHarvest(
         break;
       }
       // A swapped inbox file must not drive canonical delivery, result
-      // validation or any finding write; reject it like the terminal replay.
+      // validation or any finding write. The swap is a deterministic content
+      // defect, so like a malformed inbox it fails this run alone (null finding,
+      // nothing written from the file) instead of throwing and being retried forever.
       if (!pyEq(get(expected, 'job'), jobId) || !pyEq(get(expected, 'item'), pyReq(item, 'id'))) {
-        throw new PyError('ValueError', 'repair job identity mismatch');
+        if (!dry) {
+          await recordTerminalFailure(
+            fx,
+            q,
+            item,
+            record,
+            verdicts,
+            null,
+            jobId,
+            new PyError('ValueError', 'repair job identity mismatch'),
+          );
+        }
+        break;
       }
       try {
         await fx.requireCanonicalDelivery(expected);
