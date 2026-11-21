@@ -146,6 +146,21 @@ function repairRuns(item: Item): Rec {
   return dict(item.repair_runs, 'repair_runs');
 }
 
+/**
+ * `runs[run_id] = record`. Python dicts treat `__proto__` as an ordinary key, so
+ * every run id — `__proto__` included — must become an own enumerable property:
+ * a plain assignment would instead run the inherited `__proto__` accessor, drop
+ * the record, and hide it from the archive check's `Object.values`.
+ */
+function setRepairRun(runs: Rec, runId: string, record: Rec): void {
+  Object.defineProperty(runs, runId, {
+    value: record,
+    enumerable: true,
+    writable: true,
+    configurable: true,
+  });
+}
+
 /** `own_range`: `bool(commits) and set(commits) <= set(q.get('repair_own_commits', []))`. */
 async function ownRange(
   q: Queue,
@@ -173,8 +188,9 @@ const prHead = (meta: Rec): unknown =>
  * still drainable for the run.
  *
  * `evidenceRun` is the run directory the findings are read from (Python's
- * `rdir`): the backfill passes the cycle's own run, which is the meta's
- * `run_id` unless the two disagree. Job ids and the record use the meta's id.
+ * `rdir`): the backfill passes the cycle's own run after checking that the
+ * meta's `run_id` matches it, and skips the cycle when the two disagree. Job
+ * ids and the record use the meta's id.
  */
 export async function repairEnqueue(
   q: Queue,
@@ -300,6 +316,23 @@ export async function repairEnqueue(
     item.last_error = 'repair not enqueued: run id outside the job-id grammar';
     return false;
   }
+  // A slot holding a different finding's completed job can neither be reused
+  // nor rebound, and a record that silently omits that finding would read as
+  // complete (empty or short `jobs`) and let the ledger archive over it. Refuse
+  // the whole enqueue before any write so the cycle has no repair record and
+  // the backfill records it as unresolved debt.
+  for (let n = 1; n <= actionable.length; n++) {
+    const slot = `crq-${runId}-F${n}`;
+    const held = await fx.readInbox(slot);
+    if (
+      held !== null &&
+      !pyEq(get(held, 'finding'), actionable[n - 1]) &&
+      (await fx.resultExists(slot))
+    ) {
+      item.last_error = `repair not enqueued: ${slot} holds a different finding's completed job`;
+      return false;
+    }
+  }
   for (let n = 1; n <= actionable.length; n++) {
     const finding = actionable[n - 1] as Rec;
     const jobId = `crq-${runId}-F${n}`;
@@ -333,12 +366,13 @@ export async function repairEnqueue(
     if (prev === null) {
       await fx.writeInbox(jobId, job);
     } else {
-      if (!truthy(get(prev, 'source')) && pyEq(get(prev, 'finding'), finding)) {
+      const sameFinding = pyEq(get(prev, 'finding'), finding);
+      if (!truthy(get(prev, 'source')) && sameFinding) {
         prev.source = sources[n - 1];
         await fx.writeInbox(jobId, prev);
       }
       if (
-        (!pyEq(get(prev, 'repair_base'), base) || !pyEq(get(prev, 'finding'), finding)) &&
+        (!pyEq(get(prev, 'repair_base'), base) || !sameFinding) &&
         !(await fx.resultExists(jobId))
       ) {
         // Stale orphan that never ran: rebind to this record.
@@ -357,7 +391,7 @@ export async function repairEnqueue(
     record.receipt_findings = receiptFindings.map((f) => receiptDigest(f)).sort();
     record.repair_findings = actionable.map((f) => receiptDigest(f)).sort();
   }
-  runs[runId] = record;
+  setRepairRun(runs, runId, record);
   return true;
 }
 
@@ -393,6 +427,15 @@ export async function repairBackfill(q: Queue, fx: RepairBackfillEffects): Promi
       }
       const meta = dict(await fx.readMeta(run), 'meta');
       if (get(meta, 'kind') === LOCAL_REVIEW_KIND) continue;
+      if (!pyEq(get(meta, 'run_id'), run)) {
+        // The metadata names another run: enqueueing would file the verdict
+        // under that id and leave this cycle without a repair record of its
+        // own, so the ledger could archive while the cycle is unresolved.
+        // repairEnqueue stays available for matching metadata, where the
+        // other run's record serves its own evidence.
+        missing.push({ item: req(item, 'id'), run, reason: 'meta names another run' });
+        continue;
+      }
       const queued = await repairEnqueue(q, item, meta, fx, run);
       if (
         !queued &&

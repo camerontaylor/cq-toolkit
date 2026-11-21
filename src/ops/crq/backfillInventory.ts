@@ -14,8 +14,12 @@
  *   subject construction/pinning belong to the accounting adapter. Without
  *   them this route cannot enqueue live work, so `inventory` without
  *   `--report-only` is a refusal, never a silent report;
- * - a pinned T0 baseline needs `lineage`/`proven_deleted`/`carry` over Git, so a
- *   present baseline is refused instead of being reported as unreviewed debt.
+ * - a pinned T0 baseline needs `lineage`/`proven_deleted`/`carry` over Git. It
+ *   is accounted only when the caller supplies that repository seam
+ *   (`BackfillInventoryEffects.accounting`, S4); without one, a present
+ *   baseline is refused instead of being reported as unreviewed debt. The seam
+ *   is offline: both commits must already exist in the clone, nothing is
+ *   fetched, and a missing commit is a Git failure, never a guess.
  *
  * Everything this route writes is derived: `latest-ranked.json` and
  * `latest-report.json`. It never rewrites `queue.json`, because a replay has no
@@ -71,8 +75,19 @@ export interface BackfillInventoryEffects {
   readQueue(): Promise<string>;
   /** `state/backfill-rollout.json` text, or `null` when the file is absent. */
   readRollout(): Promise<string | null>;
-  /** `state/backfill/baseline.json` text, or `null` when absent. */
-  readBaseline(): Promise<string | null>;
+  /**
+   * `state/backfill/baseline.json`, or `null` when absent. Bytes are preferred:
+   * `ledger.loads` refuses invalid UTF-8, which a decoded string has already lost.
+   */
+  readBaseline(): Promise<string | Uint8Array | null>;
+  /**
+   * The Git provenance seam a pinned baseline is accounted against, or `null`
+   * (also when the member is absent) when this runtime has no clone to read.
+   * Only consulted when a baseline exists; the route does not call it for a
+   * no-baseline report. A returned repository is used for one replay, so it
+   * should already have begun its invocation.
+   */
+  accounting?(): BackfillReportRepo | null;
   /** The remaining triage rows, unread beyond their bytes. */
   readTriage(): Promise<readonly BackfillTriageFile[]>;
   /** The store bound to the rollout's `durable_artifact_root`. */
@@ -252,10 +267,17 @@ export async function runBackfillInventory(
     if (manifest === undefined || manifest === null) {
       return refused('no retained inventory manifest; inventory capture has not run');
     }
-    const baseline = await effects.readBaseline();
-    if (baseline !== null) {
+    const baselineText = await effects.readBaseline();
+    // Consulted only when a baseline exists, so a no-baseline replay never
+    // touches the seam (a custom `accounting()` may open or validate a clone).
+    const accounting = baselineText === null ? null : (effects.accounting?.() ?? null);
+    if (baselineText !== null && accounting === null) {
       return refused(accountingSeam().message);
     }
+    // Python: `ledger.loads(baseline_file.read_bytes())`. Decoded with the same
+    // canonical loader as every other retained ledger document, so a malformed
+    // or non-canonical baseline refuses before anything is written.
+    const original = baselineText === null ? undefined : ledgerLoads(baselineText);
     const store = effects.artifacts(config.durableArtifactRoot);
     const artifacts = {
       verify: (reference: unknown) => store.verify(artifactReference(reference)),
@@ -269,7 +291,8 @@ export async function runBackfillInventory(
     const report = await summary({
       ranked,
       queue: queueValue,
-      repo: ACCOUNTING_SEAM_REPO,
+      repo: accounting ?? ACCOUNTING_SEAM_REPO,
+      ...(original === undefined ? {} : { original }),
       // Python's `run_inventory` always passes the findings root, so the report
       // always carries a triage section (empty counts included), never the
       // queue's stale backlog copy.

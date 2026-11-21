@@ -158,8 +158,33 @@ export async function recordUnpublishedSiblings(
     if (!isRec(result) || !isRec(job)) continue;
     if (!truthy(get(job, 'canonical_finding_id'))) continue;
     try {
+      // Sibling results bypass harvest's validation: apply the same identity
+      // and binding checks before the verdict dispatches, so a mismatched
+      // result cannot record a decision. A deterministic artifact defect is
+      // terminalized (like harvest's record_terminal_failure) instead of
+      // replayed forever: the failure outcome is recorded, the
+      // attacker-controlled verdict is not, and the tick proceeds.
+      let reason: string | null = null;
+      if (!pyEq(get(result, 'job'), other) || !pyEq(get(result, 'item'), get(job, 'item'))) {
+        reason = 'invalid repair result: sibling identity mismatch';
+      } else if (
+        truthy(get(job, 'source_sha')) &&
+        ['source_sha', 'finding_sha256', 'origin_job'].some(
+          (k) => !pyEq(get(result as Rec, k), get(job as Rec, k)),
+        )
+      ) {
+        reason = 'invalid repair result: sibling source/evidence binding mismatch';
+      }
       const verdict = get(result, 'verdict');
-      if (verdict === 'FIXED') {
+      if (reason !== null) {
+        await fx.markFindingOutcome(job, {
+          job: other,
+          item: get(job, 'item') ?? null,
+          verdict: 'FAILED',
+          reason,
+          finding: get(job, 'finding') ?? null,
+        });
+      } else if (verdict === 'FIXED') {
         await fx.recordUnpublishedFixedSibling(
           pyReq(job, 'canonical_finding_id'),
           other,
@@ -167,30 +192,7 @@ export async function recordUnpublishedSiblings(
           get(job, 'repair_base') ?? null,
         );
       } else if (verdict === 'FAILED' || verdict === 'NOT-FIXED' || verdict === 'STALE') {
-        // Sibling results bypass harvest's validation: apply the same identity
-        // and binding checks before the verdict becomes an outcome write-back.
-        let reason: string | null = null;
-        if (!pyEq(get(result, 'job'), other) || !pyEq(get(result, 'item'), get(job, 'item'))) {
-          reason = 'invalid repair result: sibling identity mismatch';
-        } else if (
-          truthy(get(job, 'source_sha')) &&
-          ['source_sha', 'finding_sha256', 'origin_job'].some(
-            (k) => !pyEq(get(result as Rec, k), get(job as Rec, k)),
-          )
-        ) {
-          reason = 'invalid repair result: sibling source/evidence binding mismatch';
-        }
-        if (reason !== null) {
-          await fx.markFindingOutcome(job, {
-            job: other,
-            item: get(job, 'item') ?? null,
-            verdict: 'FAILED',
-            reason,
-            finding: get(job, 'finding') ?? null,
-          });
-        } else {
-          await fx.markFindingOutcome(job, result);
-        }
+        await fx.markFindingOutcome(job, result);
       }
     } catch (e) {
       if (!isCaught(e)) throw e;
@@ -203,6 +205,9 @@ export async function recordUnpublishedSiblings(
 /**
  * `record_terminal_failure`: a deterministic repair artifact defect can never
  * pass on a later tick, so record the failure rather than retrying forever.
+ * `expected === null` marks a job whose inbox file could not be read as a
+ * dict: nothing derived from that file is trusted, so no finding outcome is
+ * written and the retained failure keeps its own non-replaying reason.
  */
 async function recordTerminalFailure(
   fx: RepairHarvestEffects,
@@ -210,7 +215,7 @@ async function recordTerminalFailure(
   item: Item,
   record: Rec,
   verdicts: Rec[],
-  expected: Rec,
+  expected: Rec | null,
   jobId: string,
   exc: unknown,
 ): Promise<void> {
@@ -219,8 +224,8 @@ async function recordTerminalFailure(
     job: jobId,
     item: pyReq(item, 'id'),
     verdict: 'FAILED',
-    reason: `invalid repair result: ${text}`,
-    finding: pyReq(expected, 'finding'),
+    reason: `${expected === null ? 'invalid repair inbox' : 'invalid repair result'}: ${text}`,
+    finding: expected === null ? null : pyReq(expected, 'finding'),
   };
   record.verdicts = [...verdicts, failure];
   record.state = 'failed';
@@ -234,7 +239,7 @@ async function recordTerminalFailure(
     item.last_error = 'repair_failed; needs human';
   }
   await fx.saveQueue(q); // terminal identity before authoritative write-back
-  await fx.markFindingOutcome(expected, failure);
+  if (expected !== null) await fx.markFindingOutcome(expected, failure);
   await recordUnpublishedSiblings(fx, record, new Set([jobId]));
 }
 
@@ -256,6 +261,13 @@ async function reconcileTerminal(
       if (get(r, 'verdict') !== 'FAILED') continue;
       const reason = get(r, 'reason', '');
       if (typeof reason !== 'string') throw new TypeError('reason must be a str');
+      if (reason.startsWith('invalid repair inbox: ')) {
+        // The inbox was rejected (malformed or a swapped identity): keep it out
+        // of the sibling replay so no finding decision is derived from it later.
+        const rejected = get(r, 'job');
+        if (typeof rejected === 'string') handled.add(rejected);
+        continue;
+      }
       if (!reason.startsWith('invalid repair result: ')) continue;
       if (
         !inList(asList(pyReq(record, 'jobs'), 'jobs'), get(r, 'job')) ||
@@ -403,7 +415,39 @@ export async function repairHarvest(
     for (const jobId of jobs) {
       if (typeof jobId !== 'string') throw new TypeError('job id must be a str');
       if (!(await fx.resultExists(jobId))) break;
-      const expected = dict(await fx.readJob(jobId), 'inbox job');
+      let expected: Rec;
+      try {
+        expected = dict(await fx.readJob(jobId), 'inbox job');
+      } catch (e) {
+        // A malformed inbox (undecodable, unparsable or not a dict) can neither
+        // validate a result nor name a finding, so it fails this run alone:
+        // nothing derived from the file is written and the item's later runs
+        // still harvest. An OSError is not a content defect (descriptor
+        // exhaustion, a transient I/O fault): it propagates so the tick retries
+        // the read, as Python's uncaught read error does.
+        if (!isPyError(e, 'ValueError') && !(e instanceof TypeError)) throw e;
+        if (!dry) await recordTerminalFailure(fx, q, item, record, verdicts, null, jobId, e);
+        break;
+      }
+      // A swapped inbox file must not drive canonical delivery, result
+      // validation or any finding write. The swap is a deterministic content
+      // defect, so like a malformed inbox it fails this run alone (null finding,
+      // nothing written from the file) instead of throwing and being retried forever.
+      if (!pyEq(get(expected, 'job'), jobId) || !pyEq(get(expected, 'item'), pyReq(item, 'id'))) {
+        if (!dry) {
+          await recordTerminalFailure(
+            fx,
+            q,
+            item,
+            record,
+            verdicts,
+            null,
+            jobId,
+            new PyError('ValueError', 'repair job identity mismatch'),
+          );
+        }
+        break;
+      }
       try {
         await fx.requireCanonicalDelivery(expected);
       } catch (e) {

@@ -1572,13 +1572,20 @@ def deploy_plan(effects: Effects, helper_module, target: str, tag: str,
             raise Refused("queue-owned reviews alive/ambiguous; drain through the "
                           "documented author-recovery path first: "
                           + json.dumps(drain["blocked"])[:400])
+        # Preflight's preserved digests can predate a final tick that published
+        # the queue and heartbeat before this fence, so the preservation
+        # baseline is captured only now: units are stopped and drained, which
+        # is what proves nothing further writes (the rollback path captures
+        # its state after the same fence). The post-helper comparison below
+        # still catches any write during the switch itself.
+        state = {**pre["state"], **preserved_digests(effects)}
         overlay, raw = helper_module.load_overlay(overlay_path)
         helper_precheck(helper_module, effects.root, overlay, target, tag)
-        with mutation_record(effects, "deploy", pre["state"], target, tag, prior_tag,
+        with mutation_record(effects, "deploy", state, target, tag, prior_tag,
                              helper_sha256) as tx:
             helper_module.switch(effects.root, overlay, raw, target, tag)
             tx["phase"] = "preservation"
-            post = preservation_check(effects, pre["state"])
+            post = preservation_check(effects, state)
             plan["steps"].append({"step": "preservation", **post})
             tx["phase"] = "compatibility"
             record = compatibility_record(effects, pre["state"]["prior_head"])
@@ -2224,6 +2231,42 @@ def rollback_target(prior: dict) -> dict:
             "rollback_compatibility": compat}
 
 
+def retained_deploy_records(effects: Effects, deployed: str) -> list[dict]:
+    """The one retained completed deploy journal that deployed ``deployed``:
+    the transaction this controller itself retained for the current
+    deployment, as a list of zero or one record. Empty when this checkout
+    holds no such record (the deployment was made outside this controller).
+    Read-only; each retained record is classified with the same
+    producer-shape rules the unfinished-transaction guard enforces, so
+    unclassifiable history refuses instead of being skipped.
+
+    Only finished ``deploy`` records count. Refusals also record the target
+    they attempted, but they changed nothing, so they never describe how the
+    host reached a deployment. When history deployed the same commit more
+    than once (A to B, B to C, C to B) the newest transaction is the current
+    one, ordered by the journal's own strict UTC ``at``; two newest records
+    with the same ``at`` cannot be ordered and refuse."""
+    candidates = []
+    for path in sorted(effects.record_dir.glob("controller-*.json")):
+        status, operation = _classify_record(path)
+        try:
+            entry = json.loads(path.read_text())
+        except (OSError, ValueError) as exc:
+            raise Refused("unreadable controller journal entry: " + path.name) from exc
+        if (status == "finished" and operation == "deploy"
+                and entry.get("target") == deployed):
+            candidates.append(entry)
+    if not candidates:
+        return []
+    newest = max(entry["at"] for entry in candidates)
+    current = [entry for entry in candidates if entry["at"] == newest]
+    if len(current) > 1:
+        raise Refused("cannot identify the transaction for the current "
+                      "deployment: several retained deploy journals share "
+                      "the newest timestamp " + newest)
+    return current
+
+
 _RUNNER_PROBE = """import importlib.util, json, sys
 from pathlib import Path
 runner = Path(sys.argv[1])
@@ -2265,10 +2308,26 @@ def _refusing_liveness(*_args, **_kwargs):
     return "ambiguous"
 
 
+def _matches_retained(prior: dict, retained: dict) -> bool:
+    """The supplied journal is the retained transaction, except that the
+    owner may supply the prior target's approval tag when the retained record
+    legitimately has none (``prior_tag`` null: the prior commit had no
+    annotated runner tag). A retained tag is never replaced. The supplied
+    tag's own validity is checked by ``rollback_target`` and the helper's
+    annotated-tag binding before anything is consumed."""
+    if prior == retained:
+        return True
+    if retained.get("prior_tag") is not None:
+        return False
+    return {**prior, "prior_tag": None} == retained
+
+
 def rollback_plan(effects: Effects, helper_module, prior: dict,
                   overlay_path: Path, helper_sha256: str | None = None) -> dict:
     """Owner-approved rollback to the recorded prior target, through the SAME
-    helper fence. Consumes exactly the journal ``deploy_plan`` wrote.
+    helper fence. Consumes exactly the journal ``deploy_plan`` wrote: when this
+    controller retains the transaction for the current deployment, the supplied
+    journal must match that retained record, not merely name the deployed HEAD.
     Refuses when the compatibility record disables automatic rollback
     (schema-incompatible prior target)."""
     with effects.controller_lock():
@@ -2277,6 +2336,15 @@ def rollback_plan(effects: Effects, helper_module, prior: dict,
         record = rollback_target(prior)
         if effects.git("rev-parse", "HEAD") != record["deployed"]:
             raise Refused("prior record does not describe the current deployment")
+        # Matching HEAD proves only that the supplied record names the same
+        # deployed commit; two hosts can reach it from different priors. When
+        # this controller retains the transaction for the current deployment,
+        # the supplied journal must BE that retained record before its
+        # prior_head (or tag, or compatibility evidence) is consumed.
+        retained = retained_deploy_records(effects, record["deployed"])
+        if retained and not _matches_retained(prior, retained[0]):
+            raise Refused("prior record does not match the locally retained "
+                          "transaction for the current deployment")
         if not rollback_compatible(record["rollback_compatibility"]):
             raise Refused("rollback disabled: queue state the prior target cannot "
                           "provably read (explicit schema marker or author_* state "

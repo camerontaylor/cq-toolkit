@@ -3264,30 +3264,82 @@ class RunBootLockTests(unittest.TestCase):
                                        side_effect=RuntimeError("boot reached")) as boot, \
                      mock.patch.object(harness.vm, "live_identity",
                                        return_value=live), \
-                     mock.patch.object(harness.vm, "stop_owned_process") as stop:
+                     mock.patch.object(harness.vm,
+                                       "_stop_owned_process") as stop, \
+                     mock.patch.object(harness.vm,
+                                       "stop_owned_process") as guarded:
                     with self.assertRaises((RuntimeError, ValueError)) as ctx:
                         harness.cmd_run(args)
             finally:
                 holder.close()
-            return ctx.exception, boot, stop
+            return ctx.exception, boot, stop, guarded
 
     def test_busy_run_lock_blocks_boot_and_cleanup(self):
-        exc, boot, stop = self._run(hold_lock=True)
+        exc, boot, stop, guarded = self._run(hold_lock=True)
         self.assertIn("run is busy", str(exc))
         boot.assert_not_called()
         stop.assert_not_called()
+        guarded.assert_not_called()
 
     def test_boot_failure_under_the_lock_still_cleans_up(self):
-        exc, boot, stop = self._run(hold_lock=False)
+        exc, boot, stop, guarded = self._run(hold_lock=False)
         self.assertEqual(str(exc), "boot reached")
         boot.assert_called_once()
+        # Partial-boot cleanup stays inside the boot critical section: the
+        # unguarded stop runs while the boot lock is still held, so another
+        # invocation cannot boot a replacement for it to kill first.
         stop.assert_called_once()
+        stop_args, stop_kwargs = stop.call_args
+        self.assertEqual(len(stop_args), 1)
+        self.assertEqual(stop_kwargs, {"purge": False})
+        guarded.assert_not_called()
 
     def test_live_run_refusal_does_not_stop_the_live_guest(self):
-        exc, boot, stop = self._run(hold_lock=False, live={"pid": 4242})
+        exc, boot, stop, guarded = self._run(hold_lock=False, live={"pid": 4242})
         self.assertIn("already owns a live VM", str(exc))
         boot.assert_not_called()
         stop.assert_not_called()
+        guarded.assert_not_called()
+
+    def test_failed_run_after_a_successful_boot_stops_only_this_launch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = pathlib.Path(tmp)
+            run_dir = state / "runs" / "r1"
+            run_dir.mkdir(parents=True)
+            run = {"run_id": "r1", "path": str(run_dir), "port": 2222}
+            args = mock.Mock(state_dir=str(state), source_commit=SOURCE_COMMIT,
+                             mode="full", tools=None, keep=False)
+            with mock.patch.object(harness, "source_commit_check",
+                                   return_value=SOURCE_COMMIT), \
+                 mock.patch.object(harness, "snapshot_uploads"), \
+                 mock.patch.object(harness.vm, "Recorder"), \
+                 mock.patch.object(harness.vm, "fetch_image"), \
+                 mock.patch.object(harness.vm, "host_stamp", return_value={}), \
+                 mock.patch.object(harness.vm, "sha256_file", return_value="x"), \
+                 mock.patch.object(harness, "prepare_run", return_value=run), \
+                 mock.patch.object(harness.vm, "boot",
+                                   return_value={"pid": 4242, "starttime": "7"}), \
+                 mock.patch.object(harness.vm, "live_identity",
+                                   return_value=None), \
+                 mock.patch.object(harness.vm, "wait_ssh",
+                                   side_effect=RuntimeError("ssh never came up")), \
+                 mock.patch.object(harness.vm,
+                                   "_stop_owned_process") as unguarded, \
+                 mock.patch.object(harness.vm,
+                                   "stop_owned_process") as guarded:
+                with self.assertRaises(RuntimeError) as ctx:
+                    harness.cmd_run(args)
+        self.assertEqual(str(ctx.exception), "ssh never came up")
+        # The launch identity returned by the successful boot guards the
+        # cleanup stop, so a replacement VM another invocation booted after
+        # this launch would be left alone.
+        guarded.assert_called_once()
+        guarded_args, guarded_kwargs = guarded.call_args
+        self.assertEqual(guarded_args, (run,))
+        self.assertEqual(guarded_kwargs,
+                         {"purge": False,
+                          "launched": {"pid": 4242, "starttime": "7"}})
+        unguarded.assert_not_called()
 
 
 if __name__ == "__main__":

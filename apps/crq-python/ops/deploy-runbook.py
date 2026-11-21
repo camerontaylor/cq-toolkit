@@ -285,7 +285,10 @@ def measure_cq_bin(config_bytes):
 
     The configuration string alone does not prove what the runner executes;
     the measured entry does. A placeholder is recorded as such (the overlay
-    did not render a runtime) and compared as a string.
+    did not render a runtime) and compared as a string. A non-placeholder
+    pointer must name an existing entry: a missing one is refused here so
+    preflight rejects it before the admission hold, while the later
+    pre-restart checks still detect deletion after preflight.
     """
     try:
         config = json.loads(config_bytes.decode("utf-8"))
@@ -306,10 +309,12 @@ def measure_cq_bin(config_bytes):
     require(entry.is_absolute(),
             "live repair.cq_bin is not an absolute path: " + repr(pointer))
     record["exists"] = entry.is_file()
-    if record["exists"]:
-        record["sha256"] = sha256_file(entry)
-        record["mode"] = oct(entry.stat().st_mode & 0o777)
-        record["resolved"] = str(entry.resolve())
+    require(record["exists"],
+            "live repair.cq_bin points at a missing entry: " + repr(pointer)
+            + "; the runtime this deploy would execute cannot be measured")
+    record["sha256"] = sha256_file(entry)
+    record["mode"] = oct(entry.stat().st_mode & 0o777)
+    record["resolved"] = str(entry.resolve())
     return record
 
 
@@ -843,14 +848,25 @@ class Run:
             while True:
                 result = self.controller.drain_check(self.effects, liveness)
                 polls.append(result)
-                if result["drained"]:
+                # A drained answer only counts while the deadline holds: an
+                # observation taken at or after expiry fails closed, even if
+                # the queue settled while an over-long interval slept.
+                # One clock read decides both branches and the sleep, so a
+                # deadline that passes between reads cannot yield a negative
+                # sleep (time.sleep raises ValueError on one).
+                now = self.clock()
+                if result["drained"] and now < deadline:
                     break
-                if self.clock() >= deadline:
+                if now >= deadline:
+                    late_clean = bool(result["drained"])
+                    record = {"polls": polls,
+                              "drained": False,
+                              "deadline_s": self.args.drain_deadline_s}
+                    if late_clean:
+                        record["drained_after_deadline"] = True
                     try:
                         durable_write(Path(self.run_dir) / record_name,
-                                      {"polls": polls,
-                                       "drained": False,
-                                       "deadline_s": self.args.drain_deadline_s})
+                                      record)
                     except OSError as exc:
                         # A diagnostic that cannot be recorded must not
                         # replace the FailStop: live work may still be
@@ -869,8 +885,14 @@ class Run:
                         "queue drain expired after "
                         + str(self.args.drain_deadline_s)
                         + "s; hold retained, nothing killed: "
-                        + json.dumps(result.get("blocked"), sort_keys=True))
-                self.sleep(self.args.drain_interval_s)
+                        + ("the queue reported drained only after the "
+                           "deadline, so the answer was not accepted"
+                           if late_clean else
+                           json.dumps(result.get("blocked"), sort_keys=True)))
+                # Never wait past the deadline this loop enforces: cap the
+                # interval at the time that remains.
+                self.sleep(min(self.args.drain_interval_s,
+                               deadline - now))
         result = polls[-1]
         if self.drain_fn is None:
             durable_write(Path(self.run_dir) / record_name,
@@ -1541,12 +1563,17 @@ def main(argv=None, run_factory=Run) -> int:
         return 0 if document.get("outcome") == "completed" else 1
     except RecoveryRequired as exc:
         record = exc.record or {}
-        print(json.dumps({"error": {"kind": "recovery_required",
-                                    "operation": args.operation,
-                                    "message": str(exc)[:400],
-                                    "run_dir": record.get("run_dir"),
-                                    "outcome": record.get("outcome")}},
-                         indent=2, sort_keys=True))
+        error = {"kind": "recovery_required",
+                 "operation": args.operation,
+                 "message": str(exc)[:400],
+                 "run_dir": record.get("run_dir"),
+                 "outcome": record.get("outcome")}
+        if record.get("persistence_error") is not None:
+            # deploy.json could not be written, so this JSON error is the
+            # only artifact holding the trigger map, runtime measurement
+            # and structured storage error; embed the whole record.
+            error["recovery_record"] = record
+        print(json.dumps({"error": error}, indent=2, sort_keys=True))
         return 3
     except Refused as exc:
         if args.operation == "status":

@@ -485,6 +485,97 @@ class DeployTests(DeployFixture, unittest.TestCase):
         self.assertTrue(self.marker().exists())
         self.assertEqual(self.units.started, [])
 
+    def test_drain_deadline_rejects_success_observed_after_expiry(self):
+        # With --drain-deadline-s 10 --drain-interval-s 600, a blocked first
+        # poll must not buy a 600s wait past the deadline, and a queue that
+        # settles only after the deadline must not be accepted: expiry fails
+        # closed even on a clean answer, and the hold stays.
+        (self.runner / "state/queue.json").write_text(
+            '{"items": [{"id": "q1", "run": {"run_id": 7}}], "starts": []}\n')
+        real_check = dc.drain_check
+
+        def settles_late(effects, liveness):
+            if self.clock() >= 10:
+                return {"drained": True, "blocked": []}
+            return real_check(effects, liveness)
+
+        run = self.build(drain_interval_s=600)
+        run.drain_fn = None
+        with mock.patch.object(dc, "drain_check", side_effect=settles_late):
+            with self.assertRaises(rb.RecoveryRequired) as caught:
+                run.run()
+        self.assertIn("drain expired", str(caught.exception))
+        # The sleep was capped at the remaining deadline, not the 600s
+        # interval: the late poll lands exactly at the deadline.
+        self.assertEqual(self.now[0], 10.0)
+        record = json.loads(
+            (Path(run.run_dir) / "drain.json").read_text())
+        self.assertFalse(record["drained"])
+        # The late clean answer is named so an operator does not read the
+        # final poll's empty blocked list as "still blocked".
+        self.assertTrue(record["drained_after_deadline"])
+        self.assertIn("only after the deadline", str(caught.exception))
+        self.assertNotIn("[]", str(caught.exception))
+        self.assertTrue(self.marker().exists())
+        self.assertEqual(self.units.started, [])
+        self.assertEqual(self.head(), self.prior)
+        self.assertEqual(self.record(run)["outcome"], "recovery_required")
+
+    def test_drain_deadline_crossed_between_clock_reads_never_sleeps_negative(self):
+        # The deadline can pass between two clock reads (a descheduled
+        # process). The loop must read the clock once per iteration so the
+        # remaining time is never negative: production time.sleep raises
+        # ValueError on a negative value, which would escape FailStop.
+        (self.runner / "state/queue.json").write_text(
+            '{"items": [{"id": "q1", "run": {"run_id": 7}}], "starts": []}\n')
+        real_check = dc.drain_check
+        armed = []
+
+        def stepped_clock():
+            # Before the first poll the clock is the fixture clock, so the
+            # deadline is base + 10. After it, reads step 5s then 11s past
+            # base: inside the deadline, then beyond it.
+            if not armed:
+                return self.now[0]
+            if len(armed) > 1:
+                return armed[0] + 11.0
+            armed.append(armed[0])
+            return armed[0] + 5.0
+
+        def arming_check(effects, liveness):
+            if not armed:
+                armed.append(self.now[0])
+            return real_check(effects, liveness)
+
+        def strict_sleep(seconds):
+            if seconds < 0:
+                raise ValueError("sleep length must be non-negative")
+
+        run = self.build(drain_interval_s=600)
+        run.drain_fn = None
+        run.clock = stepped_clock
+        run.sleep = strict_sleep
+        with mock.patch.object(dc, "drain_check", side_effect=arming_check):
+            with self.assertRaises(rb.RecoveryRequired) as caught:
+                run.run()
+        self.assertIn("drain expired", str(caught.exception))
+        self.assertTrue(self.marker().exists())
+        self.assertEqual(self.units.started, [])
+
+    def test_drain_first_poll_success_stays_immediate(self):
+        # A queue already drained succeeds on the first poll even when the
+        # interval is longer than the deadline: no sleep precedes the verdict.
+        (self.runner / "state/queue.json").write_text(
+            '{"items": [], "starts": []}\n')
+        run = self.build(drain_interval_s=600)
+        run.drain_fn = None
+        document = run.run()
+        self.assertEqual(document["outcome"], "completed")
+        self.assertEqual(self.now[0], 0.0)
+        record = json.loads(
+            (Path(run.run_dir) / "drain.json").read_text())
+        self.assertTrue(record["drained"])
+
     def test_incompatible_queue_refuses_before_hold(self):
         state = self.runner / "state/queue.json"
         state.write_text('{"schema_version": 2, "items": []}\n')
@@ -735,6 +826,28 @@ class DeployTests(DeployFixture, unittest.TestCase):
                             for unit in TRIGGERS))
         self.assertEqual(self.record(run)["outcome"], "recovery_required")
 
+    def test_missing_cq_bin_entry_refuses_at_preflight(self):
+        # A pointer whose entry is already missing must be rejected before
+        # the admission hold: after the switch the same refusal would also
+        # fail the rollback's runtime check, leaving nothing to restart.
+        (self.runtime / "dist/cli.js").unlink()
+        run = self.build()
+        with self.assertRaisesRegex(rb.Refused, "points at a missing entry"):
+            run.run()
+        self.assertEqual(self.head(), self.prior)
+        self.assertFalse(self.marker().exists())
+        self.assertEqual(self.units.stopped, [])
+
+    def test_cq_bin_entry_deleted_after_measure_still_refuses(self):
+        # The later checks stay: deleting the measured entry after preflight
+        # must refuse the restart (and any rollback restart) exactly like a
+        # content change does.
+        run = self.build()
+        run.cq_bin = rb.measure_cq_bin(self.original_config)
+        (self.runtime / "dist/cli.js").unlink()
+        with self.assertRaisesRegex(rb.Refused, "points at a missing entry"):
+            run.runtime_pointer_check()
+
     def test_moved_cq_bin_pointer_is_refused_before_restart(self):
         # The pointer is measured from the live config and the target render
         # cannot move it (the overlay names it), so this is the belt-and-braces
@@ -914,6 +1027,37 @@ class DeployTests(DeployFixture, unittest.TestCase):
         self.assertEqual(code, 1)
         document = json.loads(output.getvalue())
         self.assertEqual(document["error"]["kind"], "interrupted")
+
+    def recovery_required_error(self, record):
+        class Failing:
+            def __init__(self, args):
+                self.args = args
+
+            def run(self):
+                raise rb.RecoveryRequired("x", record)
+
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            code = rb.main(
+                ["deploy", "--root", str(self.root),
+                 "--overlay", str(self.overlay_path),
+                 "--record-dir", str(self.record_dir)],
+                run_factory=Failing)
+        self.assertEqual(code, 3)
+        return json.loads(output.getvalue())["error"]
+
+    def test_main_embeds_the_record_only_when_it_could_not_be_persisted(self):
+        # deploy.json was not written, so the JSON error is the only artifact
+        # holding the record; embed it with the structured storage error.
+        error = self.recovery_required_error(
+            {"run_dir": "/run", "outcome": "recovery_required",
+             "persistence_error": "disk full"})
+        self.assertEqual(error["kind"], "recovery_required")
+        self.assertEqual(error["recovery_record"]["persistence_error"],
+                         "disk full")
+        # An ordinary recovery record is on disk already: no embed.
+        error = self.recovery_required_error(
+            {"run_dir": "/run", "outcome": "recovery_required"})
+        self.assertNotIn("recovery_record", error)
 
     def test_argument_errors_are_one_json_document(self):
         with contextlib.redirect_stdout(io.StringIO()) as output, \

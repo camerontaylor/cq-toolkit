@@ -58,6 +58,16 @@ async function readOptional(path: string): Promise<string | null> {
   }
 }
 
+/** {@link readOptional}, undecoded. */
+async function readOptionalBytes(path: string): Promise<Uint8Array | null> {
+  try {
+    return await readFile(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
 /** The triage rows under `backfill/findings/triage`, in Python's sorted order. */
 async function readTriageRows(stateRoot: string): Promise<readonly BackfillTriageFile[]> {
   const directory = join(stateRoot, 'backfill', 'findings', 'triage');
@@ -93,11 +103,30 @@ function fileBackfillStore(durableRoot: string): BackfillArtifactStore {
 }
 
 /** The route's effects, bound to one state root. */
-export function fileBackfillInventoryEffects(stateRoot: string): BackfillInventoryEffects {
+export function fileBackfillInventoryEffects(
+  stateRoot: string,
+  options: { readonly cloneRoot?: string } = {},
+): BackfillInventoryEffects {
+  const { cloneRoot } = options;
   return {
     readQueue: () => readFile(join(stateRoot, 'queue.json'), 'utf8'),
     readRollout: () => readOptional(join(stateRoot, 'backfill-rollout.json')),
-    readBaseline: () => readOptional(join(stateRoot, 'backfill', 'baseline.json')),
+    // Bytes, not text: `ledger.loads` refuses invalid UTF-8 that a utf8 decode
+    // would already have replaced.
+    readBaseline: () => readOptionalBytes(join(stateRoot, 'backfill', 'baseline.json')),
+    // S4: with a clone the replay accounts a pinned baseline offline against its
+    // local objects (no fetch); without one the route refuses a baseline.
+    accounting: () => {
+      if (cloneRoot === undefined) return null;
+      const repository = new GitAccountingRepository({
+        repo: cloneRoot,
+        runGit: runGitIn(cloneRoot),
+      });
+      // The instance serves exactly one replay; begin its invocation so the
+      // immutable-object caches are on (the full route does the same).
+      repository.beginInvocation();
+      return repository;
+    },
     readTriage: () => readTriageRows(stateRoot),
     artifacts: (durableArtifactRoot: string) => fileBackfillStore(durableArtifactRoot),
     writeRanked: (bytes: Uint8Array) =>
@@ -300,7 +329,13 @@ export async function runBackfillUnit(
     };
   }
   if (options.cloneRoot === undefined || options.runnerRoot === undefined)
-    return runBackfillInventory(argv.slice(1), fileBackfillInventoryEffects(options.stateRoot));
+    return runBackfillInventory(
+      argv.slice(1),
+      fileBackfillInventoryEffects(
+        options.stateRoot,
+        options.cloneRoot === undefined ? {} : { cloneRoot: options.cloneRoot },
+      ),
+    );
   const args = argv.slice(1);
   if (args.some((arg) => arg !== '--report-only') || args.length > 1)
     return { artifact: { status: 'failed', error: 'invalid inventory arguments' }, exitCode: 2 };
