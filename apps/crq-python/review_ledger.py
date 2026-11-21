@@ -101,6 +101,22 @@ def loads(raw):
     return value
 
 
+def retained_loads(raw):
+    """loads() over retained record bytes, wrapping malformed JSON as integrity.
+
+    A truncated or byte-corrupt retained .json file raises JSONDecodeError or
+    UnicodeDecodeError out of loads(); readers that skip unreadable records
+    (review_transport._retained_records) catch IntegrityError, so wrap the
+    JSON syntax and decoding errors to skip the corrupt record and keep
+    scanning later valid ones. loads() itself is unchanged: the B1
+    cross-language vectors pin its exact refusal names and ordering.
+    """
+    try:
+        return loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise IntegrityError("malformed JSON") from exc
+
+
 def timestamp(value):
     if not isinstance(value, str) or not re.fullmatch(
             r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", value):

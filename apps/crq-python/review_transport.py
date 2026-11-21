@@ -359,7 +359,7 @@ def _retained_records(runner):
             continue
         for path in sorted(directory.glob("*.json")):
             try:
-                value = review_ledger.loads(path.read_bytes())
+                value = review_ledger.retained_loads(path.read_bytes())
             except (review_ledger.IntegrityError, OSError):
                 continue
             if value.get("event_type") == "review" and value.get("id") not in seen:
