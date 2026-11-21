@@ -224,10 +224,36 @@ integers; invalid UTF-8 in `gh` output cannot be detected through `GhFn` (Python
 raises `UnicodeDecodeError`); JSON error text is the parser's, not CPython's; a
 missing clone directory reads as a missing `gh`. Nothing imports it outside tests.
 
-Still unwired after S6-l, S6-m and S6-n: the network and runtime effects, namely
-`lsRemoteHeads` and `push` (remote), `createPr` (forge write), `verify`,
-`hackDetector`, `secretScan` and `repairProvenance`, `newItem` and the
-`FixPrBacklog`, plus the binding of any of these into `tick`.
+S6-o (inactive): `gitPublicationRemoteReads`
+(`src/adapters/crq/publicationRemoteReads.ts`) binds `lsRemoteHeads`, the one
+`c.git('ls-remote', '--heads', 'origin', 'refs/heads/' + branch)` of
+`recover_publication`, as a single read-only `git ls-remote` in the primary clone
+through the hardened `runGitIn` runner. An absent branch is an exit 0 with no
+output, so `''`; a non-zero exit is Python's `RuntimeError` text
+(`git ls-remote --heads origin refs/heads/<branch> … exit <n>: <stderr stripped,
+400 code points>`); a call with no exit code (spawn failure, the time or output
+bound) is `OSError`, checked before the output is read, so none of the failure
+classes can read as an absent branch and send recovery on to a push. Output is
+strict UTF-8 (`ValueError`), universal newlines and Python `strip()`. Narrowings:
+the branch passes `branchPathFault` (no glob, space or control character, since
+`ls-remote` arguments are glob patterns); the remote is the literal `origin`, not
+a parameter; the runner's time bound is 330 seconds where `crq.run` allows 600;
+and only rows for exactly `refs/heads/<branch>` are returned. The last is a
+deliberate divergence: `ls-remote` tail-matches its pattern, so a remote branch
+`a/refs/heads/<branch>` also matches and, sorting first, is read by Python's
+`remote.split()[0]` as this branch's tip (or an absent branch as present).
+`test/adapters/crq/publicationRemoteReads.test.ts` runs the real `crq.git` and the
+`remote.split()[0] if remote else None` line (`test/helpers/publicationRemoteReadsOracle.py`)
+against throwaway local bare repositories named as `origin` (present, absent,
+prefix and case variants, an empty origin, a missing origin, no `origin` remote,
+a non-UTF-8 listing), pins the failure classes with a scripted process, and drives
+the real `recoverPublication` over it. No network, credential or remote service;
+the adapter only lists. Nothing imports it outside tests.
+
+Still unwired after S6-l, S6-m, S6-n and S6-o: `push` (the leased remote write),
+`createPr` (forge write), `verify`, `hackDetector`, `secretScan` and
+`repairProvenance`, `newItem` and the `FixPrBacklog`, plus the binding of any of
+these into `tick`.
 
 Closed in S6-g, kept here as the record:
 
