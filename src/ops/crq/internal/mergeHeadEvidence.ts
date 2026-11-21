@@ -4,6 +4,7 @@ import type { RunGit } from '../../../adapters/crq/ledgerGit.js';
 import { JsonObject } from '../../../policy/crq/jsonValue.js';
 import { sourcePath } from '../../../policy/crq/repairBinding.js';
 import { pythonSplitlines } from '../../../policy/crq/repairGates.js';
+import { changedLocations, changeUndone } from './changeUndone.js';
 
 const sha = /^[0-9a-f]{40}$/;
 const maxPatch = 262_144;
@@ -256,20 +257,19 @@ export async function mergeHeadEvidence(
       throw new Error('merged repair source changed; needs revalidation: ' + path);
     const extra = await patch(['diff', ...options, published, comparison, '--', path]);
     const extraText = patchText(extra);
+    // A binary head diff has no text hunks, so the location comparison below
+    // would see nothing changed. Only a published repair that depended on text
+    // changes can be undone by one; a mode-only repair is judged on its mode.
     if (
+      (added.length || removed.length) &&
       pythonSplitlines(extraText).some(
         (line) => line.startsWith('Binary files ') || line.startsWith('GIT binary patch'),
       )
     )
       throw new Error('merged repair source changed; needs revalidation: ' + path);
-    const [extraAdded, extraRemoved] = lines(extraText);
-    const extraAddedSet = new Set(extraAdded);
-    const extraRemovedSet = new Set(extraRemoved);
-    if (
-      added.some((l) => extraRemovedSet.has(l)) ||
-      removed.some((l) => extraAddedSet.has(l)) ||
-      (modeChanged && after?.[0] !== before?.[0])
-    )
+    // Identical text elsewhere in the file is not an undo: match by location.
+    const undone = changeUndone(changedLocations(originalText), changedLocations(extraText));
+    if (undone.length || (modeChanged && after?.[0] !== before?.[0]))
       throw new Error('merged repair source changed; needs revalidation: ' + path);
     const excerpts: Record<string, string | boolean> = {};
     for (const [key, text] of [

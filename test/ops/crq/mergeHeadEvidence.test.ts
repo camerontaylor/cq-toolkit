@@ -9,7 +9,7 @@ const base = 'a'.repeat(40),
   actual = 'c'.repeat(40);
 const blob1 = 'd'.repeat(40),
   blob2 = 'e'.repeat(40);
-function git(extraPatch = '+later\n', mode = '100644'): RunGit {
+function git(extraPatch = '+later\n', mode = '100644', hunk = '@@ -2 +2 @@'): RunGit {
   return async (args) => {
     let output = '';
     if (args[0] === 'diff-tree' && args.includes('--name-only'))
@@ -23,7 +23,7 @@ function git(extraPatch = '+later\n', mode = '100644'): RunGit {
     } else if (args[0] === 'diff')
       output = args.includes(base)
         ? 'diff --git a/src/a.ts b/src/a.ts\n@@ -1 +1 @@\n-old\n+fixed  \n'
-        : `diff --git a/src/a.ts b/src/a.ts\n@@ -2 +2 @@\n${extraPatch}`;
+        : `diff --git a/src/a.ts b/src/a.ts\n${hunk}\n${extraPatch}`;
     return { args, code: 0, stdout: Buffer.from(output), stderr: '' };
   };
 }
@@ -41,7 +41,14 @@ describe('merge head containment proof', () => {
     });
   });
   test('rejects a later removal of the exact published line, including whitespace', async () => {
-    await expect(mergeHeadEvidence(input, git('-fixed  \n'))).rejects.toThrow('source changed');
+    // The published repair added "fixed  " at line 1; the head removes it from old line 1.
+    await expect(
+      mergeHeadEvidence(input, git('-fixed  \n', '100644', '@@ -1 +0,0 @@')),
+    ).rejects.toThrow('source changed');
+  });
+  test('credits a removal of identical text at a different location (#2297 parity)', async () => {
+    const proof = await mergeHeadEvidence(input, git('-fixed  \n'));
+    expect(proof?.containment?.['src/a.ts']).toMatchObject({ status: 'contained' });
   });
   test('refuses oversized and invalid evidence before comparing sources', async () => {
     await expect(
