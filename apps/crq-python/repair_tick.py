@@ -783,7 +783,7 @@ def finalize_publication(c, q, item, run, record, publication):
         item['last_push'] = {'sha': head, 'shas': translated, 'at': c.iso()}
         record['fix_pr'] = {'number': item['pr'], 'url': 'https://github.com/' + c.REPO + '/pull/' + str(item['pr'])}
     else:
-        prs = c.gh_json(['pr', 'list', '--repo', c.REPO, '--head', branch, '--state', 'all', '--json', 'number,url,state'])
+        prs = c.gh_json(['pr', 'list', '--repo', c.REPO, '--head', branch, '--state', 'all', '--json', 'number,url,state,headRefOid'])
         if not prs:
             # recover_publication reconciled the fix branch to the prepared
             # head and adopts any PR matching that head before calling here,
@@ -836,9 +836,9 @@ def finalize_publication(c, q, item, run, record, publication):
                 if reserved and TICK_BACKLOG['open'] is not None:
                     TICK_BACKLOG['open'] -= 1
                 raise
-            prs = c.gh_json(['pr', 'list', '--repo', c.REPO, '--head', branch, '--state', 'all', '--json', 'number,url,state'])
-        if len(prs) != 1:
-            raise ValueError('fix PR identity is ambiguous')
+            prs = c.gh_json(['pr', 'list', '--repo', c.REPO, '--head', branch, '--state', 'all', '--json', 'number,url,state,headRefOid'])
+        if len(prs) != 1 or prs[0]['headRefOid'] != head:
+            raise ValueError('fix PR identity or prepared head mismatch')
         pr = prs[0]
         record['fix_pr'] = pr
         if not any(i['pr'] == pr['number'] and i['kind'] == 'open' for i in q['items']):
