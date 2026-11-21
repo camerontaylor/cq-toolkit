@@ -858,9 +858,9 @@ def _strict_tick(value: str) -> bool:
     return True
 
 
-def _tick_value(effects: Effects) -> str:
-    """The last COMPLETED tick, read only from the runner's completion
-    heartbeat.
+def _heartbeat_tick(effects: Effects) -> str | None:
+    """The completion heartbeat's strict last_tick, or None when the runner
+    has not published a heartbeat yet (a fresh host awaiting its first tick).
 
     crq.py assigns queue.last_tick before dispatch and save_queue persists
     it before write_status; write_heartbeat atomically replaces the
@@ -868,11 +868,12 @@ def _tick_value(effects: Effects) -> str:
     saves therefore prove nothing about completed ticks and are never read
     here, and a heartbeat that does not name this checkout's runner
     directory is some other deployment's completion, not this one's.
+    Only absence yields None: a present but unreadable, malformed or
+    foreign heartbeat still refuses assessment.
     """
     heartbeat = effects.read_completion_heartbeat()
     if heartbeat is None:
-        raise Refused("no completion heartbeat observed under the runner's "
-                      "WATCHDOG_HOME; cannot assess health")
+        return None
     expected_root = str(effects.root / "apps/crq-python")
     root = heartbeat.get("root")
     if root != expected_root:
@@ -883,6 +884,16 @@ def _tick_value(effects: Effects) -> str:
     if not isinstance(value, str) or not _strict_tick(value):
         raise Refused("completion heartbeat last_tick " + repr(value)[:80]
                       + " is not a strict UTC YYYY-MM-DDTHH:MM:SSZ timestamp")
+    return value
+
+
+def _tick_value(effects: Effects) -> str:
+    """The last COMPLETED tick, read only from the runner's completion
+    heartbeat; refuses while no heartbeat has been published yet."""
+    value = _heartbeat_tick(effects)
+    if value is None:
+        raise Refused("no completion heartbeat observed under the runner's "
+                      "WATCHDOG_HOME; cannot assess health")
     return value
 
 
@@ -1361,20 +1372,31 @@ def run_metadata_sample(effects: Effects) -> dict | None:
             "prelaunch": prelaunch, "unreadable": unreadable, "ignored_entries": ignored}
 
 
-def health_observation(effects: Effects, prior_tick: str) -> dict:
+def health_observation(effects: Effects, prior_tick: str | None) -> dict:
     """One health observation against the requested prior tick.
 
     Advancement is lexicographic on the strict UTC timestamps (they sort
-    chronologically), never a wall-clock delta. Two independent receipt
+    chronologically), never a wall-clock delta. A ``None`` prior tick means
+    no completion heartbeat has been observed yet (a fresh host): an absent
+    heartbeat is then a not-yet-ticked observation (``observed_tick`` None,
+    ``advanced`` False) so the caller's first-tick budget can wait for the
+    first publication, and any strict tick counts as advancing. With a real
+    prior tick an absent heartbeat still refuses. Two independent receipt
     verdicts ride along: ``receipts_readable`` (state/runs/*/meta.json parse;
     pre-launch stops are expected, named missing/corrupt entries are not)
     and ``receipts_valid`` (state/receipts family schema sample). Neither
     affects advancement; neither grants review credit.
     """
-    _parse_iso(prior_tick)
-    current = _tick_value(effects)
-    _parse_iso(current)
-    advanced = current > prior_tick
+    if prior_tick is not None:
+        _parse_iso(prior_tick)
+    current = _heartbeat_tick(effects)
+    if current is None:
+        if prior_tick is not None:
+            raise Refused("no completion heartbeat observed under the runner's "
+                          "WATCHDOG_HOME; cannot assess health")
+    else:
+        _parse_iso(current)
+    advanced = current is not None and (prior_tick is None or current > prior_tick)
     receipt_sample = run_metadata_sample(effects)
     validation = receipt_validation(effects)
     return {"observed_tick": current, "advanced": advanced,
@@ -1385,9 +1407,10 @@ def health_observation(effects: Effects, prior_tick: str) -> dict:
             "receipts_valid": validation["valid"] if validation else None}
 
 
-def wait_for_first_tick(effects: Effects, prior_tick: str, timeout: float,
+def wait_for_first_tick(effects: Effects, prior_tick: str | None, timeout: float,
                         *, sleep=time.sleep, clock=time.monotonic) -> dict:
-    """Bounded polling for a completed tick; no deployment mutations."""
+    """Bounded polling for a completed tick; no deployment mutations. A
+    ``None`` prior tick waits for the first heartbeat publication itself."""
     deadline = clock() + timeout
     while True:
         observation = health_observation(effects, prior_tick)
@@ -1402,13 +1425,20 @@ def two_slot_health(effects: Effects, observe) -> dict:
     (wall-clock sleeping belongs to the caller, never the controller).
 
     Each observation must be strictly later than the previous one; two equal
-    timestamps are one slot seen twice, never two slots.
+    timestamps are one slot seen twice, never two slots. When the runner has
+    published no heartbeat yet (a fresh host), the baseline is ``None`` and
+    the caller's first observation waits within its own first-tick budget
+    for the first publication; a heartbeat still absent after that budget is
+    unhealthy, while an unreadable, malformed or foreign heartbeat refuses
+    immediately.
     """
-    first_tick = _tick_value(effects)
+    first_tick = _heartbeat_tick(effects)
     first = observe(first_tick)
     if not first.get("advanced"):
-        return {"healthy": False, "reason": "first observation did not advance past "
-                                            + first_tick,
+        reason = ("first observation did not advance past " + first_tick
+                  if first_tick is not None else
+                  "first observation saw no completion heartbeat")
+        return {"healthy": False, "reason": reason,
                 "observations": [first], **_receipt_verdicts([first])}
     second_tick = first["observed_tick"]
     second = observe(second_tick)

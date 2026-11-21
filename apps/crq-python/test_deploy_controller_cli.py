@@ -167,20 +167,25 @@ class CliTests(ControllerFixture):
                     for p in self.record_dir.glob("controller-*.json")]
         self.assertEqual([j["helper_sha256"] for j in journals], [helper_digest])
 
-    def test_health_cli_missing_heartbeat_refuses_with_isolated_env(self):
+    def test_health_cli_missing_heartbeat_waits_budget_then_is_unhealthy(self):
         # The CLI subprocess resolves WATCHDOG_HOME from its own environment:
         # an isolated XDG_STATE_HOME means the actual user heartbeat is never
-        # consulted, and no queue tick can substitute for it.
+        # consulted, and no queue tick can substitute for it. A heartbeat the
+        # runner has not published yet is waited for within the first-tick
+        # budget (exhausted here) and then reported unhealthy (exit 1), never
+        # a refusal (exit 2).
         self.write_state("queue.json", {"last_tick": "2026-10-28T00:00:00Z"})
         result = self.run_cli("health", "--interval-seconds", "0",
+                              "--first-tick-timeout-seconds", "0",
                               env={"XDG_STATE_HOME": str(self.base / "cli-xdg")})
-        self.assertEqual(result.returncode, 2)
-        self.assertIn("refused:", result.stderr)
-        self.assertIn("completion heartbeat", result.stderr)
-        error = json.loads(result.stdout)["error"]
-        self.assertEqual(error["kind"], "refused")
-        self.assertEqual(error["subcommand"], "health")
-        self.assertEqual(error["exitCode"], 2)
+        self.assertEqual(result.returncode, 1)
+        artifact = json.loads(result.stdout)
+        self.assertEqual(artifact["operation"], "health")
+        self.assertFalse(artifact["healthy"])
+        self.assertIn("first observation", artifact["reason"])
+        first = artifact["observations"][0]
+        self.assertIsNone(first["observed_tick"])
+        self.assertFalse(first["advanced"])
 
     def test_health_cli_unreadable_heartbeat_exits_1_as_failed_observation(self):
         # The heartbeat exists but cannot be read: a failed observation keeps
