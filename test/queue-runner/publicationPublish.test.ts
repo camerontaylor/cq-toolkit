@@ -199,6 +199,9 @@ function parts(itemId = 'pr5', run = 'run-1', openPr = false) {
     verdicts: [{ job: 'job-1', verdict: 'FIXED', reason: 'ok' }],
   };
   const fixed: Rec[] = [{ job: 'job-1', verdict: 'FIXED', reason: 'ok', commits: [CLAIM] }];
+  // The record lives under `item.repair_runs[run]` as in the runtime, so a saved
+  // queue snapshot shows whether `record.publication` was set before the save.
+  item.repair_runs = { [run]: record };
   const q: Rec = { items: [item] };
   return { item, record, fixed, q, run };
 }
@@ -437,6 +440,8 @@ describe('publishRepair: journal ordering and lease', () => {
     // The queue saved with the record already carrying the journal.
     const saved = h.saves[0]!.items as Rec[];
     expect(saved).toHaveLength(1);
+    const savedRecord = (saved[0]!.repair_runs as Rec)['run-1'] as Rec;
+    expect(savedRecord.publication).toEqual(h.journals[0]);
     expect(p.record.publication).toBe(h.finalized[0]);
   });
 
