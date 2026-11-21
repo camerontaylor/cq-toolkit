@@ -755,12 +755,17 @@ def recover_publication(c, q, item, run, record, publication):
         raise ValueError('existing fix branch differs from prepared publication')
     if remote_head != head:
         # Immutable publication SHA survives retries via refs/crq/publication.
-        # Lease the update on the tip observed above and require it to
+        # Lease the update on the tip recovery verified and require it to
         # fast-forward from that exact SHA, so a maintainer reset to an
-        # ancestor cannot be silently resurrected by this push.
-        if remote_head and not c.is_ancestor(remote_head, head):
-            raise ValueError('publication would not fast-forward the observed remote head')
-        c.git('push', 'origin', '--force-with-lease=refs/heads/' + branch + ':' + (remote_head or ''),
+        # ancestor cannot be silently resurrected by this push. For an open
+        # PR the PR head was just verified to equal the journaled target, so
+        # lease on that target: the ls-remote read above may already be
+        # stale after a reset, and leasing it would let this push restore
+        # commits the maintainer removed.
+        expected = publication['target'] if publication['open_pr'] else (remote_head or '')
+        if expected and not c.is_ancestor(expected, head):
+            raise ValueError('publication would not fast-forward the checked remote head')
+        c.git('push', 'origin', '--force-with-lease=refs/heads/' + branch + ':' + expected,
               head + ':refs/heads/' + branch)
     finalize_publication(c, q, item, run, record, publication)
 
