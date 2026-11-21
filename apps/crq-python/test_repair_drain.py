@@ -2054,6 +2054,7 @@ class RepairDrainTest(unittest.TestCase):
         with mock.patch.object(service, 'fetch_clone', return_value=None), \
              mock.patch.object(service, 'triage_phase', return_value=report), \
              mock.patch.object(service, 'dispatch_paused', return_value=None), \
+             mock.patch.object(service, 'drain_job', return_value=('skip', None, '')), \
              mock.patch.object(service.os, 'fork', return_value=4242), \
              mock.patch.object(service.os, 'waitpid', return_value=(4242, 1 << 8)), \
              contextlib.redirect_stderr(stderr):
@@ -2073,6 +2074,7 @@ class RepairDrainTest(unittest.TestCase):
         with mock.patch.object(service, 'fetch_clone', return_value=None), \
              mock.patch.object(service, 'triage_phase', return_value=report), \
              mock.patch.object(service, 'dispatch_paused', return_value=None), \
+             mock.patch.object(service, 'drain_job', return_value=('skip', None, '')), \
              mock.patch.object(service.os, 'fork', return_value=4242), \
              mock.patch.object(service.os, 'waitpid', return_value=(4242, 2 << 8)), \
              contextlib.redirect_stderr(stderr):
