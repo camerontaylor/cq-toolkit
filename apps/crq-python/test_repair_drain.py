@@ -641,6 +641,55 @@ class RepairDrainTest(unittest.TestCase):
                                    ['git', '-C', str(self.clone), 'merge-base', '--is-ancestor', a, b],
                                    capture_output=True).returncode == 0)
 
+    def test_receipt_and_ordinary_reconciliation_require_repair_in_merge_tree(self):
+        receipt = repair_tick.review_receipt
+        base = self.commit_files(self.tip, {'src/app.ts': SOURCE_TEXT}, 'unfixed base')
+        published = self.commit_files(base, {'src/app.ts': FIXED_TEXT}, 'published repair')
+        self.git('checkout', '-q', '--detach', base)
+        self.git('merge', '-q', '--no-ff', '-s', 'ours', '-m', 'Drop repair in merge tree', published)
+        dropped = self.git('rev-parse', 'HEAD')
+        self.assertEqual(self.git('rev-parse', dropped + '^{tree}'), self.git('rev-parse', base + '^{tree}'))
+        self.git('checkout', '-q', '--detach', base)
+        self.git('merge', '-q', '--no-ff', '-m', 'Keep repair in merge tree', published)
+        kept = self.git('rev-parse', 'HEAD')
+        squashed = self.commit_files(base, {'src/app.ts': FIXED_TEXT}, 'Squash repair')
+        job_id = 'crq-run1-F1'
+        finding = {'comment': 'repair app'}
+        doc = {'source': {'target_selector': 'promoted-main'}, 'capture': {'target': base},
+               'findings': [finding], 'counted': True, 'classification': {'counted': True, 'outcome': 'completed'},
+               'outcome': 'terminal-with-findings'}
+        c = self.containment_client()
+        rid = receipt.write_receipt(c.STATE / 'receipts', doc)
+        for merge in (dropped, kept, squashed):
+            with self.subTest(merge=merge):
+                self.assertEqual(c.is_ancestor(published, merge), merge != squashed)
+                self.git('update-ref', repair_tick.DEFAULT_REF, merge)
+                c.pr_info = lambda _: {'number': 99, 'state': 'MERGED', 'baseRefName': 'main',
+                                       'headRefOid': published, 'mergeCommit': {'oid': merge}}
+                record = self.containment_record(job_id, published)
+                item = {'id': 'ordinary', 'kind': 'merged', 'repair_runs': {'run1': record},
+                        'blocking': [{'repair_job': job_id}]}
+                with mock.patch.object(repair_tick, 'mark_finding_outcome') as mark, \
+                     mock.patch.object(repair_tick, 'publish_source_resolution', return_value=False):
+                    repair_tick.reconcile_fix_prs(c, {'items': [item]})
+                allowed = merge != dropped
+                with self.subTest(lane='ordinary'):
+                    self.assertEqual(mark.call_count, int(allowed))
+                    self.assertEqual('fix_merged' in record, allowed)
+                    self.assertEqual('resolution' in item['blocking'][0], allowed)
+
+                record = self.containment_record(job_id, published)
+                record.update(state='published', receipt_id=rid,
+                              receipt_findings=[receipt.digest(finding)],
+                              repair_findings=[receipt.digest(finding)])
+                record['verdicts'][0]['finding'] = finding
+                record['publication']['target'] = base
+                item = {'kind': receipt.KIND, 'subject': doc['source'], 'capture': doc['capture'],
+                        'receipt_id': rid, 'repair_runs': {'run1': record}}
+                repair_tick.reconcile_current_fix(c, item)
+                with self.subTest(lane='receipt'):
+                    self.assertEqual(receipt.remediation_fixed(item, doc, rid), allowed)
+
     def test_merged_fix_survives_later_formatting_commit_and_records_containment(self):
         # Live shape: publish the fix, then polish the branch after publication.
         base = self.commit_files(self.tip, {'src/app.ts': SOURCE_TEXT}, 'review evidence fixture')
@@ -651,7 +700,8 @@ class RepairDrainTest(unittest.TestCase):
         record = self.containment_record(job_id, published)
         self.queue['items'][0]['repair_runs'] = {'run1': record}
         info = {'number': 99, 'state': 'MERGED', 'headRefOid': formatted,
-                'mergeCommit': {'oid': self.tip}}
+                'mergeCommit': {'oid': formatted}}
+        self.git('update-ref', repair_tick.DEFAULT_REF, formatted)
         c = self.containment_client()
         c.pr_info = mock.Mock(return_value=info)
         with mock.patch.object(repair_tick, 'mark_finding_outcome') as mark, \

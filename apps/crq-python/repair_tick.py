@@ -976,7 +976,7 @@ def reconcile_current_fix(c, item):
                 or len(verdicts) != len(doc.get('findings', []))
                 or record.get('receipt_findings') != sorted(review_receipt.digest(f) for f in doc.get('findings', []))):
             continue
-        # Merged PR identity is immutable; only target ancestry needs refreshing.
+        # Merged PR identity is immutable. Recheck target ancestry and tree evidence.
         info = record.get('merged_fix')
         if not info:
             try:
@@ -1003,9 +1003,14 @@ def reconcile_current_fix(c, item):
         merge = (info.get('mergeCommit') or {}).get('oid')
         if (info.get('state') != 'MERGED' or info.get('number') != pr['number']
                 or info.get('baseRefName') != ref.removeprefix('origin/')
-                or info.get('headRefOid') != publication.get('head') or not merge
+                or not publication.get('head') or info.get('headRefOid') != publication['head'] or not merge
                 or not c.is_ancestor(merge, target)
                 or not c.is_ancestor(doc['capture']['target'], publication.get('target', ''))):
+            continue
+        try:
+            merge_head_evidence(c, record, info['headRefOid'], merge=merge)
+        except (OSError, RuntimeError, ValueError) as exc:
+            skipped(exc)
             continue
         evidence = dict(receipt_id=rid, subject=item['subject'], capture_digest=review_receipt.digest(doc['capture']),
                         findings=sorted(review_receipt.digest(f) for f in doc['findings']),
@@ -1269,17 +1274,23 @@ def extra_commits(c, published, actual_head):
     return commits, total
 
 
-def merge_head_evidence(c, record, actual_head):
+def merge_head_evidence(c, record, actual_head, *, merge=None):
     published = record.get('publication', {}).get('head')
     if not published:
         return None  # Preserve legacy reconciliation without a publication journal.
     evidence = {'published_head': published, 'actual_head': actual_head, 'source_blobs': {}}
-    if actual_head == published:
+    # The caller binds the forge merge commit to the promoted ref. Its tree
+    # is authoritative even for squash merges, where the PR head is not an
+    # ancestor. Still require lineage for the observed PR head itself.
+    comparison = merge if merge is not None else actual_head
+    if actual_head == published == comparison:
         return evidence
     fixed = [v['job'] for v in record.get('verdicts', []) if v['verdict'] == 'FIXED']
     if (not isinstance(actual_head, str) or not re.fullmatch(r'[0-9a-f]{40}', actual_head)
             or not fixed or not c.is_ancestor(published, actual_head)):
         raise ValueError('merged repair head is not a descendant of the published fix')
+    if not isinstance(comparison, str) or not re.fullmatch(r'[0-9a-f]{40}', comparison):
+        raise ValueError('merged repair commit unavailable; needs revalidation')
     commits = record.get('publication', {}).get('commits')
     if not isinstance(commits, list) or not commits:
         raise ValueError('published repair commits unavailable; needs revalidation')
@@ -1308,7 +1319,7 @@ def merge_head_evidence(c, record, actual_head):
         for index, path in enumerate(sorted(paths)):
             source_path({'path': path})
             before = repair_source_entry(c, published, path)
-            after = repair_source_entry(c, actual_head, path)
+            after = repair_source_entry(c, comparison, path)
             parent_entry = repair_source_entry(c, published_parent, path) if published_parent else None
             evidence['source_blobs'][path] = before[1] if before else None
             evidence['source_modes'][path] = before[0] if before else None
@@ -1343,7 +1354,7 @@ def merge_head_evidence(c, record, actual_head):
             if not (published_lines[0] or published_lines[1] or mode_changed):
                 raise ValueError('merged repair source changed; needs revalidation: ' + path)
             head_size, head_patch = head_change_patch(
-                c, tmp, 'head-' + str(index) + '.diff', published, actual_head, path)
+                c, tmp, 'head-' + str(index) + '.diff', published, comparison, path)
             total_bytes += head_size
             if head_size > MAX_CONTAINMENT_PATCH_BYTES or total_bytes > MAX_CONTAINMENT_TOTAL_BYTES:
                 raise ValueError('published repair change too large to verify; needs revalidation: ' + path)
@@ -1610,7 +1621,7 @@ def reconcile_fix_prs(c, q):
                             record['publication'] = saved
                             proof = {'fixed_revalidation': evidence}
                         else:
-                            proof = merge_head_evidence(c, record, info.get('headRefOid'))
+                            proof = merge_head_evidence(c, record, info.get('headRefOid'), merge=merge)
                     elif canonical_fixed_events(c, record, info) != proof:
                         raise ValueError('canonical fixed finding changed before source feedback')
                 except Exception as exc:
