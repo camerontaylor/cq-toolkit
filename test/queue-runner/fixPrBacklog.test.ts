@@ -43,7 +43,7 @@ if spec['mode'] == 'limit':
     print(json.dumps({'limit': repair_tick.review_start_limit(c, now)}))
 else:
     repair_tick.TICK_BACKLOG.update(open=7, limit=7)
-    out = repair_tick.refresh_fix_pr_backlog(c)
+    out = repair_tick.refresh_fix_pr_backlog(c, spec['queue'])
     print(json.dumps({'view': None if out is None else dict(out),
                       'tick': dict(repair_tick.TICK_BACKLOG)}))
 `;
@@ -200,7 +200,7 @@ describe('refreshFixPrBacklog', () => {
       readEvents: async () => Array.from({ length: 36 }, () => ev(hoursAgo(1))).join('\n') + '\n',
     });
     const b = new FixPrBacklog();
-    expect(await refreshFixPrBacklog(b, fx)).toBe(b);
+    expect(await refreshFixPrBacklog(b, fx, {})).toBe(b);
     expect([b.open, b.limit]).toEqual([2, 2]);
     expect(fx.written).toEqual([{ at: '2026-11-20T12:00:00Z', open: 2, limit: 2 }]);
   });
@@ -217,7 +217,7 @@ describe('refreshFixPrBacklog', () => {
       const b = new FixPrBacklog();
       b.open = 5;
       b.limit = 5;
-      expect(await refreshFixPrBacklog(b, effects(over))).toBeNull();
+      expect(await refreshFixPrBacklog(b, effects(over), {})).toBeNull();
       expect([b.open, b.limit]).toEqual([null, null]);
     },
   );
@@ -227,6 +227,7 @@ describe('file-backed refresh against Python refresh_fix_pr_backlog', () => {
   async function bothSides(
     prs: unknown,
     events: string | null,
+    queue: { items?: readonly Record<string, unknown>[] } = {},
   ): Promise<{
     ts: unknown;
     py: Record<string, unknown>;
@@ -238,7 +239,7 @@ describe('file-backed refresh against Python refresh_fix_pr_backlog', () => {
     for (const state of [tsState, pyState]) {
       if (events !== null) writeFileSync(join(state, 'events.jsonl'), events);
     }
-    const py = python(pyState, { mode: 'refresh', prs });
+    const py = python(pyState, { mode: 'refresh', prs, queue });
     const backlog = new FixPrBacklog();
     backlog.open = 7;
     backlog.limit = 7;
@@ -251,6 +252,7 @@ describe('file-backed refresh against Python refresh_fix_pr_backlog', () => {
           return prs;
         },
       }),
+      queue,
     );
     const read = (state: string): string | null => {
       try {
@@ -285,6 +287,27 @@ describe('file-backed refresh against Python refresh_fix_pr_backlog', () => {
     expect(r.tsFile?.endsWith('}\n')).toBe(true);
     expect(r.tsFile?.replace(/"at": "[^"]+"/, '')).toBe(r.pyFile?.replace(/"at": "[^"]+"/, ''));
     expect(r.tsFile?.indexOf('"at"')).toBeLessThan(r.tsFile?.indexOf('"open"') ?? -1);
+  });
+
+  it('counts only open legacy retry branches owned by retained backfill runs', async () => {
+    const prs = ['backfill', 'ordinary', 'unknown'].map((suffix) => ({
+      headRefName: 'crq/fix-revalidated-' + suffix,
+    }));
+    const queue = {
+      items: [
+        {
+          id: 'backfill-finding-a',
+          state: 'done',
+          repair_runs: { 'revalidated-backfill': {}, 'revalidated-closed': {} },
+        },
+        { id: 'backfill-finding-b', repair_runs: null },
+        { id: 'pr-9', repair_runs: { 'revalidated-ordinary': {} } },
+      ],
+    };
+    const r = await bothSides(prs, '', queue);
+    expect(r.ts).toEqual(r.py);
+    expect(stripAt(r.tsFile)).toEqual(stripAt(r.pyFile));
+    expect(stripAt(r.tsFile)).toEqual({ at: 'T', open: 1, limit: 0 });
   });
 
   it('with no events file the limit is 0 and the file is still written', async () => {

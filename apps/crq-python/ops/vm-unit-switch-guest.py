@@ -142,7 +142,8 @@ def require(condition, message):
         raise RuntimeError(message)
 
 
-def _starttime(pid):
+def _stat_sample(pid):
+    """One /proc/<pid>/stat sample: process state and starttime together."""
     try:
         text = (pathlib.Path("/proc") / str(pid) / "stat").read_text()
     except OSError:
@@ -150,7 +151,9 @@ def _starttime(pid):
     # The comm field may contain spaces and parentheses; fields after the
     # final ')' begin at state (field 3), so starttime (field 22) is index 19.
     tail = text.rsplit(")", 1)[1].split()
-    return tail[19] if len(tail) > 19 else None
+    if len(tail) < 20:
+        return None
+    return {"state": tail[0], "starttime": tail[19]}
 
 
 def process_state(pid):
@@ -158,19 +161,29 @@ def process_state(pid):
     state = {"pid": pid, "alive": False, "cmdline": "", "starttime": None}
     if not isinstance(pid, int) or pid <= 0:
         return state
-    try:
-        raw = (pathlib.Path("/proc") / str(pid) / "cmdline").read_bytes()
-    except OSError:
+    # State and starttime come from one /proc/<pid>/stat sample. A successful
+    # /proc/<pid>/cmdline read does not prove liveness: Linux keeps the file
+    # readable with an empty command line for a zombie, so liveness is decided
+    # by the stat state and a zombie or dead process is never a surviving
+    # fixture process even though its /proc entry and start time remain.
+    sample = _stat_sample(pid)
+    if sample is None:
+        return state
+    state["starttime"] = sample["starttime"]
+    if sample["state"] in ("Z", "X", "x"):
         return state
     state["alive"] = True
-    state["cmdline"] = raw.replace(b"\0", b" ").decode("utf-8", "replace").strip()
-    state["starttime"] = _starttime(pid)
     try:
         state["pgid"] = os.getpgid(pid)
         state["sid"] = os.getsid(pid)
     except OSError:
         state["pgid"] = None
         state["sid"] = None
+    try:
+        raw = (pathlib.Path("/proc") / str(pid) / "cmdline").read_bytes()
+    except OSError:
+        return state
+    state["cmdline"] = raw.replace(b"\0", b" ").decode("utf-8", "replace").strip()
     return state
 
 
@@ -236,11 +249,14 @@ def stop_process(proc):
     before = process_state(proc.pid)
     if before["alive"]:
         proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5)
+    # Reap even when the child already exited: process_state does not count a
+    # zombie as alive, but an owned child that has not been waited on yet must
+    # still be reaped here. wait() returns immediately for an exited child.
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
     after = process_state(proc.pid)
     require(not after["alive"], "harness cleanup did not stop a seeded process")
     return {"before": before, "after": after, "terminated": True,
@@ -858,23 +874,24 @@ def completion_baseline(entries):
             "invocations": set(item.get("invocation") for item in entries)}
 
 
-def completion_logged(item, log_entries):
+def completion_logged(item, log_entries, unit=UNIT):
     """Journal completion evidence must match a real fixture log entry."""
     return any(isinstance(entry, dict)
                and type(entry.get("sequence")) is int
                and entry.get("sequence") == item.get("sequence")
                and entry.get("invocation") == item.get("invocation")
-               and entry.get("unit") == UNIT
+               and entry.get("unit") == unit
                and entry.get("runtime") == item.get("runtime")
                and entry.get("success") is True
                for entry in log_entries)
 
 
-def validate_completed(record, runtime, prior, baseline, log_entries):
+def validate_completed(record, runtime, prior, baseline, log_entries,
+                       unit=UNIT):
     require(record["outcome"] == "completed", "switch did not complete")
     require(record["phase"] == "activation_pending",
             "completed record has the wrong phase")
-    require(record["unit"] == UNIT and record["runtime"] == runtime,
+    require(record["unit"] == unit and record["runtime"] == runtime,
             "completed record runtime or unit mismatch")
     require(record["prior_runtime"] == prior,
             "completed record prior runtime mismatch")
@@ -892,10 +909,10 @@ def validate_completed(record, runtime, prior, baseline, log_entries):
     require(len(set(invocations)) == 2, "completion invocations are not distinct")
     require(not set(invocations) & baseline["invocations"],
             "completion invocations were already recorded before the switch")
-    require(all(item.get("unit") == UNIT and item.get("runtime") == runtime
+    require(all(item.get("unit") == unit and item.get("runtime") == runtime
                 and item.get("success") is True for item in evidence),
             "completion evidence is not unit/runtime bound")
-    require(all(completion_logged(item, log_entries) for item in evidence),
+    require(all(completion_logged(item, log_entries, unit) for item in evidence),
             "completion evidence is absent from the fixture completion log")
     return {"sequences": sequences, "invocations": invocations}
 
@@ -2566,7 +2583,13 @@ def activators_fence(args):
     require(external.get("completions_before_external") == completions_before,
             "a completion landed between the pre-switch log "
             "and the first pause sample")
-    require(any(REPAIR_UNIT in line for line in external.get("jobs", [])),
+    external_jobs = external.get("jobs_observation") or {}
+    external_jobs_result = external_jobs.get("command") or {}
+    require(not external_jobs_result.get("timeout")
+            and external_jobs_result.get("rc") == 0,
+            "queued target job observation failed during the pause")
+    require(any(line == queue_seed["job"]
+                for line in (external_jobs.get("lines") or [])),
             "queued target job was not retained through mask and reload")
     require(external.get("marker", {}).get("phase") == "after-mask-reload",
             "pause marker does not record the expected phase")
@@ -2625,14 +2648,9 @@ def activators_switch_back(args):
             "switch back record names another runtime")
     require(record.get("prior_runtime") == NODE_RUNTIME,
             "switch back record names another prior runtime")
-    completions = record.get("completions") or []
-    require(len(completions) == 2,
-            "switch back record does not retain two completions")
-    baseline = max((item.get("sequence", 0)
-                    for item in before["repair_completions"]), default=0)
-    require(all(type(item.get("sequence")) is int
-                and item["sequence"] > baseline for item in completions),
-            "switch back completions do not advance past the baseline")
+    validate_completed(record, PYTHON_RUNTIME, NODE_RUNTIME,
+                       completion_baseline(before["repair_completions"]),
+                       after["repair_completions"], unit=REPAIR_UNIT)
     expected_service = repair_adapter().render_unit(PYTHON_RUNTIME)
     require(after["repair_files"]["service"]["sha256"]
             == sha256_bytes(expected_service.encode()),
