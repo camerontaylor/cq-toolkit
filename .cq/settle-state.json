@@ -54,15 +54,15 @@
         }
       ]
     },
-    "2305": {
+    "2306": {
       "tuple": {
-        "head": "bebe730c90e8d47ab9192f56ccbfda3bfa14c7c5",
-        "base": "7a88f3087e17a77a01e1c5f4628c542ef8ead5d3",
+        "head": "370030a60bdec2f8903a64d0d6a26dae1f5b8041",
+        "base": "a1661f4f3721f91cb54e77dcb049a7f559b41606",
         "forcePushEpoch": 0
       },
       "observations": [
         {
-          "observedAt": "2026-11-21T19:33:46.966Z",
+          "observedAt": "2026-11-21T20:08:03.092Z",
           "by": "self-merge-prs:observe"
         }
       ]
