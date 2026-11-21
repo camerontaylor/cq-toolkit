@@ -98,8 +98,10 @@ class StopOwnedProcessTests(unittest.TestCase):
             def fake_run(argv, **kwargs):
                 self.dispatched.append(argv)
                 if "show" in argv:
+                    # Only the derived unit exists; the legacy name is absent.
+                    state = load_state if argv[-1] == self.derived_unit else "not-found"
                     out = ("ActiveState=%s\nLoadState=%s\nControlGroup=/user.slice/%s\n"
-                           % (active_state, load_state, self.derived_unit))
+                           % (active_state, state, argv[-1]))
                     return mock.Mock(returncode=show_rc, stdout=out, stderr="")
                 return mock.Mock(returncode=stop_rc, stdout="", stderr="")
 
@@ -124,7 +126,10 @@ class StopOwnedProcessTests(unittest.TestCase):
                 "-p", "ControlGroup", self.derived_unit]
         stop = ["systemctl", "--user", "stop", self.derived_unit]
         # Ownership proof first, then the stop, then the post-stop state query.
-        self.assertEqual(self.dispatched, [show, stop, show])
+        legacy = ["systemctl", "--user", "show", "-p", "ActiveState", "-p", "LoadState",
+                  "-p", "ControlGroup", "crq-vm-r1.scope"]
+        # The legacy-named scope is checked last and found absent.
+        self.assertEqual(self.dispatched, [show, stop, show, legacy])
 
     def test_failed_scope_is_stopped(self):
         result, _ = self._stop("failed")
@@ -194,8 +199,9 @@ class StopOwnedProcessTests(unittest.TestCase):
             def fake_run(argv, **kwargs):
                 calls.append(argv)
                 if "show" in argv:
+                    state = load_state if argv[-1] == unit else "not-found"
                     out = ("ActiveState=failed\nLoadState=%s\n"
-                           "ControlGroup=/user.slice/%s\n" % (load_state, unit))
+                           "ControlGroup=/user.slice/%s\n" % (state, argv[-1]))
                     return mock.Mock(returncode=0, stdout=out, stderr="")
                 return mock.Mock(returncode=0, stdout="", stderr="")
 
@@ -246,7 +252,9 @@ class StopOwnedProcessTests(unittest.TestCase):
         self.assertFalse(any("stop" in argv for argv in calls))
         self.assertEqual(
             calls, [["systemctl", "--user", "show", "-p", "ActiveState", "-p", "LoadState",
-                     "-p", "ControlGroup", unit]])
+                     "-p", "ControlGroup", unit],
+                     ["systemctl", "--user", "show", "-p", "ActiveState", "-p", "LoadState",
+                      "-p", "ControlGroup", "crq-vm-r1.scope"]])
         self.assertFalse(still_there)
 
     def test_empty_scope_is_never_stopped(self):
@@ -256,7 +264,9 @@ class StopOwnedProcessTests(unittest.TestCase):
         self.assertFalse(any("stop" in argv for argv in calls))
         self.assertEqual(
             calls, [["systemctl", "--user", "show", "-p", "ActiveState", "-p", "LoadState",
-                     "-p", "ControlGroup", unit]])
+                     "-p", "ControlGroup", unit],
+                     ["systemctl", "--user", "show", "-p", "ActiveState", "-p", "LoadState",
+                      "-p", "ControlGroup", "crq-vm-r1.scope"]])
         self.assertFalse(still_there)
 
     def test_busy_run_lock_blocks_stop_before_any_systemctl(self):
@@ -282,6 +292,94 @@ class StopOwnedProcessTests(unittest.TestCase):
             for bad in ("*", "..", "a/b", "", "-x"):
                 with self.assertRaises(ValueError):
                     vm.load_run(pathlib.Path(tmp), bad, require_process=False)
+
+class LegacyScopeTests(unittest.TestCase):
+    """Interrupted launches from before the scope name bound the run directory."""
+
+    def _destroy(self, *, new, legacy, alias=False, owned_cmdline=True):
+        """`new`/`legacy`: (members before the stop, members after) or None for
+        an absent scope. Nothing real runs: systemctl and /proc are faked."""
+        with tempfile.TemporaryDirectory() as tmp:
+            real = pathlib.Path(tmp).resolve() / "runs" / "r1"
+            real.mkdir(parents=True)
+            (real / "overlay.qcow2").write_text("disk")
+            path = real
+            if alias:
+                path = pathlib.Path(tmp).resolve() / "runs" / "alias"
+                path.symlink_to(real)
+            new_unit = vm.run_scope_unit(real, "r1") + ".scope"
+            units = {new_unit: new, "crq-vm-r1.scope": legacy}
+            stopped_units = set()
+            calls = []
+
+            def fake_run(argv, **kwargs):
+                calls.append(argv)
+                unit = argv[-1]
+                if "stop" in argv:
+                    stopped_units.add(unit)
+                    return mock.Mock(returncode=0, stdout="", stderr="")
+                state = units[unit]
+                load = "not-found" if state is None else "loaded"
+                return mock.Mock(returncode=0, stderr="", stdout=(
+                    "ActiveState=failed\nLoadState=%s\nControlGroup=/user.slice/%s\n"
+                    % (load, unit)))
+
+            def pids(group):
+                unit = str(group).rsplit("/", 1)[-1]
+                state = units[unit]
+                if state is None:
+                    return []
+                return state[1] if unit in stopped_units else state[0]
+
+            cmdline = (str(real / "overlay.qcow2") if owned_cmdline else "other").encode()
+            with mock.patch.object(vm.subprocess, "run", side_effect=fake_run), \
+                 mock.patch.object(vm, "_cgroup_pids", side_effect=pids), \
+                 mock.patch.object(pathlib.Path, "read_bytes", return_value=cmdline):
+                result = vm.stop_owned_process(
+                    {"path": str(path), "run_id": "r1"}, purge=True)
+            return result, calls, stopped_units, (real / "overlay.qcow2").exists(), new_unit
+
+    def test_owned_legacy_scope_is_stopped_before_reporting_stopped(self):
+        result, calls, stopped, still_there, _ = self._destroy(
+            new=None, legacy=([4242], []))
+        self.assertEqual(stopped, {"crq-vm-r1.scope"})
+        self.assertTrue(result["stopped"])
+        self.assertFalse(still_there)
+
+    def test_owned_legacy_scope_that_stays_populated_keeps_the_files(self):
+        result, _, stopped, still_there, _ = self._destroy(
+            new=None, legacy=([4242], [4242]))
+        self.assertEqual(stopped, {"crq-vm-r1.scope"})
+        self.assertFalse(result["stopped"])
+        self.assertTrue(still_there)
+
+    def test_unrelated_legacy_scope_is_left_untouched(self):
+        # Another state directory owns the shared legacy name.
+        result, calls, stopped, still_there, _ = self._destroy(
+            new=None, legacy=([4242], [4242]), owned_cmdline=False)
+        self.assertEqual(stopped, set())
+        self.assertTrue(result["stopped"])
+        self.assertFalse(still_there)
+
+    def test_hashed_scope_behaviour_is_preserved(self):
+        result, _, stopped, _, new_unit = self._destroy(
+            new=([4242], []), legacy=None)
+        self.assertEqual(stopped, {new_unit})
+        self.assertTrue(result["stopped"])
+
+    def test_hashed_scope_with_foreign_members_still_refuses(self):
+        with self.assertRaises(RuntimeError):
+            self._destroy(new=([4242], [4242]), legacy=None, owned_cmdline=False)
+
+    def test_run_path_alias_is_proven_against_the_canonical_overlay(self):
+        # QEMU's command line carries the resolved overlay path, never the
+        # symlinked run directory, so the ownership needle must be resolved.
+        result, _, stopped, still_there, new_unit = self._destroy(
+            new=([4242], []), legacy=None, alias=True)
+        self.assertEqual(stopped, {new_unit})
+        self.assertTrue(result["stopped"])
+        self.assertFalse(still_there)
+
 
 
 class DownloadTests(unittest.TestCase):

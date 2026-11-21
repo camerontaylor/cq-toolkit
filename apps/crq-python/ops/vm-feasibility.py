@@ -663,7 +663,9 @@ def live_identity(run: dict) -> dict | None:
     command line still match -- the same proof ``stop_owned_process`` demands
     before stopping anything.
     """
-    run_dir = pathlib.Path(run["path"])
+    # QEMU receives the resolved overlay path, so the ownership needle must be
+    # built from the resolved run directory, not a symlinked alias of it.
+    run_dir = pathlib.Path(run["path"]).resolve()
     identity_path = run_dir / "process.json"
     if not identity_path.exists():
         return None
@@ -1547,23 +1549,29 @@ def _stop_owned_process(run: dict, *, purge: bool) -> dict:
         # files.
         if not RUN_ID_RE.fullmatch(str(run["run_id"])):
             raise RuntimeError("invalid run id: " + str(run["run_id"]))
-        derived_unit = run_scope_unit(run_dir, run["run_id"]) + ".scope"
-        # Another state directory reusing this run id derives another unit
-        # name, but the name still proves nothing on its own: never send stop
-        # for an absent or empty scope, because a launch from another
-        # directory can register a scope under this name between the check and
-        # the stop, and that stop would kill an unverified guest. A populated
-        # scope is stopped only once one of its members carries this run's
-        # overlay path.
-        before_rc, before = _show_scope(derived_unit)
-        if before_rc != 0:
-            raise RuntimeError("cannot verify scope ownership: " + derived_unit)
-        members = []
-        if before.get("LoadState") != "not-found":
-            members = _cgroup_pids(before.get("ControlGroup"))
-            if members is None:
+        # A launch from before the scope name bound the run directory used the
+        # run id alone, so an interrupted older guest may still sit in that
+        # scope. Check it as well, with the same overlay ownership proof.
+        for derived_unit, legacy in ((run_scope_unit(run_dir, run["run_id"]) + ".scope", False),
+                                     ("crq-vm-" + run["run_id"] + ".scope", True)):
+            # Another state directory reusing this run id derives another unit
+            # name, but the name still proves nothing on its own: never send
+            # stop for an absent or empty scope, because a launch from another
+            # directory can register a scope under this name between the check
+            # and the stop, and that stop would kill an unverified guest. A
+            # populated scope is stopped only once one of its members carries
+            # this run's overlay path.
+            before_rc, before = _show_scope(derived_unit)
+            if before_rc != 0:
                 raise RuntimeError("cannot verify scope ownership: " + derived_unit)
-        if members:
+            members = []
+            if before.get("LoadState") != "not-found":
+                members = _cgroup_pids(before.get("ControlGroup"))
+                if members is None:
+                    raise RuntimeError("cannot verify scope ownership: " + derived_unit)
+            if not members:
+                continue
+
             def owns(pid: int) -> bool:
                 try:
                     command = pathlib.Path("/proc/%d/cmdline" % pid).read_bytes()
@@ -1571,6 +1579,11 @@ def _stop_owned_process(run: dict, *, purge: bool) -> dict:
                     return False
                 return needle.encode() in command
             if not any(owns(pid) for pid in members):
+                if legacy:
+                    # The legacy name is shared across state directories; a
+                    # populated scope without this run's overlay is another
+                    # run's guest. Leave it untouched.
+                    continue
                 raise RuntimeError("refusing to stop a scope this run does not own: "
                                    + derived_unit)
             stop_rc = subprocess.run(["systemctl", "--user", "stop", derived_unit],
@@ -1582,7 +1595,7 @@ def _stop_owned_process(run: dict, *, purge: bool) -> dict:
             # can also enter failed while QEMU is still in its cgroup, so the
             # cgroup must be confirmed empty too.
             shown_rc, props = _show_scope(derived_unit)
-            stopped = (shown_rc == 0
+            stopped = stopped and (shown_rc == 0
                        and props.get("ActiveState") in ("inactive", "failed")
                        and (stop_rc == 0 or props.get("LoadState") == "not-found")
                        and _cgroup_pids(props.get("ControlGroup")) == [])
