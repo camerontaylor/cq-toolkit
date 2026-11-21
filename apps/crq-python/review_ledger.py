@@ -28,6 +28,11 @@ IMPORT_BATCH_BYTES = 4 * 1024 * 1024
 # body is buffered.
 RECORD_BYTES = 1024 * 1024
 READ_GROUP_BYTES = 4 * 1024 * 1024
+# Total decoded line entries one record may expand across every row of all
+# three scopes. The record byte cap bounds the encoded intervals, not their
+# decoded expansion, so the total is computed from the interval bounds before
+# any per-file set is materialized.
+SCOPE_ENTRIES = 1_000_000
 
 
 def independent_import(value):
@@ -182,6 +187,24 @@ def scope(rows):
     return result
 
 
+def scope_entries(payload):
+    """Decoded entry total per record, from interval bounds before any set is built.
+
+    Applies the same interval rules as intervals() so the count is exact and a
+    record over SCOPE_ENTRIES is rejected before any scope map is materialized.
+    """
+    total = 0
+    for rows in (payload["requested_scope"], payload["input_scope"], payload["reviewed_scope"]):
+        for row in rows:
+            last = 0
+            for start, end in row["intervals"]:
+                if type(start) is not int or type(end) is not int or start <= last or end < start or end > 1_000_000:
+                    raise IntegrityError("invalid or overlapping intervals")
+                total += end - start + 1
+                last = end
+    return total
+
+
 def event(kind, source_key, occurred_at, payload):
     value = {"schema": "cq.review-ledger/v1", "event_type": kind,
              "source_key": source_key, "occurred_at": occurred_at, "payload": payload}
@@ -206,6 +229,8 @@ def validate(value):
         if value["source_key"] != expected or p["source"]["repo"] != p["repo"]:
             raise IntegrityError("review source identity mismatch")
         validate_provenance(value)
+        if scope_entries(p) > SCOPE_ENTRIES:
+            raise IntegrityError("scope entries exceed record bound")
         requested, input_scope, reviewed = map(scope, (p["requested_scope"], p["input_scope"], p["reviewed_scope"]))
         if digest(p["requested_scope"]) != p["scope_digest"]:
             raise IntegrityError("scope digest mismatch")
