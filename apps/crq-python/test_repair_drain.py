@@ -194,7 +194,7 @@ class RepairDrainTest(unittest.TestCase):
     def test_fallback_observes_another_items_new_provider_cooldown(self):
         self.config['repair']['fallback_models'] = ['deepseek/deepseek-flash']
         calls = []
-        def invoke(config, role, job, wt, directory, judge):
+        def invoke(config, role, job, wt, directory, judge, deadline=None):
             calls.append(role['model'])
             # A different worker exhausts the fallback while this call is live.
             service.remember_provider_limit('deepseek', {'retry_after_ms': 60000})
@@ -2661,7 +2661,7 @@ class RepairDrainTest(unittest.TestCase):
     def test_fallback_archives_throttled_fixers_partial_commits_and_files(self):
         self.config['repair']['fallback_models'] = ['deepseek/deepseek-flash']
         original = self.git('rev-parse', 'HEAD')
-        def invoke(config, role, job, wt, directory, judge):
+        def invoke(config, role, job, wt, directory, judge, deadline=None):
             if role['model'].startswith('zai/'):
                 (wt / 'src/kept.ts').write_text('partial edit')
                 self.git('commit', '-qam', 'partial fixer commit')
@@ -2717,7 +2717,7 @@ class RepairDrainTest(unittest.TestCase):
     def test_repeated_nested_repository_capture_does_not_collide(self):
         self.config['repair']['fallback_models'] = ['opencode-go/deepseek-v4.1-flash']
         wt = self.worktree('crq-repair-pr1-merged-nested')
-        def dispatch(config, role, job, tree, directory, judge=False):
+        def dispatch(config, role, job, tree, directory, judge=False, deadline=None):
             subprocess.run(['git', 'init', '-q', str(tree / 'scratch')], check=True)
             (tree / 'scratch' / 'note').write_text(directory.name)
             return {'stop': 'rate-limit', 'retry_after_ms': 1000}
@@ -2787,6 +2787,46 @@ class RepairDrainTest(unittest.TestCase):
         self.assertAlmostEqual(blocked.call_args.args[0]['budget']['wall_clock_min'], 5, places=3)
         # The caller's config keeps the configured budget.
         self.assertEqual(self.config['repair']['budget']['wall_clock_min'], 20)
+
+    def test_preparation_charges_the_shared_deadline_before_the_driver(self):
+        # A rung's allowance must not survive the snapshot and review-diff
+        # scans: _dispatch re-measures the shared dispatch deadline at the
+        # launch boundary, so 40 consumed seconds leave the driver 20, and
+        # preparation that consumed everything stops as the typed budget
+        # condition without a paid call.
+        self.config['repair']['budget']['wall_clock_min'] = 1
+        self.config['repair']['fallback_models'] = ['deepseek/deepseek-flash']
+        clock = [1000.0]
+        def prep(config, job):
+            clock[0] += 40
+            return {'path': 'src/a.py', 'source': ''}
+        with mock.patch.dict(os.environ, {'ZAI_API_KEY': 'fixture', 'DEEPSEEK_API_KEY': 'fixture'}), \
+             mock.patch.object(service.time, 'monotonic', side_effect=lambda: clock[0]), \
+             mock.patch.object(service, 'require_canonical_delivery'), \
+             mock.patch.object(service, 'source_snapshot', side_effect=prep), \
+             mock.patch.object(service, 'triage_context_safe', return_value=True), \
+             mock.patch.object(service, 'atomic'), \
+             mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service.cq, 'invoke', return_value={'stop': 'ok'}) as provider:
+            report = service.dispatch(self.config, ROLES['fixer'], {'run': 'r', 'job': 'j'}, self.clone, self.root / 'attempt')
+            self.assertEqual(report['stop'], 'ok')
+            self.assertAlmostEqual(provider.call_args.args[0]['repair']['budget']['wall_clock_min'], 20 / 60)
+        clock[0] = 1000.0
+        def consumes_all(config, job):
+            clock[0] = 1060.0
+            return {'path': 'src/a.py', 'source': ''}
+        with mock.patch.dict(os.environ, {'ZAI_API_KEY': 'fixture', 'DEEPSEEK_API_KEY': 'fixture'}), \
+             mock.patch.object(service.time, 'monotonic', side_effect=lambda: clock[0]), \
+             mock.patch.object(service, 'require_canonical_delivery'), \
+             mock.patch.object(service, 'source_snapshot', side_effect=consumes_all), \
+             mock.patch.object(service, 'triage_context_safe', return_value=True), \
+             mock.patch.object(service, 'atomic'), \
+             mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service.cq, 'invoke', return_value={'stop': 'ok'}) as provider:
+            report = service.dispatch(self.config, ROLES['fixer'], {'run': 'r', 'job': 'j'}, self.clone, self.root / 'attempt-all')
+            self.assertEqual(report['stop'], 'budget')
+            self.assertEqual(report['summary'], 'repair dispatch wall-clock deadline reached')
+            provider.assert_not_called()
 
     def test_pause_defaults_to_30_minutes_and_is_never_shortened(self):
         now = dt.datetime.now(dt.timezone.utc)
