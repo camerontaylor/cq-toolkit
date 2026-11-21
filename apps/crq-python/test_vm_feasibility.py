@@ -94,7 +94,7 @@ class StopOwnedProcessTests(unittest.TestCase):
     def _stop(self, active_state, *, purge=True, stop_rc=0, show_rc=0,
               load_state="loaded", run_id="r1"):
         with tempfile.TemporaryDirectory() as tmp:
-            run_dir = pathlib.Path(tmp) / "runs" / "r1"
+            run_dir = pathlib.Path(tmp).resolve() / "runs" / "r1"
             run_dir.mkdir(parents=True)
             (run_dir / "overlay.qcow2").write_text("disk")
 
@@ -155,7 +155,7 @@ class StopOwnedProcessTests(unittest.TestCase):
 
     def test_indeterminate_membership_never_dispatches_stop(self):
         with tempfile.TemporaryDirectory() as tmp:
-            run_dir = pathlib.Path(tmp) / "runs" / "r1"
+            run_dir = pathlib.Path(tmp).resolve() / "runs" / "r1"
             run_dir.mkdir(parents=True)
             calls = []
 
@@ -196,7 +196,7 @@ class StopOwnedProcessTests(unittest.TestCase):
         """Derived-scope stop where the cgroup holds `members` before and
         `cgroup_after` after the stop; `owned` says if their cmdline matches."""
         with tempfile.TemporaryDirectory() as tmp:
-            run_dir = pathlib.Path(tmp) / "runs" / "r1"
+            run_dir = pathlib.Path(tmp).resolve() / "runs" / "r1"
             run_dir.mkdir(parents=True)
             (run_dir / "overlay.qcow2").write_text("disk")
             calls = []
@@ -277,7 +277,7 @@ class StopOwnedProcessTests(unittest.TestCase):
 
     def test_busy_run_lock_blocks_stop_before_any_systemctl(self):
         with tempfile.TemporaryDirectory() as tmp:
-            run_dir = pathlib.Path(tmp) / "runs" / "r1"
+            run_dir = pathlib.Path(tmp).resolve() / "runs" / "r1"
             run_dir.mkdir(parents=True)
             with vm.run_lock(run_dir):
                 with mock.patch.object(vm.subprocess, "run") as dispatch:
