@@ -71,6 +71,29 @@ both are empty. `TICK_MISSING_EFFECTS` (`src/queue-runner/tick.ts`) repeats
 - `repair-parity`: repair-side tick passes have no seeded differential against Python.
 - `shadow-d2`: only the plan is shadowed, not the composed phases.
 
+Partly closed in S6-h (`publish`'s recovery arm, inactive): `recoverPublication`
+(`src/queue-runner/publicationRecovery.ts`) is the decision and effect binding
+for `repair_tick.recover_publication` (`repair_tick.py:732`), over injected
+`ls-remote`, `pr_info`, `pr list`, ancestry, push and finalize effects. It pins
+the lease on the journaled `target` for an open PR (not the stale ls-remote
+read), the refusal when that lease is not an ancestor of the journaled head, the
+empty lease for an absent branch, the refusal of a present branch that differs
+from the journal without an open PR, and the stale and finalize outcomes. What
+`repair-harvest-effects` still lacks for publication:
+
+- The real `push` binding: `leasedPush` (`src/adapters/git/leasedPush.ts`)
+  takes the same `(branch, expected, sha)` but needs a resolved
+  `PushDestination` and a checkout path, and its not-fast-forward message
+  differs from the one Python raises (`recoverPublication` refuses first with
+  Python's text). Unlike Python's `git push origin`, it also treats a remote
+  already at `sha` after a failed push as success.
+- `finalize_publication` (`repair_tick.py:773`): PR creation or body edit, the
+  `repair_own_commits` and `published_commits` bookkeeping and its rollback.
+- The first-publication arm of `publish` (journal absent): cherry-pick replay,
+  hack and secret scans, the `refs/crq/publication/<run>` ref and the journal
+  write. `publish` with an existing journal is `recoverPublication`.
+- The journal read (`publication.json`) and `record`/`queue` persistence.
+
 Closed in S6-g, kept here as the record:
 
 - `usage-context`: `bindAdmit` now runs what `admit_available` runs before its

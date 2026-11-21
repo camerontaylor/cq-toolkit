@@ -80,6 +80,34 @@ class RecoverPublicationLeaseTest(unittest.TestCase):
         self.assertEqual(c.pushes[0][2], "--force-with-lease=refs/heads/" + BRANCH + ":")
         finalize.assert_called_once()
 
+    def test_open_pr_closed_marks_the_record_stale_without_pushing(self):
+        pr = {"state": "CLOSED", "headRefName": BRANCH, "headRefOid": TARGET}
+        finalize, record = run(FakeClient(remote=TARGET, pr=pr), open_pr=True)
+        self.assertEqual(record, {"state": "stale", "error": "PR no longer publishable"})
+        finalize.assert_not_called()
+
+    def test_open_pr_head_moved_past_the_target_marks_the_record_stale(self):
+        pr = {"state": "OPEN", "headRefName": BRANCH, "headRefOid": STALE}
+        c = FakeClient(remote=STALE, pr=pr)
+        finalize, record = run(c, open_pr=True)
+        self.assertEqual(record["state"], "stale")
+        self.assertEqual(c.pushes, [])
+        finalize.assert_not_called()
+
+    def test_non_pr_branch_with_a_mismatching_fix_pr_refuses(self):
+        c = FakeClient(remote=HEAD)
+        c.gh_json = lambda args: [{"headRefOid": STALE}]
+        with self.assertRaisesRegex(ValueError, "fix PR identity"):
+            run(c, open_pr=False)
+        self.assertEqual(c.pushes, [])
+
+    def test_non_pr_branch_with_one_fix_pr_at_the_prepared_head_finalizes(self):
+        c = FakeClient(remote=HEAD)
+        c.gh_json = lambda args: [{"headRefOid": HEAD}]
+        finalize, _ = run(c, open_pr=False)
+        self.assertEqual(c.pushes, [])
+        finalize.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
