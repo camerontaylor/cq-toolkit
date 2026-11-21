@@ -300,8 +300,8 @@ describe('merge-tree credit with real Git', () => {
     expect((await prove(undefined))?.containment).toBeUndefined();
     await expect(prove(repo.dropped)).rejects.toThrow('merged repair source changed');
   });
-  test('refuses a merge that was followed by a revert of the repaired line', async () => {
-    await expect(prove(repo.reverted)).rejects.toThrow('source changed');
+  test('refuses a merge commit whose own tree already reverted the repaired line', async () => {
+    await expect(prove(repo.revertTip)).rejects.toThrow('source changed');
   });
   test('refuses a reachable merge commit that never carried the repair', async () => {
     await expect(prove(repo.wrong)).rejects.toThrow('source changed');

@@ -30,8 +30,12 @@ export interface MergeTreeRepo {
   readonly dropped: string;
   /** Single-parent commit carrying the repair; `published` is not its ancestor. */
   readonly squashed: string;
-  /** A kept merge followed by a commit that reverts the repaired line. */
-  readonly reverted: string;
+  /**
+   * A commit on top of `kept` that reverts the repaired line. As a forge merge commit its own
+   * tree has lost the repair (refused, like `wrong`); as the target tip with `kept` as the
+   * merge commit, the merge tree still carries the repair (credited).
+   */
+  readonly revertTip: string;
   /** `--no-ff` merge of `published` into `base`: its tree is exactly the published tree. */
   readonly identical: string;
   /** A kept merge followed by a whitespace-only edit of the repaired line. */
@@ -79,7 +83,7 @@ export async function createMergeTreeRepo(): Promise<MergeTreeRepo> {
     const target = await commit(TARGET_TEXT, 'unrelated target change');
     git('merge', '-q', '--no-ff', '-m', 'Keep repair', published);
     const kept = git('rev-parse', 'HEAD');
-    const reverted = await commit(REVERTED_TEXT, 'later revert of the repaired line');
+    const revertTip = await commit(REVERTED_TEXT, 'later revert of the repaired line');
     git('checkout', '-q', '--detach', kept);
     const reformatted = await commit(REFORMATTED_TEXT, 'reformat the repaired line');
     git('checkout', '-q', '--detach', base);
@@ -99,7 +103,7 @@ export async function createMergeTreeRepo(): Promise<MergeTreeRepo> {
       kept,
       dropped,
       squashed,
-      reverted,
+      revertTip,
       identical,
       reformatted,
       wrong: target,

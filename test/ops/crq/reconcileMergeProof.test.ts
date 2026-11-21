@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import { runGitIn } from '../../../src/adapters/crq/publishSource.js';
 import { createMergeTreeRepo, type MergeTreeRepo } from '../../helpers/mergeTreeRepo.js';
 import type { RunGit } from '../../../src/adapters/crq/ledgerGit.js';
+import { findingDigest } from '../../../src/policy/crq/repairBinding.js';
 import {
   JsonObject,
   parseJsonValue,
@@ -295,14 +296,6 @@ describe('canonical projection and explicit revalidation stay independent of the
     expect(result.projected).toBe(true);
     expect(calls).toEqual([]);
   });
-  test('an explicit saved revalidation never consults the merge tree', async () => {
-    const { git, calls } = noTreeReads();
-    const saved = obj({ ...publication, fixed_revalidation: { reason: 'r' } });
-    const { e } = effects({ git, journal: saved });
-    // Whatever the revalidation verdict, the tree seam is not its evidence.
-    await proveMerge(ctx, record(), info(), e, unreachable).catch(() => undefined);
-    expect(calls).toEqual([]);
-  });
 });
 
 describe('proveMerge verifies the forge merge commit tree', () => {
@@ -346,7 +339,7 @@ describe('proveMerge verifies the forge merge commit tree', () => {
     ['a plain merge that keeps the repair', 'kept', true],
     ['a squash merge', 'squashed', true],
     ['a merge that drops the repair', 'dropped', false],
-    ['a merge reverted afterwards', 'reverted', false],
+    ['a merge commit whose tree reverted the repair', 'revertTip', false],
     ['a reachable commit with no repair', 'wrong', false],
     ['an unreachable merge', 'unreachable', false],
   ] as const)('%s', async (_name, shape, credited) => {
@@ -360,6 +353,73 @@ describe('proveMerge verifies the forge merge commit tree', () => {
         match: 'containment',
       });
     } else await expect(prove(merge)).rejects.toThrow(/needs revalidation|evidence unavailable/);
+  });
+  test('an explicit saved revalidation is credited on its own evidence for a merge the tree check refuses', async () => {
+    const merge = repo.dropped;
+    // Counterfactual: the same merge, with no revalidation, is refused on its tree.
+    await expect(prove(merge)).rejects.toThrow('needs revalidation');
+    const finding = obj({ path: repo.path });
+    const entry = (commit: string): string[] => [
+      '100644',
+      repo.git('rev-parse', `${commit}:${repo.path}`),
+    ];
+    const evidence = obj({
+      job: 'crq-j1',
+      item: ctx.itemId,
+      run: ctx.run,
+      finding_sha256: findingDigest(finding),
+      pr: 42,
+      published_head: repo.published,
+      actual_head: repo.published,
+      merge_commit: merge,
+      source_sha: merge,
+      sources: {
+        [repo.path]: {
+          published: entry(repo.published),
+          actual: entry(repo.published),
+          current: entry(merge),
+        },
+      },
+      verdict: 'fixed',
+      reviewer: 'human-reviewer',
+      reason: 'the dropped line was re-implemented elsewhere',
+    });
+    const pub = { ...publication, head: repo.published, commits: [repo.published] };
+    const treeReads: string[][] = [];
+    const realGit = runGitIn(repo.dir);
+    const { e } = effects({
+      journal: obj({ ...pub, fixed_revalidation: toPlainJson(evidence) }),
+      git: async (args, options) => {
+        treeReads.push([...args]);
+        return realGit(args, options);
+      },
+    });
+    const result = await proveMerge(
+      ctx,
+      record({ publication: pub }),
+      obj({
+        number: 42,
+        state: 'MERGED',
+        headRefOid: repo.published,
+        mergeCommit: { oid: merge },
+      }),
+      {
+        ...e,
+        evidence: {
+          ...e.evidence,
+          git: realGit,
+          resolveTarget: async () => merge,
+          readJob: async (id) =>
+            obj({ job: id, item: ctx.itemId, run: ctx.run, finding: toPlainJson(finding) }),
+        },
+      },
+      merge,
+    );
+    expect(result.projected).toBe(false);
+    expect(toPlainJson(result.proof ?? null)).toEqual({
+      fixed_revalidation: toPlainJson(evidence),
+    });
+    expect(treeReads).toEqual([]);
   });
   test('the merge commit reaches the git evidence calls, not only the PR head', async () => {
     const calls: string[][] = [];

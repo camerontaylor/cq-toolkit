@@ -445,7 +445,8 @@ describe('receipt lane against local Git merge shapes', () => {
     await repo.cleanup();
     await rm(root, { recursive: true, force: true });
   });
-  async function lane(merge: string) {
+  /** `tip` is the target tip the receipt lane observes; it defaults to the merge commit. */
+  async function lane(merge: string, tip = merge) {
     const built = fixture({
       path: repo.path,
       captureTarget: repo.base,
@@ -465,7 +466,12 @@ describe('receipt lane against local Git merge shapes', () => {
       mergeCommit: { oid: merge },
     });
     await writeFile(join(root, 'receipts', `${built.receiptId}.json`), built.data);
-    repo.git('update-ref', 'refs/remotes/origin/main', merge.startsWith('9') ? repo.target : merge);
+    // An absent object cannot be a ref target: point the ref at a real, unrelated commit.
+    repo.git(
+      'update-ref',
+      'refs/remotes/origin/main',
+      tip === repo.unreachable ? repo.target : tip,
+    );
     const effects = fileCurrentRepairEffects({
       stateRoot: root,
       clone: repo.dir,
@@ -481,7 +487,7 @@ describe('receipt lane against local Git merge shapes', () => {
     ['merges plainly with an identical tree', 'identical', true],
     ['only reformats the repaired line', 'reformatted', false],
     ['drops the repair with a -s ours merge', 'dropped', false],
-    ['reverts the repair afterwards', 'reverted', false],
+    ['is a commit whose own tree reverted the repair', 'revertTip', false],
     ['is a commit that never carried the repair', 'wrong', false],
     ['is not in the repository', 'unreachable', false],
   ] as const)('a merge that %s', async (_name, shape, credited) => {
@@ -489,5 +495,12 @@ describe('receipt lane against local Git merge shapes', () => {
     expect(result.item.get('remediation_state') === 'fixed').toBe(credited);
     expect(result.item.get('remediation') !== undefined).toBe(credited);
     if (!credited) expect(result.deferred).toBe(1);
+  });
+  test('a later revert on the target leaves the kept merge tree credited', async () => {
+    // The merge commit still carries the repair; only the target tip moved past it.
+    expect(repo.git('rev-parse', `${repo.revertTip}~1`)).toBe(repo.kept);
+    const result = await lane(repo.kept, repo.revertTip);
+    expect(result.item.get('remediation_state')).toBe('fixed');
+    expect(result.item.get('remediation') !== undefined).toBe(true);
   });
 });
