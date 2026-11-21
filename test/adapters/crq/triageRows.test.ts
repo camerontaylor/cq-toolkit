@@ -160,6 +160,27 @@ describe('loadTriageRows: Python glob and sort', () => {
     // Python 3.14 sorted(glob), checked with ascii(): z, z-ff (lone U+DCFF), U+E000, U+FEFF+a, U+1F600.
     expect(await ids(root)).toEqual(['z', 'z-ff', 'e000', 'feff-a', 'astral']);
   });
+
+  test('undecodable bytes compete with U+E000 and a literal U+FFFD at the same index', async () => {
+    // A lossy decode (`toString('utf8')`) maps every invalid byte to U+FFFD,
+    // which sorts at or after both U+E000 and a literal U+FFFD; only
+    // surrogateescape (U+DC80..U+DCFF) sorts them first.
+    const root = await triageRoot({});
+    const dir = Buffer.from(`${join(root, 'triage')}/`);
+    const suffix = [...Buffer.from('.json')];
+    const files: [string, number[]][] = [
+      ['fffd', [0x61, 0xef, 0xbf, 0xbd]], // 'a�'
+      ['e000', [0x61, 0xee, 0x80, 0x80]], // 'a'
+      ['ff', [0x61, 0xff]], // 'a\udcff'
+      ['truncated', [0x61, 0xe2, 0x82]], // 'a\udce2\udc82'
+    ];
+    for (const [label, bytes] of files) {
+      await writeFile(Buffer.concat([dir, Buffer.from([...bytes, ...suffix])]), rowJson(label));
+    }
+    // Python 3.14 sorted(glob), checked with ascii():
+    // a\udce2\udc82, a\udcff, a, a�.
+    expect(await ids(root)).toEqual(['truncated', 'ff', 'e000', 'fffd']);
+  });
 });
 
 describe('loadTriageRows: refusal semantics', () => {
