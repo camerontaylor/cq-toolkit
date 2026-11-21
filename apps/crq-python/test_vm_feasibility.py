@@ -51,6 +51,12 @@ SNAPSHOT_PATHS = (
 )
 
 
+def DRIVE(overlay):
+    """A QEMU command line (NUL-delimited) whose drive file is `overlay`."""
+    return (b"qemu\0-drive\0file=" + str(overlay).encode()
+            + b",if=virtio,format=qcow2\0")
+
+
 class SumsTests(unittest.TestCase):
     def test_single_entry(self):
         self.assertEqual(vm.sums_digest(SUM, vm.IMAGE_NAME), DIGEST)
@@ -113,7 +119,7 @@ class StopOwnedProcessTests(unittest.TestCase):
                  mock.patch.object(vm, "_cgroup_pids",
                                    side_effect=lambda *_: next(members)), \
                  mock.patch.object(pathlib.Path, "read_bytes",
-                                   return_value=str(run_dir / "overlay.qcow2").encode()):
+                                   return_value=DRIVE(run_dir / "overlay.qcow2")):
                 result = vm.stop_owned_process(
                     {"path": str(run_dir), "run_id": run_id}, purge=purge)
             return result, (run_dir / "overlay.qcow2").exists()
@@ -206,7 +212,7 @@ class StopOwnedProcessTests(unittest.TestCase):
                 return mock.Mock(returncode=0, stdout="", stderr="")
 
             pids = iter([members, cgroup_after])
-            command = (str(run_dir / "overlay.qcow2") if owned else "other").encode()
+            command = DRIVE(run_dir / "overlay.qcow2") if owned else b"other"
             with mock.patch.object(vm.subprocess, "run", side_effect=fake_run), \
                  mock.patch.object(vm, "_cgroup_pids", side_effect=lambda *_: next(pids)), \
                  mock.patch.object(pathlib.Path, "read_bytes", return_value=command):
@@ -296,7 +302,7 @@ class StopOwnedProcessTests(unittest.TestCase):
 class LegacyScopeTests(unittest.TestCase):
     """Interrupted launches from before the scope name bound the run directory."""
 
-    def _destroy(self, *, new, legacy, alias=False, owned_cmdline=True):
+    def _destroy(self, *, new, legacy, alias=False, owned_cmdline=True, foreign=None):
         """`new`/`legacy`: (members before the stop, members after) or None for
         an absent scope. Nothing real runs: systemctl and /proc are faked."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -331,7 +337,9 @@ class LegacyScopeTests(unittest.TestCase):
                     return []
                 return state[1] if unit in stopped_units else state[0]
 
-            cmdline = (str(real / "overlay.qcow2") if owned_cmdline else "other").encode()
+            cmdline = DRIVE(real / "overlay.qcow2") if owned_cmdline else b"other"
+            if foreign:  # another run's overlay path extending this one
+                cmdline = DRIVE(str(real / "overlay.qcow2") + foreign + str(real / "overlay.qcow2"))
             with mock.patch.object(vm.subprocess, "run", side_effect=fake_run), \
                  mock.patch.object(vm, "_cgroup_pids", side_effect=pids), \
                  mock.patch.object(pathlib.Path, "read_bytes", return_value=cmdline):
@@ -358,6 +366,16 @@ class LegacyScopeTests(unittest.TestCase):
         result, calls, stopped, still_there, _ = self._destroy(
             new=None, legacy=([4242], [4242]), owned_cmdline=False)
         self.assertEqual(stopped, set())
+        self.assertTrue(result["stopped"])
+        self.assertFalse(still_there)
+
+    def test_foreign_overlay_extending_the_selected_path_is_not_owned(self):
+        # `file=<run>/overlay.qcow2-backup/<run>/overlay.qcow2` merely contains
+        # this run's overlay path; the legacy scope stays untouched, no stop.
+        result, calls, stopped, still_there, _ = self._destroy(
+            new=None, legacy=([4242], [4242]), foreign="-backup")
+        self.assertEqual(stopped, set())
+        self.assertFalse(any("stop" in c for c in calls))
         self.assertTrue(result["stopped"])
         self.assertFalse(still_there)
 
@@ -704,18 +722,18 @@ class ProcessIdentityTests(unittest.TestCase):
 
     def test_matching_process(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = self._proc(temporary, 123, "4242", b"qemu\0/run/overlay.qcow2\0")
+            root = self._proc(temporary, 123, "4242", DRIVE("/run/overlay.qcow2"))
             self.assertTrue(vm.process_matches(123, "4242", "/run/overlay.qcow2", root))
             self.assertEqual(vm.process_starttime(123, root), "4242")
 
     def test_starttime_mismatch_refuses(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = self._proc(temporary, 123, "4242", b"qemu\0/run/overlay.qcow2\0")
+            root = self._proc(temporary, 123, "4242", DRIVE("/run/overlay.qcow2"))
             self.assertFalse(vm.process_matches(123, "9999", "/run/overlay.qcow2", root))
 
     def test_wrong_overlay_refuses(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = self._proc(temporary, 123, "4242", b"qemu\0/other/overlay.qcow2\0")
+            root = self._proc(temporary, 123, "4242", DRIVE("/other/overlay.qcow2"))
             self.assertFalse(vm.process_matches(123, "4242", "/run/overlay.qcow2", root))
 
     def test_dead_or_unsafe_pid_refuses(self):

@@ -283,6 +283,14 @@ def process_starttime(pid: int, proc: pathlib.Path = pathlib.Path("/proc")):
     return text.rsplit(") ", 1)[1].split()[19]
 
 
+def command_owns_overlay(command: bytes, overlay: str) -> bool:
+    """True when a NUL-delimited command line carries exactly this overlay as
+    its QEMU drive file (`file=<overlay>,...`), never as a substring of a longer
+    path such as another run's `<overlay>-backup/...`."""
+    drive = b"file=" + overlay.encode() + b","
+    return any(arg.startswith(drive) for arg in command.split(b"\0"))
+
+
 def process_matches(pid: int, starttime: str, needle: str,
                     proc: pathlib.Path = pathlib.Path("/proc")) -> bool:
     """Prove a PID is the process this run started, without killing anything."""
@@ -294,7 +302,7 @@ def process_matches(pid: int, starttime: str, needle: str,
         command = (proc / str(pid) / "cmdline").read_bytes()
     except OSError:
         return False
-    return needle.encode() in command
+    return command_owns_overlay(command, needle)
 
 
 def compare_files(before: dict, after: dict, ignore=(), content_keys=True):
@@ -1579,7 +1587,7 @@ def _stop_owned_process(run: dict, *, purge: bool) -> dict:
                     command = pathlib.Path("/proc/%d/cmdline" % pid).read_bytes()
                 except OSError:
                     return False
-                return needle.encode() in command
+                return command_owns_overlay(command, needle)
             if not any(owns(pid) for pid in members):
                 if legacy:
                     # The legacy name is shared across state directories; a
