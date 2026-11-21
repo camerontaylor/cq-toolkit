@@ -46,6 +46,10 @@ const PREFIX = 'coderabbit-queue-';
 
 /** Fixed identity and dates: both fixtures and both implementations mint identical object ids. */
 const GIT_ENV: Record<string, string> = {
+  // One locale for every Git process and the Python oracle: failure text is compared
+  // verbatim, so Git must not translate it from an inherited LANG/LANGUAGE.
+  LC_ALL: 'C.UTF-8',
+  LANGUAGE: '',
   GIT_CONFIG_GLOBAL: '/dev/null',
   GIT_CONFIG_NOSYSTEM: '1',
   GIT_AUTHOR_NAME: 'Test',
@@ -87,13 +91,7 @@ function git(cwd: string, ...args: string[]): string {
   ).trim();
 }
 
-/**
- * The hardened production runner, with the test identity and config isolation added.
- * Locale: the Python oracle runs under `LC_ALL=C.UTF-8`; this side inherits the
- * ambient locale. Failure text is compared verbatim, so a host with Git message
- * catalogs and a non-English `LANG` would differ; CI and the dev hosts have no
- * catalogs, so Git's text is English on both sides.
- */
+/** The hardened production runner, with the test identity, locale and config isolation added. */
 const runGitFor =
   (repo: string): RunGit =>
   (args, options) =>
@@ -243,7 +241,7 @@ function runOracle(cases: readonly { fx: Fixture; steps: readonly Step[] }[]): O
     }),
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
-    env: { PATH: process.env['PATH'] ?? '', LC_ALL: 'C.UTF-8', ...GIT_ENV },
+    env: { PATH: process.env['PATH'] ?? '', ...GIT_ENV },
   });
   return (JSON.parse(stdout) as { results: Outcome[][] }).results.map((steps, index) =>
     steps.map((step) => ({
