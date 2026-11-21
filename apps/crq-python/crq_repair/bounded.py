@@ -69,13 +69,18 @@ def validate_revalidation(config, old, source_sha, evidence):
 WRITTEN_BACK_STATUSES = ('fixed', 'needs-retriage', 'needs-human', 'dismissed')
 
 
-def require_canonical_delivery(root, job, written_back=False):
+def require_canonical_delivery(root, job, written_back=False, retained=None):
     """Read the existing atomic triage row; legacy jobs have no canonical owner.
 
     `written_back` is for resuming a harvest: a sibling job of the same run may
     already have recorded its own outcome, which moves its row off `delivered`
     but leaves the receipt naming this task. Only that row is accepted; a row
-    that names another task, or never recorded an outcome, still mismatches."""
+    that names another task, or never recorded an outcome, still mismatches.
+    The receipt survives operator triage, so it alone proves nothing: the row's
+    `previous_event_id` must name this job's own `repair-outcome` event
+    (actor `crq-repair`, `evidence.repair_task`, same action as the row).
+    `retained` returns the publication's retained events; without it a
+    non-delivered row fails closed."""
     if 'canonical_finding_id' not in job:
         return
     fid = job['canonical_finding_id']
@@ -90,6 +95,21 @@ def require_canonical_delivery(root, job, written_back=False):
             or not isinstance(row.get('receipt'), dict)
             or row['receipt'].get('repair_task') != job.get('job')):
         raise ValueError('canonical finding is not delivered to this repair task')
+    if row['status'] != 'delivered':
+        try:
+            events = retained() if retained else None
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise ValueError('canonical delivery state unavailable') from exc
+        event = next((v for v in events or () if isinstance(v, dict)
+                      and v.get('id') == row.get('previous_event_id')), None)
+        payload = event.get('payload') if event else None
+        if (not isinstance(payload, dict) or event.get('event_type') != 'finding-event'
+                or not str(event.get('source_key', '')).startswith('repair-outcome:')
+                or payload.get('actor') != 'crq-repair' or payload.get('finding_id') != fid
+                or payload.get('action') != row['status']
+                or not isinstance(payload.get('evidence'), dict)
+                or payload['evidence'].get('repair_task') != job.get('job')):
+            raise ValueError('canonical finding disposition is not this repair task\'s outcome')
 
 
 def select_job(root, config, job_id, source_sha, finding_sha256):

@@ -335,12 +335,50 @@ class ResumedHarvestOwnershipTest(unittest.TestCase):
     def write(path, value):
         path.write_text(json.dumps(value))
 
-    def row(self, fid, status, task):
-        self.write(self.triage / (fid + '.json'), {'status': status, 'receipt': {'repair_task': task}})
+    def row(self, fid, status, task, event=None):
+        self.write(self.triage / (fid + '.json'),
+                   {'status': status, 'receipt': {'repair_task': task}, 'previous_event_id': event})
+
+    def outcome_event(self, fid, task, action, actor='crq-repair', key='repair-outcome:t', evidence=None):
+        event = {'id': 'ev-' + task, 'event_type': 'finding-event', 'source_key': key,
+                 'payload': {'finding_id': fid, 'actor': actor, 'action': action,
+                             'evidence': {'repair_task': task} if evidence is None else evidence}}
+        self.events.append(event)
+        return event['id']
 
     def writeback(self, _c, job, result, *args, **kwargs):
-        # What mark_finding_outcome leaves behind: status off `delivered`, receipt kept.
-        self.row(job['canonical_finding_id'], 'needs-retriage', job['job'])
+        # What mark_finding_outcome leaves behind: status off `delivered`, receipt kept,
+        # previous_event_id naming this task's repair-outcome event.
+        fid = job['canonical_finding_id']
+        self.row(fid, 'needs-retriage', job['job'], self.outcome_event(fid, job['job'], 'needs-retriage'))
+
+    def run(self, result=None):
+        self.events = []
+        inbox = SimpleNamespace(publication=SimpleNamespace(retained=lambda: list(self.events)))
+        with mock.patch.object(repair_tick, 'finding_inbox', return_value=inbox):
+            return super().run(result)
+
+    def assert_stale(self, f1_status='needs-human', **event):
+        self.row(self.F1, f1_status, self.J1, self.outcome_event(self.F1, self.J1, f1_status, **event))
+        self.row(self.F2, 'delivered', self.J2)
+        with mock.patch.object(repair_tick, 'mark_finding_outcome') as mark:
+            repair_tick.harvest(self.c, {}, self.item)
+        self.assertEqual(self.item['repair_runs']['run1']['state'], 'stale')
+        mark.assert_not_called()
+        self.c.make_worktree.assert_not_called()
+
+    def test_operator_disposition_keeping_the_receipt_is_a_mismatch(self):
+        self.assert_stale('dismissed', actor='operator', key='finding:x',
+                          evidence={'reason': 'manual'})
+
+    def test_repair_actor_event_for_another_task_is_a_mismatch(self):
+        self.assert_stale(evidence={'repair_task': 'crq-other-F1'})
+
+    def test_disposition_whose_event_is_not_retained_is_a_mismatch(self):
+        self.row(self.F1, 'needs-human', self.J1, 'ev-missing')
+        self.row(self.F2, 'delivered', self.J2)
+        repair_tick.harvest(self.c, {}, self.item)
+        self.assertEqual(self.item['repair_runs']['run1']['state'], 'stale')
 
     def test_sibling_writeback_does_not_strand_a_later_fixed_result(self):
         self.row(self.F1, 'delivered', self.J1)

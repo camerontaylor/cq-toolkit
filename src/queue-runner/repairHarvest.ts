@@ -56,8 +56,10 @@ export interface RepairHarvestEffects {
    * without publishing. It is Python's `written_back=True` form: a row an
    * earlier job of this same run already wrote back (status `fixed`,
    * `needs-retriage`, `needs-human` or `dismissed`, receipt still naming this
-   * task) is owned, so a replay reaches the later jobs; any row naming another
-   * task is still a mismatch.
+   * task) is owned only when its `previous_event_id` names this job's own
+   * retained `repair-outcome` event (actor `crq-repair`, same `repair_task`,
+   * action equal to the row status); an operator disposition that kept the
+   * receipt is a mismatch, as is any row naming another task.
    */
   requireCanonicalDelivery(job: Rec): Promise<void>;
   /** `Path(p).resolve()`: a non-string never reaches it; an embedded NUL is a `ValueError`. */
