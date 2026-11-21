@@ -286,6 +286,20 @@ describe('merge-tree credit with real Git', () => {
     await expect(prove(repo.dropped)).rejects.toThrow('source changed');
     expect((await prove(undefined))?.published_head).toBe(repo.published);
   });
+  test('credits a plain merge whose tree is exactly the published tree', async () => {
+    expect((await prove(repo.identical))?.containment?.[repo.path]).toMatchObject({
+      status: 'identical',
+    });
+  });
+  test('refuses a merge that only reformatted the repaired line, pending revalidation', async () => {
+    await expect(prove(repo.reformatted)).rejects.toThrow('needs revalidation');
+  });
+  test('the port call shape that ignored the merge tree no longer credits a dropped repair', async () => {
+    // Probe 2295: {published, actual: published, commits, anchors} with no merge input is the
+    // head-only shape; the same repo with the dropped merge supplied must now throw.
+    expect((await prove(undefined))?.containment).toBeUndefined();
+    await expect(prove(repo.dropped)).rejects.toThrow('merged repair source changed');
+  });
   test('refuses a merge that was followed by a revert of the repaired line', async () => {
     await expect(prove(repo.reverted)).rejects.toThrow('source changed');
   });

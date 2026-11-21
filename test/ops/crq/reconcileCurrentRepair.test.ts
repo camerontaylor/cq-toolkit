@@ -478,6 +478,8 @@ describe('receipt lane against local Git merge shapes', () => {
   test.each([
     ['keeps the repair', 'kept', true],
     ['squashes the repair', 'squashed', true],
+    ['merges plainly with an identical tree', 'identical', true],
+    ['only reformats the repaired line', 'reformatted', false],
     ['drops the repair with a -s ours merge', 'dropped', false],
     ['reverts the repair afterwards', 'reverted', false],
     ['is a commit that never carried the repair', 'wrong', false],

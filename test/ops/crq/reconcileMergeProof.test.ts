@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import { runGitIn } from '../../../src/adapters/crq/publishSource.js';
 import { createMergeTreeRepo, type MergeTreeRepo } from '../../helpers/mergeTreeRepo.js';
+import type { RunGit } from '../../../src/adapters/crq/ledgerGit.js';
 import {
   JsonObject,
   parseJsonValue,
@@ -264,6 +265,43 @@ describe('recheckRevalidation', () => {
     await expect(recheckRevalidation(ctx, record(), evidence, e)).rejects.toThrow(
       'publication resolutions contradict journal',
     );
+  });
+});
+
+describe('canonical projection and explicit revalidation stay independent of the merge tree', () => {
+  const unreachable = '9'.repeat(40);
+  const noTreeReads = (): { git: RunGit; calls: string[][] } => {
+    const calls: string[][] = [];
+    return {
+      calls,
+      git: async (args) => {
+        calls.push([...args]);
+        throw new Error('merge-tree seam must not be read on this path');
+      },
+    };
+  };
+  test('a canonical projection is proven without reading the merge tree', async () => {
+    const { git, calls } = noTreeReads();
+    const { e } = effects({
+      git,
+      canonical: {
+        readJob: async (id) => obj({ job: id, canonical_finding_id: fid }),
+        triageExists: async () => true,
+        currentFixedEvent: async () => 'ev-1',
+        isAncestor: async () => true,
+      },
+    });
+    const result = await proveMerge(ctx, record(), info(actual), e, unreachable);
+    expect(result.projected).toBe(true);
+    expect(calls).toEqual([]);
+  });
+  test('an explicit saved revalidation never consults the merge tree', async () => {
+    const { git, calls } = noTreeReads();
+    const saved = obj({ ...publication, fixed_revalidation: { reason: 'r' } });
+    const { e } = effects({ git, journal: saved });
+    // Whatever the revalidation verdict, the tree seam is not its evidence.
+    await proveMerge(ctx, record(), info(), e, unreachable).catch(() => undefined);
+    expect(calls).toEqual([]);
   });
 });
 

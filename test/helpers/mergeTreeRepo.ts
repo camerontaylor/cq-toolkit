@@ -13,6 +13,7 @@ const BASE_TEXT = 'l1 old\nl2\nl3\nl4\nl5 tail\n';
 const FIXED_TEXT = 'l1 fixed\nl2\nl3\nl4\nl5 tail\n';
 const TARGET_TEXT = 'l1 old\nl2\nl3\nl4\nl5 target change\n';
 const BOTH_TEXT = 'l1 fixed\nl2\nl3\nl4\nl5 target change\n';
+const REFORMATTED_TEXT = 'l1  fixed\nl2\nl3\nl4\nl5 target change\n';
 const REVERTED_TEXT = 'l1 old\nl2\nl3\nl4\nl5 target change\n';
 
 export interface MergeTreeRepo {
@@ -31,6 +32,10 @@ export interface MergeTreeRepo {
   readonly squashed: string;
   /** A kept merge followed by a commit that reverts the repaired line. */
   readonly reverted: string;
+  /** `--no-ff` merge of `published` into `base`: its tree is exactly the published tree. */
+  readonly identical: string;
+  /** A kept merge followed by a whitespace-only edit of the repaired line. */
+  readonly reformatted: string;
   /** A reachable commit with no relation to the repair: just the target tip. */
   readonly wrong: string;
   /** Well-formed object id that no object in the repository has. */
@@ -75,6 +80,11 @@ export async function createMergeTreeRepo(): Promise<MergeTreeRepo> {
     git('merge', '-q', '--no-ff', '-m', 'Keep repair', published);
     const kept = git('rev-parse', 'HEAD');
     const reverted = await commit(REVERTED_TEXT, 'later revert of the repaired line');
+    git('checkout', '-q', '--detach', kept);
+    const reformatted = await commit(REFORMATTED_TEXT, 'reformat the repaired line');
+    git('checkout', '-q', '--detach', base);
+    git('merge', '-q', '--no-ff', '-m', 'Plain merge', published);
+    const identical = git('rev-parse', 'HEAD');
     git('checkout', '-q', '--detach', target);
     git('merge', '-q', '--no-ff', '-s', 'ours', '-m', 'Drop repair', published);
     const dropped = git('rev-parse', 'HEAD');
@@ -90,6 +100,8 @@ export async function createMergeTreeRepo(): Promise<MergeTreeRepo> {
       dropped,
       squashed,
       reverted,
+      identical,
+      reformatted,
       wrong: target,
       unreachable: '9'.repeat(40),
       git,
