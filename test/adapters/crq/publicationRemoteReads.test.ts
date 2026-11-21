@@ -53,6 +53,14 @@ interface Fixture {
   shas: Record<'main' | 'one' | 'shadow' | 'decoy' | 'only' | 'bad', string>;
 }
 
+/**
+ * Characters Python's `str.strip()` removes and `branchPathFault` accepts, so a valid branch
+ * can END in one: no-break space, ideographic space, a general-punctuation space, NEL and
+ * line separator. Each is published as `ws/<n><char>` at the `one` commit.
+ */
+const TRAILING_WHITESPACE = ['\u00a0', '\u3000', '\u2005', '\u0085', '\u2028'] as const;
+const wsBranch = (index: number): string => `ws/${index}${TRAILING_WHITESPACE[index]}`;
+
 const cleanups: string[] = [];
 let fx: Fixture;
 
@@ -114,6 +122,8 @@ async function makeFixture(): Promise<Fixture> {
   const publish = (sha: string, ref: string) => git(clone, 'push', '-q', 'origin', `${sha}:${ref}`);
   publish(shas.main, 'refs/heads/main');
   publish(shas.one, 'refs/heads/fix/one');
+  for (const index of TRAILING_WHITESPACE.keys())
+    publish(shas.one, `refs/heads/${wsBranch(index)}`);
   // `ls-remote` matches a pattern as a tail, so these decoys also match the pattern
   // of the branch they are named after, and sort before it where it exists.
   publish(shas.shadow, 'refs/heads/shadow');
@@ -131,11 +141,24 @@ async function makeFixture(): Promise<Fixture> {
   return { root, clone, emptyOrigin, missingOrigin, noOrigin, shas };
 }
 
+// The differential compares Git's failure text with the oracle child, which is pinned to
+// `C.UTF-8`; the TS runner inherits this process's environment, so pin it here too and a
+// host with a non-English locale cannot make Git's stderr differ between the two sides.
+const LOCALE_KEYS = ['LC_ALL', 'LANGUAGE'] as const;
+const savedLocale = new Map<string, string | undefined>();
+
 beforeAll(async () => {
+  for (const key of LOCALE_KEYS) savedLocale.set(key, process.env[key]);
+  process.env['LC_ALL'] = 'C.UTF-8';
+  delete process.env['LANGUAGE'];
   fx = await makeFixture();
 });
 
 afterAll(async () => {
+  for (const [key, value] of savedLocale) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
   await Promise.all(cleanups.map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
@@ -203,6 +226,18 @@ describe('publication remote read: Python differential', () => {
       clone: () => fx.noOrigin,
       branch: 'main',
     },
+    ...TRAILING_WHITESPACE.flatMap((char, index) => [
+      {
+        name: `a present branch ending in U+${char.codePointAt(0)!.toString(16).padStart(4, '0')} is present, not absent`,
+        clone: () => fx.clone,
+        branch: wsBranch(index),
+      },
+      {
+        name: `the same name without its trailing U+${char.codePointAt(0)!.toString(16).padStart(4, '0')} is absent`,
+        clone: () => fx.clone,
+        branch: `ws/${index}`,
+      },
+    ]),
     {
       name: 'a listing that is not UTF-8 is a ValueError (UnicodeDecodeError)',
       clone: () => fx.clone,
@@ -229,6 +264,25 @@ describe('publication remote read: Python differential', () => {
         if (py.error === 'RuntimeError')
           expect({ label, message: ts.message }).toEqual({ label, message: py.message });
       }
+    }
+  });
+
+  // Regression: the exact-ref filter used to run after `pyStrip`, which took the trailing
+  // whitespace off the last row's ref, so a present branch read as absent and recovery pushed
+  // with an empty lease where Python finalizes.
+  it('reads a present branch ending in Unicode whitespace, as Python does', async () => {
+    const reads = gitPublicationRemoteReads({ clone: fx.clone });
+    for (const [index, char] of TRAILING_WHITESPACE.entries()) {
+      const branch = wsBranch(index);
+      const [listing, head] = ['ls_remote', 'remote_head'].map(
+        (op) => runOracle([{ op: op as 'ls_remote' | 'remote_head', clone: fx.clone, branch }])[0]!,
+      );
+      // Python strips the whole listing, so the character is gone from the ref it returns.
+      expect(listing, branch).toEqual({ ok: `${fx.shas.one}\trefs/heads/ws/${index}` });
+      expect(head, branch).toEqual({ ok: fx.shas.one });
+      const text = await reads.lsRemoteHeads(branch);
+      expect(text, `U+${char.codePointAt(0)!.toString(16)}`).toBe(listing!.ok);
+      expect(remoteHeadOf(text)).toBe(fx.shas.one);
     }
   });
 
@@ -360,6 +414,23 @@ describe('publication remote read: scripted process', () => {
     expect(remoteHeadOf(await reads.lsRemoteHeads('fix/one'))).toBe(SHA);
   });
 
+  it('compares the ref before stripping, so a branch ending in Unicode whitespace is present', async () => {
+    for (const char of TRAILING_WHITESPACE) {
+      const branch = `fix/one${char}`;
+      const row = `${SHA}\trefs/heads/${branch}`;
+      // The branch's own row ends the listing, so its ref carries the whitespace to the end.
+      const decoy = `${'b'.repeat(40)}\trefs/heads/a/refs/heads/${branch}`;
+      const { reads } = scripted(() => call(0, `${decoy}\n${row}\n`));
+      const text = await reads.lsRemoteHeads(branch);
+      // The kept row is stripped as Python strips the listing.
+      expect(text).toBe(`${SHA}\trefs/heads/fix/one`);
+      expect(remoteHeadOf(text)).toBe(SHA);
+    }
+    // The stripped name is a different ref: its row never names `fix/one` exactly.
+    const other = scripted(() => call(0, `${SHA}\trefs/heads/fix/one\u00a0\n`));
+    await expect(other.reads.lsRemoteHeads('fix/one')).resolves.toBe('');
+  });
+
   it('keeps only the rows for exactly the requested ref', async () => {
     const decoy = `${'b'.repeat(40)}\trefs/heads/a/refs/heads/fix/one`;
     const longer = `${'c'.repeat(40)}\trefs/heads/fix/one/more`;
@@ -407,7 +478,7 @@ describe('publication remote read through recoverPublication', () => {
   const OTHER = 'b'.repeat(40);
   const BRANCH = 'crq/fix-1';
 
-  function harness(reply: GitCall | ((args: readonly string[]) => GitCall)) {
+  function harness(reply: GitCall | ((args: readonly string[]) => GitCall), branch = BRANCH) {
     const events: string[] = [];
     const runGitFor = (): RunGit => async (args) => {
       events.push(`git ${args.join(' ')}`);
@@ -442,7 +513,7 @@ describe('publication remote read through recoverPublication', () => {
         effects,
         { pr: 7 },
         {},
-        { head: HEAD, target: OTHER, branch: BRANCH, open_pr: false },
+        { head: HEAD, target: OTHER, branch, open_pr: false },
       );
     return { events, recover };
   }
@@ -468,6 +539,32 @@ describe('publication remote read through recoverPublication', () => {
       message: REFUSE_BRANCH_DIFFERS,
     });
     expect(events).toEqual([LS, 'listBranchPrs']);
+  });
+
+  // Regression: a published branch whose name ends in Unicode whitespace read as absent, so
+  // recovery pushed with an empty lease (git rejects it on an existing ref) instead of finalizing.
+  it.each(TRAILING_WHITESPACE.map((char) => [char.codePointAt(0)!.toString(16), char] as const))(
+    'finalizes a present branch ending in U+%s without an empty-lease push',
+    async (_code, char) => {
+      const branch = `${BRANCH}${char}`;
+      const { events, recover } = harness(call(0, `${HEAD}\trefs/heads/${branch}\n`), branch);
+      await recover();
+      expect(events).toEqual([
+        `git ls-remote --heads origin refs/heads/${branch}`,
+        'listBranchPrs',
+        'finalize',
+      ]);
+    },
+  );
+
+  it('refuses, and never pushes, a present branch ending in whitespace at a different head', async () => {
+    const branch = `${BRANCH}\u00a0`;
+    const { events, recover } = harness(call(0, `${OTHER}\trefs/heads/${branch}\n`), branch);
+    await expect(recover()).rejects.toMatchObject({
+      kind: 'ValueError',
+      message: REFUSE_BRANCH_DIFFERS,
+    });
+    expect(events).toEqual([`git ls-remote --heads origin refs/heads/${branch}`, 'listBranchPrs']);
   });
 
   it.each([

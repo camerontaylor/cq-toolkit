@@ -50,7 +50,9 @@
  *   `a/refs/heads/<branch>` also matches, and sorts before the branch itself when it
  *   sorts lower. Python takes the first row's SHA (`remote.split()[0]`), so that
  *   decoy would be read as this branch's tip, and a decoy alone would read an absent
- *   branch as present. Here the decoy rows are dropped.
+ *   branch as present. Here the decoy rows are dropped. The rows are compared before
+ *   `strip()`, so a branch ending in Unicode whitespace (which `branchPathFault`
+ *   accepts) still matches its own, unstripped, row; the kept rows are then stripped.
  * - The time bound is the runner's (330 seconds); Python's `crq.run` allows 600.
  */
 import { pyStrip } from '../../ops/crq/deploy/gitGuards.js';
@@ -99,10 +101,15 @@ export function gitPublicationRemoteReads(
           `git ${args.join(' ')} … exit ${code}: ${clip(pyStrip(pyStderr(call)), 400)}`,
         );
       }
-      return pyStrip(text)
-        .split('\n')
-        .filter((row) => row.split('\t', 2)[1] === ref)
-        .join('\n');
+      // Compare the refs on the unstripped rows: a branch may end in Unicode whitespace
+      // (`branchPathFault` accepts U+00A0, U+3000, ...), which `str.strip()` would take off
+      // the last row's ref. Python strips the whole listing; strip only what is kept.
+      return pyStrip(
+        text
+          .split('\n')
+          .filter((row) => row.split('\t', 2)[1] === ref)
+          .join('\n'),
+      );
     },
   };
 }

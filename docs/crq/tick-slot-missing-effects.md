@@ -241,12 +241,15 @@ a parameter; the runner's time bound is 330 seconds where `crq.run` allows 600;
 and only rows for exactly `refs/heads/<branch>` are returned. The last is a
 deliberate divergence: `ls-remote` tail-matches its pattern, so a remote branch
 `a/refs/heads/<branch>` also matches and, sorting first, is read by Python's
-`remote.split()[0]` as this branch's tip (or an absent branch as present).
+`remote.split()[0]` as this branch's tip (or an absent branch as present). The
+rows are compared before `strip()`, so a branch ending in Unicode whitespace
+(`branchPathFault` accepts U+00A0, U+3000 and the like) still matches its own row
+and reads as present, as in Python; the kept rows are stripped afterwards.
 `test/adapters/crq/publicationRemoteReads.test.ts` runs the real `crq.git` and the
 `remote.split()[0] if remote else None` line (`test/helpers/publicationRemoteReadsOracle.py`)
 against throwaway local bare repositories named as `origin` (present, absent,
 prefix and case variants, an empty origin, a missing origin, no `origin` remote,
-a non-UTF-8 listing), pins the failure classes with a scripted process, and drives
+a non-UTF-8 listing, branches ending in Unicode whitespace), pins the failure classes with a scripted process, and drives
 the real `recoverPublication` over it. No network, credential or remote service;
 the adapter only lists. Nothing imports it outside tests.
 
