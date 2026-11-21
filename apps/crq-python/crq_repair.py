@@ -1027,7 +1027,15 @@ def drain(config):
                     and job.get('finding', {}).get('severity') in ('critical', 'major')):
                 return 0
         return 1
-    drain_items(config, groups, sorted(groups, key=priority))
+    # drain_items returns only after every owned child is reaped. A worker that
+    # crashed, was signalled or lost its exit status is a failure the caller
+    # must see: keep the triage report and let run() exit non-zero. An
+    # intentional admission stop (a rate limit or a runner-disabled refusal) is
+    # not a worker failure and leaves the pass 'drained'.
+    failed = drain_items(config, groups, sorted(groups, key=priority))
+    if failed:
+        result['status'] = 'error'
+        result['error'] = 'worker failures: ' + ', '.join(sorted(failed))[:300]
     return result
 
 
@@ -1162,10 +1170,17 @@ def drain_items(config, groups, order):
     Never kill paid workers: on abort or admission failure, reap admitted children
     before releasing service.lock. The service's existing systemd cgroup remains
     the owner of emergency shutdown and its existing drain deadline.
+
+    Returns the items whose workers failed -- a non-zero exit other than a
+    rate-limit or runner-disabled stop, a signal, or a lost exit status --
+    aggregated only after the finally block has reaped every owned child.
+    Intentional admission stops are excluded so the caller can report worker
+    failures without treating a deliberate stop as one.
     """
     limit = worker_limit(config)
     active = {}
     stopped = False
+    _WORKER_FAILURES.clear()
     try:
         for item in order:
             while len(active) >= limit:
@@ -1290,6 +1305,7 @@ def drain_items(config, groups, order):
                 reap_item(active)
             except KeyboardInterrupt:
                 continue  # keep ownership until every admitted child has exited
+    return list(_WORKER_FAILURES)
 
 
 def refusal_published(active):
@@ -1308,6 +1324,14 @@ def refusal_published(active):
         if data:
             return True
     return False
+
+
+# Items whose reaped worker failed for a reason that is not an intentional
+# admission stop (a rate limit or a runner-disabled refusal): a non-zero exit,
+# a signal, or an exit status lost to an interrupt. reap_completed appends as
+# it reaps; drain_items clears at entry and returns the aggregate after its
+# finally has reaped every owned child.
+_WORKER_FAILURES = []
 
 
 def reap_completed(active):
@@ -1334,6 +1358,7 @@ def reap_completed(active):
             if lost:
                 narrate('repair item ' + item + ': worker exit status lost to an interrupt; stopping new admission')
                 failed = True
+                _WORKER_FAILURES.append(item)
             elif status:
                 code = os.waitstatus_to_exitcode(status)
                 message = ('provider pause; stopping new admission' if code == 2 else
@@ -1342,6 +1367,8 @@ def reap_completed(active):
                            'worker terminated by signal ' + str(-code))
                 narrate('repair item ' + item + ': ' + message)
                 failed = True
+                if code not in (2, 3):
+                    _WORKER_FAILURES.append(item)
     return failed, reaped
 
 
