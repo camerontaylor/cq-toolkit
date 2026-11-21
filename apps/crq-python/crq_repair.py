@@ -384,7 +384,7 @@ def dispatch(config, role, job, wt, directory, judge=False):
                 return {'stop': 'blackout', 'summary': 'GLM peak blackout; fallback launch deferred'}
             attempted = True
             previous_directory = directory / provider
-            report = _dispatch(bounded_config, candidate, job, wt, previous_directory, judge)
+            report = _dispatch(bounded_config, candidate, job, wt, previous_directory, judge, deadline=deadline)
             report.update(driver=candidate['driver'], model=candidate['model'])
             if report.get('stop') != 'rate-limit':
                 return report
@@ -416,7 +416,7 @@ def review_diff_sections(diff):
     return sections
 
 
-def _dispatch(config, role, job, wt, directory, judge=False):
+def _dispatch(config, role, job, wt, directory, judge=False, deadline=None):
     directory.mkdir(parents=True, exist_ok=True)
     job = copy.deepcopy(job)
     if job.get('triage_context') is not None:
@@ -440,21 +440,32 @@ def _dispatch(config, role, job, wt, directory, judge=False):
     job['source_snapshot'] = snapshot
     atomic(directory / 'source-snapshot.json', snapshot)
     # The admission checks sample the clock before worktree retention and the
-    # snapshot scan above; either can outlast the margin they allowed, so the
-    # switch below could start a paid call inside the blackout. Sample the
-    # clock again at this last boundary before the call (never during one) and
-    # refuse to start when the window has opened or the remaining budget would
-    # still reach it.
-    if blocked(config.get('repair', {})):
+    # snapshot and review-diff scans above; either can outlast the margin they
+    # allowed, so the switch below could start a paid call on the earlier
+    # allowance or inside the blackout. The rung's shared dispatch deadline
+    # travels through preparation: sample the clock again at this last
+    # boundary before the call (never during one), charge the driver only the
+    # actual remaining time, and refuse to start when nothing remains. The
+    # same remaining time feeds the blackout check, so preparation that ate
+    # the margin defers instead of reaching the window.
+    if deadline is None:
+        bounded_config = config
+    else:
+        remaining = deadline - time.monotonic()
+        if remaining < 0.001:
+            return {'stop': 'budget', 'summary': 'repair dispatch wall-clock deadline reached'}
+        bounded_config = copy.deepcopy(config)
+        bounded_config['repair']['budget']['wall_clock_min'] = remaining / 60
+    if blocked(bounded_config.get('repair', {})):
         return {'stop': 'blackout', 'summary': 'GLM peak blackout began during preparation; driver call not started'}
     if role['driver'] == 'cq':
         if judge:
-            return cq.judge(config, role, job, wt, directory)
-        return cq.invoke(config, role, job, wt, directory)
+            return cq.judge(bounded_config, role, job, wt, directory)
+        return cq.invoke(bounded_config, role, job, wt, directory)
     if role['driver'] == 'codex':
-        return codex.invoke(config, role, job, wt, directory, judge=judge)
+        return codex.invoke(bounded_config, role, job, wt, directory, judge=judge)
     if role['driver'] == 'paseo' and judge:
-        return paseo.invoke(config, role, job, wt, directory)
+        return paseo.invoke(bounded_config, role, job, wt, directory)
     raise ValueError('unsupported role driver')
 
 
