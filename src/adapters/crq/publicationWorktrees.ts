@@ -19,10 +19,11 @@
  *   `publishRepair`. `git worktree remove --force`, then, if the path survives,
  *   a recursive delete that ignores errors, then `git worktree prune` and
  *   `git branch -D`. None of the three Git calls is checked, as in Python.
- * - `cherryPick`: `wt_git(wt, 'cherry-pick', sha)`; a non-zero exit is
- *   `RuntimeError('git cherry-pick failed: <stderr[:200]>')`, which is what
- *   `publishRepair` inspects to tell a deterministic replay failure from a
- *   retryable one.
+ * - `cherryPick`: `wt_git(wt, 'cherry-pick', sha)`; a non-zero exit is a
+ *   `RuntimeError`, the class `publishRepair` branches on (then it reads
+ *   `verifyCherryPickHead`, `conflictedFiles` and `stagedFiles`), carrying
+ *   Python's text `git cherry-pick failed: <stderr[:200]>`, which reaches the
+ *   stale record's `error`. The text is Python-exact but not load-bearing.
  * - `updateRef`: `c.git('update-ref', 'refs/crq/publication/' + run, head)` in
  *   the primary clone. Like Python it overwrites an existing ref, so a retried
  *   run re-points its own publication ref.

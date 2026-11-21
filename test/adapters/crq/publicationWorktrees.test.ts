@@ -87,7 +87,13 @@ function git(cwd: string, ...args: string[]): string {
   ).trim();
 }
 
-/** The hardened production runner, with the test identity and config isolation added. */
+/**
+ * The hardened production runner, with the test identity and config isolation added.
+ * Locale: the Python oracle runs under `LC_ALL=C.UTF-8`; this side inherits the
+ * ambient locale. Failure text is compared verbatim, so a host with Git message
+ * catalogs and a non-English `LANG` would differ; CI and the dev hosts have no
+ * catalogs, so Git's text is English on both sides.
+ */
 const runGitFor =
   (repo: string): RunGit =>
   (args, options) =>

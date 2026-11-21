@@ -15,7 +15,8 @@
  *   `revListSince`, `diffSince`: the matching `wt_git(wt, ...)` calls in the publish worktree.
  *
  * Left explicit, none of it implemented here: `cherryPick`, `makeWorktree`,
- * `removeWorktree` and `updateRef` mutate a worktree, branch or ref; `lsRemoteHeads`
+ * `removeWorktree` and `updateRef` mutate a worktree, branch or ref (bound
+ * separately in `publicationWorktrees.ts`); `lsRemoteHeads`
  * and `push` talk to the remote; `prInfo` and `listBranchPrs` are forge reads;
  * `verify`, `hackDetector` and `secretScan` are scans; the patch, journal and queue
  * writes are `publicationFiles.ts`. No fetch, no network, no write.
