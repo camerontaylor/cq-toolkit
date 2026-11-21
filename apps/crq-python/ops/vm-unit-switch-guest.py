@@ -2566,7 +2566,13 @@ def activators_fence(args):
     require(external.get("completions_before_external") == completions_before,
             "a completion landed between the pre-switch log "
             "and the first pause sample")
-    require(any(REPAIR_UNIT in line for line in external.get("jobs", [])),
+    external_jobs = external.get("jobs_observation") or {}
+    external_jobs_result = external_jobs.get("command") or {}
+    require(not external_jobs_result.get("timeout")
+            and external_jobs_result.get("rc") == 0,
+            "queued target job observation failed during the pause")
+    require(any(line == queue_seed["job"]
+                for line in (external_jobs.get("lines") or [])),
             "queued target job was not retained through mask and reload")
     require(external.get("marker", {}).get("phase") == "after-mask-reload",
             "pause marker does not record the expected phase")
