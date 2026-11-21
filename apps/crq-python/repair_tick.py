@@ -1316,6 +1316,15 @@ def merge_head_evidence(c, record, actual_head):
             total_bytes += head_size
             if head_size > MAX_CONTAINMENT_PATCH_BYTES or total_bytes > MAX_CONTAINMENT_TOTAL_BYTES:
                 raise ValueError('published repair change too large to verify; needs revalidation: ' + path)
+            if (published_lines[0] or published_lines[1]) and any(
+                    line.startswith('Binary files ') or line.startswith('GIT binary patch')
+                    for line in head_patch.splitlines()):
+                # A binary head diff has no text hunks, so the comparison
+                # below would see no changed locations: a head that replaced
+                # the published text with a blob while keeping the mode would
+                # look contained. When the published repair depended on text
+                # changes, refuse to call that containment.
+                raise ValueError('merged repair source changed; needs revalidation: ' + path)
             undone = change_undone(diff_changed_locations(published_patch),
                                    diff_changed_locations(head_patch))
             if undone or (mode_changed and after[0] != before[0]):

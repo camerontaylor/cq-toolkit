@@ -735,6 +735,14 @@ class RepairDrainTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'repository-relative'):
             repair_tick.merge_head_evidence(c, record, formatted)
 
+    def test_merged_head_replacing_published_text_with_binary_is_refused(self):
+        base = self.commit_files(self.tip, {'src/app.ts': SOURCE_TEXT}, 'review evidence fixture')
+        published = self.commit_files(base, {'src/app.ts': FIXED_TEXT}, 'fix app')
+        head = self.commit_files(published, {'src/app.ts': 'binary\x00fixture'}, 'replace with binary')
+        record = self.containment_record('crq-run1-F1', published)
+        with self.assertRaisesRegex(ValueError, 'source changed; needs revalidation'):
+            repair_tick.merge_head_evidence(self.containment_client(), record, head)
+
     def test_merge_head_proof_reads_raw_changed_lines_and_published_modes(self):
         # Trailing whitespace: the head removes a spaced line the publication
         # never touched; a stripped patch would read it as the published line.
