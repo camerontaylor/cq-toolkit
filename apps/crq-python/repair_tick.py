@@ -768,6 +768,13 @@ def recover_publication(c, q, item, run, record, publication):
         if info['headRefOid'] != publication['target']:
             record.update(state='stale', error='head moved after prepared publication; needs new review')
             return
+        if remote_head == head:
+            # The earlier ls-remote read says the prepared head is published
+            # but the open PR, read later, is still at the journaled target:
+            # the branch was reset (or the PR view lags our own push) in
+            # between. Finalizing would record commits as published that are
+            # not on the branch, so refuse and let a later tick re-read both.
+            raise ValueError('remote branch read is stale against the open PR head')
     else:
         prs = c.gh_json(['pr', 'list', '--repo', c.REPO, '--head', branch, '--state', 'all', '--json', 'number,url,state,headRefOid'])
         if prs:

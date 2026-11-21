@@ -74,6 +74,37 @@ class RecoverPublicationLeaseTest(unittest.TestCase):
         self.assertEqual(c.pushes, [])
         finalize.assert_called_once()
 
+    def test_open_pr_at_target_after_a_remote_read_of_head_refuses_instead_of_finalizing(self):
+        # ls-remote saw the prepared head, then a maintainer reset the branch to
+        # the journaled target before the PR read: the remote read is stale.
+        pr = {"state": "OPEN", "headRefName": BRANCH, "headRefOid": TARGET}
+        c = FakeClient(remote=HEAD, pr=pr, ancestors={(TARGET, HEAD)})
+        record = {}
+        with mock.patch.object(repair_tick, "finalize_publication") as finalize:
+            with self.assertRaisesRegex(ValueError, "remote branch read is stale"):
+                repair_tick.recover_publication(
+                    c, {}, {"pr": 7}, "run", record,
+                    {"head": HEAD, "branch": BRANCH, "open_pr": True, "commits": [HEAD], "target": TARGET})
+        self.assertEqual(c.pushes, [])
+        self.assertEqual(record, {})
+        self.assertEqual(c.calls, ["ls-remote", "pr-info", "is-ancestor"])
+        finalize.assert_not_called()
+
+    def test_open_pr_reset_observed_on_a_later_tick_pushes_leased_on_the_target(self):
+        pr = {"state": "OPEN", "headRefName": BRANCH, "headRefOid": TARGET}
+        c = FakeClient(remote=TARGET, pr=pr, ancestors={(TARGET, HEAD)})
+        finalize, _ = run(c, open_pr=True)
+        self.assertEqual(c.pushes, [("push", "origin", "--force-with-lease=refs/heads/" + BRANCH + ":" + TARGET,
+                                     HEAD + ":refs/heads/" + BRANCH)])
+        finalize.assert_called_once()
+
+    def test_open_pr_view_caught_up_to_head_on_a_later_tick_finalizes_without_pushing(self):
+        pr = {"state": "OPEN", "headRefName": BRANCH, "headRefOid": HEAD}
+        c = FakeClient(remote=HEAD, pr=pr)
+        finalize, _ = run(c, open_pr=True)
+        self.assertEqual(c.pushes, [])
+        finalize.assert_called_once()
+
     def test_non_pr_branch_that_differs_from_the_prepared_head_refuses(self):
         c = FakeClient(remote=STALE, ancestors={(STALE, HEAD)})
         with self.assertRaisesRegex(ValueError, "existing fix branch differs"):
