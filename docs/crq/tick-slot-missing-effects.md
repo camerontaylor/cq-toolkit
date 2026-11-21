@@ -380,9 +380,29 @@ publication, journal, body, backlog and ordered effect log as JSON text, so key
 order is pinned, and an exception by family. No real queue, event log, forge,
 network, provider or secret; nothing imports it outside tests.
 
-Still unwired after S6-l through S6-s: `push` (the leased remote write),
-`createPr` (forge write), `hackDetector` and the `FixPrBacklog`, plus the binding
-of any of these into `tick`.
+S6-t (inactive, test only): no new production code. The existing pieces already
+compose over one explicitly injected `FixPrBacklog`: `refreshFixPrBacklog` (with
+`fileFixPrBacklogEffects`) fills it, `publishRepair` (initial publish, or journal
+recovery when the record holds a publication) reaches `finalizePublication`
+through its `finalize` seam, and `finalizePublication` reserves and releases the
+same instance. `test/queue-runner/publicationBacklog.test.ts` pins that composition
+across several ticks against the real `refresh_fix_pr_backlog`, `publish`,
+`recover_publication` and `finalize_publication`
+(`test/helpers/publicationBacklogOracle.py`; Git, forge and `gh` are in-memory
+fixtures, the only disk a throwaway state tree). Pinned: one refresh view shared by
+every publish of a tick; a backfill item pushed and journaled but held when no
+slot is free, then recovered on a later tick once a refresh frees one; the slot
+reserved before `gh pr create`, released only on a `gh` failure and kept on a
+timeout; an unread view (failed or skipped refresh) holding backfill while an
+ordinary PR is not capped; a missing `events.jsonl` as a zero limit; and #2291
+legacy accounting, where a backfill item's `revalidated-` retry branch counts and
+an ordinary item's lookalike does not. The ordered effect log, the backlog view
+after every publish, the final queue and the journal, queue and backlog
+files are compared as JSON text. Nothing is bound into `tick` or the runtime.
+
+Still unwired after S6-l through S6-t: `push` (the leased remote write),
+`createPr` (forge write) and `hackDetector`, plus the binding of any of these, or
+of the shared `FixPrBacklog`, into `tick`.
 
 Closed in S6-g, kept here as the record:
 
