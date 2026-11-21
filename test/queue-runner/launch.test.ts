@@ -313,6 +313,22 @@ describe('launch: foreign repos and scan classes', () => {
     ]);
   });
 
+  it('a ranged review refuses a profile that names a review scope before allocating anything', async () => {
+    for (const flag of ['--uncommitted', '--type=uncommitted', '-t', '--include-untracked']) {
+      const h = harness();
+      await expect(
+        launch(
+          h.queue,
+          item({}),
+          plan({ profile: { flags: ['--plain', flag] }, config_digest: 'd' }),
+          h.fx,
+        ),
+      ).rejects.toThrow('review profile must not set a review scope');
+      expect(h.calls).toEqual([]);
+      expect(h.metas).toEqual([]);
+    }
+  });
+
   it('push items use the projection scan in the configured clone; unconfigured is an error', async () => {
     const h = harness({}, repos);
     const push = item({

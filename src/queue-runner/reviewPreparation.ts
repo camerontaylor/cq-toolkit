@@ -6,6 +6,20 @@ import { reserveAndSpawnReview, type ReviewLaunchEffects } from './reviewLaunch.
 /** An identified failure from the checkout operation, not a validation error. */
 export class ReviewCheckoutError extends Error {}
 
+/** A ranged review gets its scope from the runner; a profile flag must not pick one. */
+export function assertProfileSetsNoReviewScope(flags: readonly unknown[]): void {
+  if (
+    flags.some(
+      (flag) =>
+        typeof flag === 'string' &&
+        /^(?:--(?:uncommitted|committed|all|type|untracked|include-untracked|dir)(?:=|$)|-t(?:=|$))/.test(
+          flag,
+        ),
+    )
+  )
+    throw new Error('review profile must not set a review scope');
+}
+
 /** A diff the scanner can never read (e.g. an undecodable path); retrying cannot help. */
 export class ReviewScanRefusal extends Error {}
 
@@ -102,14 +116,7 @@ export async function prepareOrdinaryReview(
     if ((profile.get('flags') as string[]).some((flag) => /^--base(?:-commit)?(?:=|$)/.test(flag)))
       throw new Error('review profile must not set a base selector');
     // Nor may it pick the review scope (uncommitted/untracked/committed/all).
-    if (
-      (profile.get('flags') as string[]).some((flag) =>
-        /^(?:--(?:uncommitted|committed|all|type|untracked|include-untracked|dir)(?:=|$)|-t(?:=|$))/.test(
-          flag,
-        ),
-      )
-    )
-      throw new Error('review profile must not set a review scope');
+    assertProfileSetsNoReviewScope(profile.get('flags') as string[]);
     cmd = ['coderabbit', 'review', ...(profile.get('flags') as JsonValue[]), ...rangeArgs];
   }
   const runId = await effects.allocate(id);
