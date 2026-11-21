@@ -268,8 +268,12 @@ lacking the job id, unclaimed commits in `base..HEAD`, dirty tree); a failed
 is `OSError`, never read as "not an ancestor". Parity points kept: the `base`
 compare is case-sensitive, and the job id is matched literally at a boundary
 where `\d` is any Unicode decimal digit. Narrowings: `base` must be 40-hex, the
-worktree a direct child of the root, and a non-string claim, base or job a
-`TypeError`. Python returns the verified `HEAD`; callers ignore it, so this
+worktree a direct child of the root, a non-string claim, base or job a
+`TypeError`, and the tree check runs `status --porcelain --untracked-files=normal`
+(Python's bare form inherits `status.showUntrackedFiles`, so it can accept a stray
+file under `no`). A missing exit code is read before output is decoded, so a
+truncated read is `OSError`, not a decode `ValueError`. Callers differ on a
+`ValueError`: `harvest` records it terminal, `publish` records `publish_failed`. Python returns the verified `HEAD`; callers ignore it, so this
 returns nothing.
 `test/adapters/crq/publicationVerify.test.ts` runs the real `crq_repair.verify`
 (`test/helpers/publicationVerifyOracle.py`) against throwaway local repositories

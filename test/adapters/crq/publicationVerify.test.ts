@@ -28,6 +28,7 @@ import {
 import { gitPublicationReads } from '../../../src/adapters/crq/publicationGitReads.js';
 import { gitPublicationWorktrees } from '../../../src/adapters/crq/publicationWorktrees.js';
 import type { GitCall, RunGit } from '../../../src/adapters/crq/ledgerGit.js';
+import { runGitIn } from '../../../src/adapters/crq/publishSource.js';
 import { isPyError } from '../../../src/queue-runner/pyErrors.js';
 import {
   publishRepair,
@@ -45,16 +46,36 @@ const pinned = (verify: PublicationVerify): Pinned => verify;
 const JOB = 'crq-job-1';
 const cleanups: string[] = [];
 
+/**
+ * One synthetic Git environment for the fixtures, the Python oracle and the TS runner:
+ * no global or system config, a fixed identity (the replay's cherry-pick commits) and
+ * one locale, so no result depends on the host's Git setup or ambient identity.
+ */
+const GIT_ENV: Record<string, string> = {
+  LC_ALL: 'C.UTF-8',
+  LANGUAGE: '',
+  GIT_CONFIG_GLOBAL: '/dev/null',
+  GIT_CONFIG_NOSYSTEM: '1',
+  GIT_AUTHOR_NAME: 'Test',
+  GIT_AUTHOR_EMAIL: 'test@example.invalid',
+  GIT_AUTHOR_DATE: '2026-01-01T00:00:00Z',
+  GIT_COMMITTER_NAME: 'Test',
+  GIT_COMMITTER_EMAIL: 'test@example.invalid',
+  GIT_COMMITTER_DATE: '2026-01-01T00:00:00Z',
+};
+
+/** The hardened production runner with {@link GIT_ENV} added; the adapters under test use it. */
+const runGitFor =
+  (repo: string): RunGit =>
+  (args, options) =>
+    runGitIn(repo)(args, { ...options, env: { ...GIT_ENV, ...options?.env } });
+
 function git(cwd: string, ...args: string[]): string {
   return execFileSync(
     'git',
     [
       '-C',
       cwd,
-      '-c',
-      'user.name=Test',
-      '-c',
-      'user.email=test@example.invalid',
       '-c',
       'commit.gpgsign=false',
       '-c',
@@ -63,7 +84,11 @@ function git(cwd: string, ...args: string[]): string {
       'core.autocrlf=false',
       ...args,
     ],
-    { encoding: 'utf8', env: scrubbedGitEnv(), stdio: ['ignore', 'pipe', 'pipe'] },
+    {
+      encoding: 'utf8',
+      env: { ...scrubbedGitEnv(), ...GIT_ENV },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
   ).trim();
 }
 
@@ -226,12 +251,7 @@ function runOracle(cases: Case[]): Outcome[] {
     input: JSON.stringify({ cases }),
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
-    env: {
-      PATH: process.env.PATH ?? '',
-      GIT_CONFIG_GLOBAL: '/dev/null',
-      GIT_CONFIG_NOSYSTEM: '1',
-      LC_ALL: 'C.UTF-8',
-    },
+    env: { PATH: process.env.PATH ?? '', ...GIT_ENV },
   });
   return (JSON.parse(stdout) as { results: Outcome[] }).results;
 }
@@ -432,7 +452,7 @@ describe('publication verify: Python differential', () => {
   ];
 
   it('agrees with Python on the verified HEAD, the exception class and its text', async () => {
-    const verify = gitPublicationVerify({ worktreeRoot: fx.wtRoot });
+    const verify = gitPublicationVerify({ worktreeRoot: fx.wtRoot, runGitFor });
     const all = cases();
     const oracle = runOracle(all);
     const seen = new Set<string>();
@@ -480,6 +500,36 @@ function call(code: number | null, stdout: string | Uint8Array = '', stderr = ''
   };
 }
 
+describe('publication verify: untracked files under hiding configuration', () => {
+  it('rejects a non-ignored untracked file even when status.showUntrackedFiles=no', async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'crq-pub-verify-cfg-')));
+    cleanups.push(root);
+    const clone = join(root, 'clone');
+    const wtRoot = join(root, 'wt');
+    await mkdir(clone);
+    await mkdir(wtRoot);
+    git(clone, 'init', '-q', '--object-format=sha1');
+    await writeFile(join(clone, 'a.txt'), 'l1\n');
+    git(clone, 'add', 'a.txt');
+    git(clone, 'commit', '-q', '-m', 'base');
+    const base = git(clone, 'rev-parse', 'HEAD');
+    const path = join(wtRoot, 'crq-publish-cfg');
+    git(clone, 'worktree', 'add', '-q', '--detach', path, base);
+    await writeFile(join(path, 'a.txt'), 'l1 fixed\n');
+    git(path, 'commit', '-q', '-am', `fix ${JOB}`);
+    const claimed = git(path, 'rev-parse', 'HEAD');
+    await writeFile(join(path, 'stray.txt'), 'stray\n');
+    git(clone, 'config', 'status.showUntrackedFiles', 'no');
+    // The configuration alone would hide the file from a bare `status --porcelain`.
+    expect(git(path, 'status', '--porcelain')).toBe('');
+    const verify = gitPublicationVerify({ worktreeRoot: wtRoot, runGitFor });
+    await expect(verify.verify({ path }, base, [claimed], JOB)).rejects.toMatchObject({
+      kind: 'ValueError',
+      message: REJECT_DIRTY_TREE,
+    });
+  });
+});
+
 describe('publication verify: scripted process', () => {
   const BASE = 'b'.repeat(40);
   const HEAD = 'a'.repeat(40);
@@ -489,7 +539,7 @@ describe('publication verify: scripted process', () => {
   /** Answers a verifying range by default; `override` replaces one command's reply. */
   function scripted(override?: (args: readonly string[]) => GitCall | undefined) {
     const log: { cwd: string; args: readonly string[] }[] = [];
-    const runGitFor =
+    const scriptedRunner =
       (cwd: string): RunGit =>
       async (args) => {
         log.push({ cwd, args });
@@ -506,7 +556,10 @@ describe('publication verify: scripted process', () => {
                   : call(0));
         return { ...reply, args };
       };
-    return { log, verify: gitPublicationVerify({ worktreeRoot: '/wt', runGitFor }) };
+    return {
+      log,
+      verify: gitPublicationVerify({ worktreeRoot: '/wt', runGitFor: scriptedRunner }),
+    };
   }
 
   it('runs the exact argv, in order, in the worktree it belongs to', async () => {
@@ -520,7 +573,7 @@ describe('publication verify: scripted process', () => {
       { cwd: W.path, args: ['diff-tree', '--root', '--no-commit-id', '--name-only', '-r', CLAIM] },
       { cwd: W.path, args: ['show', '-s', '--format=%B', CLAIM] },
       { cwd: W.path, args: ['rev-list', `${BASE}..HEAD`] },
-      { cwd: W.path, args: ['status', '--porcelain'] },
+      { cwd: W.path, args: ['status', '--porcelain', '--untracked-files=normal'] },
     ]);
   });
 
@@ -642,6 +695,22 @@ describe('publication verify: scripted process', () => {
     await expect(dirty.verify.verify(W, BASE, [CLAIM], JOB)).rejects.toThrow(REJECT_DIRTY_TREE);
   });
 
+  it('reads a missing exit code before decoding, so a truncated read is OSError, not a rejection', async () => {
+    // execFile's output bound leaves partial bytes (here a cut UTF-8 sequence) and no code.
+    const cut = new Uint8Array([0x66, 0xe2, 0x82]);
+    for (const command of ['rev-parse', 'show', 'status']) {
+      const { verify } = scripted((args) => (args[0] === command ? call(null, cut) : undefined));
+      await expect(verify.verify(W, BASE, [CLAIM], JOB), command).rejects.toMatchObject({
+        kind: 'OSError',
+      });
+    }
+    // A completed call with the same bytes is still Python's strict-decode ValueError.
+    const done = scripted((args) => (args[0] === 'show' ? call(0, cut) : undefined));
+    await expect(done.verify.verify(W, BASE, [CLAIM], JOB)).rejects.toMatchObject({
+      kind: 'ValueError',
+    });
+  });
+
   it('refuses a base that is not a 40-hex object id, where Python would run git on any string', async () => {
     for (const base of ['HEAD~0', 'main', '--all', `${BASE}\n`, BASE.slice(1)]) {
       const { log, verify } = scripted();
@@ -712,13 +781,14 @@ describe('publication verify through publishRepair (real repositories)', () => {
   }
 
   function effects(repo: { clone: string; wtRoot: string }, calls: string[]) {
-    const reads = gitPublicationReads({ clone: repo.clone, worktreeRoot: repo.wtRoot });
+    const reads = gitPublicationReads({ clone: repo.clone, worktreeRoot: repo.wtRoot, runGitFor });
     const writes = gitPublicationWorktrees({
       clone: repo.clone,
       worktreeRoot: repo.wtRoot,
       worktreePrefix: 'crq-',
+      runGitFor,
     });
-    const verify = gitPublicationVerify({ worktreeRoot: repo.wtRoot });
+    const verify = gitPublicationVerify({ worktreeRoot: repo.wtRoot, runGitFor });
     return {
       ...reads,
       ...writes,

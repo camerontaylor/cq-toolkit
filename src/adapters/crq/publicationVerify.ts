@@ -22,11 +22,16 @@
  *      commit lists nothing there and so counts as empty);
  *    - its message names `job` at a non-digit boundary.
  * 3. `rev-list <base>..HEAD` is exactly the claimed set (no unclaimed commit);
- * 4. `status --porcelain` is empty (a clean tree).
+ * 4. `status --porcelain --untracked-files=normal` is empty (a clean tree).
  *
  * Failure classes, which `publishRepair` and `harvest` branch on:
- * - Every verdict above is `PyError('ValueError')` with Python's text, so the
- *   caller records a terminal failure.
+ * - Every verdict above is `PyError('ValueError')` with Python's text. What a
+ *   caller does with it differs and is the caller's policy, not this seam's:
+ *   `harvest` (the fixer's claim check) records it as a terminal rejection,
+ *   while `publish` (replay verification) records `publish_failed`, which a
+ *   later harvest may pick up again, and the TypeScript `publishRepair`
+ *   removes the worktree and propagates it. Do not treat every publication
+ *   `ValueError` as terminal when wiring this in.
  * - A Git process that exits non-zero where Python calls `git()` is
  *   `PyError('RuntimeError')`, `git <cmd> failed: <stderr[:200]>`.
  * - A process that never produced an exit code (spawn failure, the time bound,
@@ -54,6 +59,10 @@
  *   Python first uses it, after a claim's `cat-file`.
  * - A worktree must be an absolute path that is a direct child of
  *   `worktreeRoot` (`c.WT_ROOT / name`); see `publicationGitReads.ts`.
+ * - The tree check asks for `--untracked-files=normal` where Python runs a bare
+ *   `status --porcelain`, which inherits `status.showUntrackedFiles`: with `no`
+ *   configured Python accepts a stray untracked file. Under the default
+ *   configuration the two are identical; this only ever rejects more.
  * - A non-string claim, `base` or `job` is a `TypeError`, as Python's `re` and
  *   `Popen` raise for a non-str.
  *
@@ -156,7 +165,7 @@ export function gitPublicationVerify(options: PublicationVerifyOptions): Publica
       if (inRange.size !== claimed.size || [...inRange].some((sha) => !claimed.has(sha))) {
         throw new PyError('ValueError', REJECT_UNCLAIMED_COMMITS);
       }
-      if ((await wt.git(worktree, ['status', '--porcelain'])) !== '') {
+      if ((await wt.git(worktree, ['status', '--porcelain', '--untracked-files=normal'])) !== '') {
         throw new PyError('ValueError', REJECT_DIRTY_TREE);
       }
     },

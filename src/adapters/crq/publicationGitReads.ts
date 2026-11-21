@@ -141,8 +141,10 @@ export interface PublicationWorktreeGit {
   git(worktree: GitReadWorktree, args: readonly string[]): Promise<string>;
   /**
    * `command(['git', *args], cwd=wt).returncode`: the exit code, whatever it is.
-   * A call that never produced one is `OSError`, as `command` raises
-   * `FileNotFoundError`/`TimeoutExpired` rather than returning.
+   * A call that never produced one is `OSError`: `command` raises
+   * `FileNotFoundError` (an `OSError`) or `TimeoutExpired` (a `SubprocessError`)
+   * rather than returning, and this seam normalizes both to `OSError` on purpose,
+   * so neither can be read as a non-zero exit such as "not an ancestor".
    */
   exitCode(worktree: GitReadWorktree, args: readonly string[]): Promise<number>;
 }
@@ -166,8 +168,11 @@ export function publicationWorktreeGit(
   return {
     async git(worktree, args) {
       const call = await runGitFor(owned(worktree))(args);
+      // Exit code first: a bounded or killed process leaves partial (possibly cut
+      // mid-UTF-8) output and no code, which is OSError, not a decode failure.
+      const code = answered(call);
       const text = pyText(call);
-      if (answered(call) !== 0) {
+      if (code !== 0) {
         throw new PyError('RuntimeError', `git ${args[0]} failed: ${clip(pyStderr(call), 200)}`);
       }
       return pyStrip(text);
