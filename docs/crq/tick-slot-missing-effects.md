@@ -151,9 +151,11 @@ would iterate a string, a non-string commit or SHA likewise, and `bool(info)` is
 modelled as a non-null PR view.
 
 S6-k (inactive): `filePublicationEffects` (`src/adapters/crq/publicationFiles.ts`)
-binds the five file seams of `publishRepair`, `recoverPublication` and
-`finalizePublication` over an injected `stateRoot`: `readJournal`, `writeJournal`,
-`writePatch`, `writeFixPrBody` and `saveQueue`. Nothing imports it. Two Python
+binds the five file seams of `publishRepair` (`readJournal`, `writeJournal`,
+`writePatch`, `saveQueue`) and `finalizePublication` (`writeFixPrBody`,
+`writeJournal`, `saveQueue`) over an injected `stateRoot`. `recoverPublication`
+declares none of them: `publishRepair` hands it the journal it read. Nothing
+imports it outside tests. Two Python
 writers are mirrored, not unified: `crq_repair.atomic` (journal, queue) is
 `atomicWrite` over `atomicJsonText` (mkdir -p, 0600 temp, fsync, rename, directory
 fsync); `Path.write_text` (patch, fix-pr.md) is an in-place truncating write with
