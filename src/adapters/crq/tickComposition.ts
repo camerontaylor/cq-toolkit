@@ -417,13 +417,18 @@ export function composeFullTick(input: TickCompositionInput): TickComposition {
       if (rejectBacklog || backlogEffects === null || listOpenPrs === null)
         return (rejectBacklog as () => Promise<never>)();
       // `if not dry and backfill_repair_present(q)`: a tick with no backfill repair work makes no call.
-      if (!backfillRepairPresent(toPlain(queue))) return;
+      const plainQueue = toPlain(queue);
+      if (!backfillRepairPresent(plainQueue)) return;
       // `forge_window(ForgeBudget(requests=1, seconds=30))`; a spent budget is a failed read.
       const budget = new ForgeBudget({ requests: 1, seconds: 30 });
-      await refreshFixPrBacklog(backlog, {
-        ...backlogEffects,
-        listOpenPrs: () => boundedListing(listOpenPrs, budget.take()),
-      });
+      await refreshFixPrBacklog(
+        backlog,
+        {
+          ...backlogEffects,
+          listOpenPrs: () => boundedListing(listOpenPrs, budget.take()),
+        },
+        plainQueue,
+      );
     },
     harvestItems: harvest
       ? (q, dry) => harvest.harvestItems(q, dry)

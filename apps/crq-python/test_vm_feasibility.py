@@ -9,6 +9,7 @@ import json
 import os
 import pathlib
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -847,6 +848,86 @@ class LifecycleTests(unittest.TestCase):
             stop.assert_called_once()
             self.assertFalse((run / "executed-host-script.py").exists())
             self.assertFalse((run / "executed-guest-probe.py").exists())
+
+    def _committed_probe_repo(self, repo, host_bytes):
+        """Commit the two scripts (``host_bytes`` is the host content) and
+        return the commit id whose blobs a run must match."""
+        repo = pathlib.Path(repo)
+        repo.mkdir(parents=True, exist_ok=True)
+        (repo / "vm-feasibility.py").write_bytes(host_bytes)
+        (repo / "vm-guest-probe.py").write_bytes(
+            (OPS / "vm-guest-probe.py").read_bytes())
+
+        def git(*argv):
+            subprocess.run(["git", *argv], cwd=str(repo), check=True,
+                           capture_output=True)
+        git("init", "-q")
+        git("-c", "user.email=probe@example.com",
+            "-c", "user.name=probe", "add", ".")
+        git("-c", "user.email=probe@example.com",
+            "-c", "user.name=probe", "commit", "-q", "--no-verify",
+            "-m", "probe")
+        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo),
+                              check=True, capture_output=True).stdout.decode().strip()
+
+    def _run_probe_cli(self, script, state, commit):
+        return subprocess.run(
+            [sys.executable, str(script), "--source-commit", commit,
+             "--state-dir", str(state), "--json", "run"],
+            capture_output=True, text=True, timeout=120)
+
+    def test_run_refuses_modified_bytes_before_any_preparation(self):
+        # A modified host script must be refused at launch, before the
+        # pipeline it carries can run: the launcher verifies the buffer it
+        # is about to execute against the stated commit first.
+        source = (OPS / "vm-feasibility.py").read_bytes()
+        modified = source.replace(
+            b'    recorder = Recorder(state)\n'
+            b'    stamps = {"start": host_stamp()}\n',
+            b'    raise RuntimeError("verified-launch-reached-pipeline")\n')
+        self.assertNotEqual(modified, source)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            repo = root / "repo"
+            commit = self._committed_probe_repo(repo, source)
+            (repo / "vm-feasibility.py").write_bytes(modified)
+            state = root / "state"
+            result = self._run_probe_cli(repo / "vm-feasibility.py", state,
+                                         commit)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr, "")
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["error"]["kind"], "thrown")
+        self.assertIn("vm-feasibility.py differs from its blob",
+                      payload["error"]["message"])
+        self.assertNotIn("verified-launch-reached-pipeline",
+                         payload["error"]["message"])
+        self.assertFalse((state / "runs").exists())
+
+    def test_run_pipeline_executes_from_the_verified_host_buffer(self):
+        # The executed pipeline must be the verified buffer itself, not the
+        # bytes the interpreter happened to load: the launcher hands the
+        # buffer to the relaunched module, which carries it in its namespace.
+        source = (OPS / "vm-feasibility.py").read_bytes()
+        modified = source.replace(
+            b'    recorder = Recorder(state)\n'
+            b'    stamps = {"start": host_stamp()}\n',
+            b'    if "_VERIFIED_HOST_BUFFER" not in globals():\n'
+            b'        raise SystemExit(9)\n'
+            b'    raise RuntimeError("verified-buffer-ran-the-pipeline")\n')
+        self.assertNotEqual(modified, source)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            repo = root / "repo"
+            commit = self._committed_probe_repo(repo, modified)
+            result = self._run_probe_cli(repo / "vm-feasibility.py",
+                                         root / "state", commit)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr, "")
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["error"]["kind"], "thrown")
+        self.assertEqual(payload["error"]["message"],
+                         "verified-buffer-ran-the-pipeline")
 
     def test_verify_source_scripts_against_a_real_commit(self):
         def git(cwd, *argv):

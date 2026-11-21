@@ -600,10 +600,11 @@ def review_start_limit(c, now=None):
     return started * BACKLOG_HOURS_OF_CAPACITY // BACKLOG_WINDOW_HOURS
 
 
-def refresh_fix_pr_backlog(c):
+def refresh_fix_pr_backlog(c, q):
     """Write state/repair/fix-pr-backlog.json once per tick, before any publish.
 
-    Counts open fix PRs on GitHub, never the queue: its cached state lags. A
+    GitHub determines which PRs are open. Queue records identify legacy retry
+    branches whose names alone cannot distinguish backfill from ordinary work. A
     failed read leaves the previous file for the drain and holds creation for
     the rest of this tick.
     """
@@ -612,7 +613,17 @@ def refresh_fix_pr_backlog(c):
     try:
         prs = c.gh_json(['pr', 'list', '--repo', c.REPO, '--state', 'open', '--limit', '1000',
                          '--json', 'headRefName'])
-        open_count = sum(1 for pr in prs if str(pr.get('headRefName', '')).startswith(BACKFILL_BRANCH))
+        # Older backfill retries used the same branch prefix as ordinary retries.
+        legacy_backfill = {
+            'crq/fix-' + run
+            for item in q.get('items', [])
+            if str(item.get('id', '')).startswith(BACKFILL_ITEM)
+            for run in (item.get('repair_runs') or {})
+            if run.startswith('revalidated-')
+        }
+        open_branches = (str(pr.get('headRefName', '')) for pr in prs)
+        open_count = sum(branch.startswith(BACKFILL_BRANCH) or branch in legacy_backfill
+                         for branch in open_branches)
         limit = review_start_limit(c)
         atomic(c.STATE / 'repair' / 'fix-pr-backlog.json',
                {'at': dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
@@ -708,7 +719,12 @@ def publish(c, q, item, run, record, fixed):
                 raise ValueError('PR moved during publication; retry on fresh head')
             remote_branch = record['branch']
         else:
-            remote_branch = 'crq/fix-' + run
+            # The item's backfill status, not the run id, picks the prefix: a
+            # prepared retry (revalidated- run) on a backfill item must keep
+            # the counted backfill prefix or its PR escapes the cap on later
+            # ticks, while ordinary fix PRs stay outside it.
+            prefix = BACKFILL_BRANCH if str(item.get('id', '')).startswith(BACKFILL_ITEM) else 'crq/fix-'
+            remote_branch = prefix + run
         publication = {'head': head, 'target': target, 'branch': remote_branch,
                        'commits': translated, 'open_pr': bool(info), 'at': c.iso()}
         journal = c.STATE / 'repair' / record['jobs'][0] / 'publication.json'
@@ -783,7 +799,7 @@ def finalize_publication(c, q, item, run, record, publication):
         item['last_push'] = {'sha': head, 'shas': translated, 'at': c.iso()}
         record['fix_pr'] = {'number': item['pr'], 'url': 'https://github.com/' + c.REPO + '/pull/' + str(item['pr'])}
     else:
-        prs = c.gh_json(['pr', 'list', '--repo', c.REPO, '--head', branch, '--state', 'all', '--json', 'number,url,state'])
+        prs = c.gh_json(['pr', 'list', '--repo', c.REPO, '--head', branch, '--state', 'all', '--json', 'number,url,state,headRefOid'])
         if not prs:
             # recover_publication reconciled the fix branch to the prepared
             # head and adopts any PR matching that head before calling here,
@@ -836,9 +852,9 @@ def finalize_publication(c, q, item, run, record, publication):
                 if reserved and TICK_BACKLOG['open'] is not None:
                     TICK_BACKLOG['open'] -= 1
                 raise
-            prs = c.gh_json(['pr', 'list', '--repo', c.REPO, '--head', branch, '--state', 'all', '--json', 'number,url,state'])
-        if len(prs) != 1:
-            raise ValueError('fix PR identity is ambiguous')
+            prs = c.gh_json(['pr', 'list', '--repo', c.REPO, '--head', branch, '--state', 'all', '--json', 'number,url,state,headRefOid'])
+        if len(prs) != 1 or prs[0]['headRefOid'] != head:
+            raise ValueError('fix PR identity or prepared head mismatch')
         pr = prs[0]
         record['fix_pr'] = pr
         if not any(i['pr'] == pr['number'] and i['kind'] == 'open' for i in q['items']):
@@ -1316,6 +1332,15 @@ def merge_head_evidence(c, record, actual_head):
             total_bytes += head_size
             if head_size > MAX_CONTAINMENT_PATCH_BYTES or total_bytes > MAX_CONTAINMENT_TOTAL_BYTES:
                 raise ValueError('published repair change too large to verify; needs revalidation: ' + path)
+            if (published_lines[0] or published_lines[1]) and any(
+                    line.startswith('Binary files ') or line.startswith('GIT binary patch')
+                    for line in head_patch.splitlines()):
+                # A binary head diff has no text hunks, so the comparison
+                # below would see no changed locations: a head that replaced
+                # the published text with a blob while keeping the mode would
+                # look contained. When the published repair depended on text
+                # changes, refuse to call that containment.
+                raise ValueError('merged repair source changed; needs revalidation: ' + path)
             undone = change_undone(diff_changed_locations(published_patch),
                                    diff_changed_locations(head_patch))
             if undone or (mode_changed and after[0] != before[0]):

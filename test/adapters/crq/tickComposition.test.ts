@@ -172,7 +172,14 @@ describe('composeFullTick with no optional inputs', () => {
 
 describe('fix-PR backlog', () => {
   const withRepair = doc({
-    items: [{ id: 'backfill-finding-1', kind: 'backfill', state: 'done', repair_runs: [{ n: 1 }] }],
+    items: [
+      {
+        id: 'backfill-finding-1',
+        kind: 'backfill',
+        state: 'done',
+        repair_runs: { 'revalidated-legacy': {} },
+      },
+    ],
   });
 
   it('refreshes from the injected listing under one request when a backfill repair is present', async () => {
@@ -181,7 +188,11 @@ describe('fix-PR backlog', () => {
       fixPrBacklog: {
         listOpenPrs: async () => (
           listed++,
-          [{ headRefName: 'crq/fix-backfill-abc' }, { headRefName: 'main' }]
+          [
+            { headRefName: 'crq/fix-backfill-abc' },
+            { headRefName: 'crq/fix-revalidated-legacy' },
+            { headRefName: 'main' },
+          ]
         ),
       },
     });
@@ -190,9 +201,9 @@ describe('fix-PR backlog', () => {
     await c.phases.resetFixPrBacklog();
     await c.phases.refreshFixPrBacklog(withRepair);
     const file = join(s.root, 'repair', 'fix-pr-backlog.json');
-    expect(JSON.parse(readFileSync(file, 'utf8'))).toMatchObject({ open: 1 });
+    expect(JSON.parse(readFileSync(file, 'utf8'))).toMatchObject({ open: 2 });
     expect(listed).toBe(1);
-    expect(c.backlog.open).toBe(1);
+    expect(c.backlog.open).toBe(2);
     // Reset forgets the count: creation holds until the next refresh.
     await c.phases.resetFixPrBacklog();
     expect(c.backlog.open).toBeNull();
