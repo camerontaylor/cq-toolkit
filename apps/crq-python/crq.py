@@ -3597,7 +3597,7 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
         # own allowance, like reconcile below; a tick with no backfill repair
         # work makes no call.
         with forge_window(ForgeBudget(requests=1, seconds=30)):
-            repair_tick.refresh_fix_pr_backlog(sys.modules[__name__])
+            repair_tick.refresh_fix_pr_backlog(sys.modules[__name__], q)
     try:
         for item in list(live_items(q)):
             if not dry and item.get("kind") == local_review_runtime.KIND and item.get("publication_pending"):

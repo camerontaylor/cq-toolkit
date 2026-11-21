@@ -46,11 +46,6 @@ def closed_marker_due(marker):
 PR_CREATE_ATTEMPTS = 3
 BACKFILL_ITEM = 'backfill-finding-'
 BACKFILL_BRANCH = 'crq/fix-backfill-'
-# Prepared retries run under a revalidated- run id; before the branch prefix
-# followed the item's backfill status they were published as
-# crq/fix-revalidated-<run>. Those open PRs still hold a backfill slot, so
-# the backlog keeps counting them; ordinary crq/fix-<run> PRs never count.
-LEGACY_RETRY_BRANCH = 'crq/fix-revalidated-'
 BACKLOG_WINDOW_HOURS = 72
 BACKLOG_HOURS_OF_CAPACITY = 4
 # The tick's view of open backfill fix PRs, set by refresh_fix_pr_backlog and
@@ -605,10 +600,11 @@ def review_start_limit(c, now=None):
     return started * BACKLOG_HOURS_OF_CAPACITY // BACKLOG_WINDOW_HOURS
 
 
-def refresh_fix_pr_backlog(c):
+def refresh_fix_pr_backlog(c, q):
     """Write state/repair/fix-pr-backlog.json once per tick, before any publish.
 
-    Counts open fix PRs on GitHub, never the queue: its cached state lags. A
+    GitHub determines which PRs are open. Queue records identify legacy retry
+    branches whose names alone cannot distinguish backfill from ordinary work. A
     failed read leaves the previous file for the drain and holds creation for
     the rest of this tick.
     """
@@ -617,8 +613,17 @@ def refresh_fix_pr_backlog(c):
     try:
         prs = c.gh_json(['pr', 'list', '--repo', c.REPO, '--state', 'open', '--limit', '1000',
                          '--json', 'headRefName'])
-        counted = (BACKFILL_BRANCH, LEGACY_RETRY_BRANCH)
-        open_count = sum(1 for pr in prs if str(pr.get('headRefName', '')).startswith(counted))
+        # Older backfill retries used the same branch prefix as ordinary retries.
+        legacy_backfill = {
+            'crq/fix-' + run
+            for item in q.get('items', [])
+            if str(item.get('id', '')).startswith(BACKFILL_ITEM)
+            for run in (item.get('repair_runs') or {})
+            if run.startswith('revalidated-')
+        }
+        open_branches = (str(pr.get('headRefName', '')) for pr in prs)
+        open_count = sum(branch.startswith(BACKFILL_BRANCH) or branch in legacy_backfill
+                         for branch in open_branches)
         limit = review_start_limit(c)
         atomic(c.STATE / 'repair' / 'fix-pr-backlog.json',
                {'at': dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
