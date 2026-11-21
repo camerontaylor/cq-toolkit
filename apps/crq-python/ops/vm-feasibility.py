@@ -283,6 +283,14 @@ def process_starttime(pid: int, proc: pathlib.Path = pathlib.Path("/proc")):
     return text.rsplit(") ", 1)[1].split()[19]
 
 
+def command_owns_overlay(command: bytes, overlay: str) -> bool:
+    """True when a NUL-delimited command line carries exactly this overlay as
+    its QEMU drive file (`file=<overlay>,...`), never as a substring of a longer
+    path such as another run's `<overlay>-backup/...`."""
+    drive = b"file=" + overlay.encode() + b","
+    return any(arg.startswith(drive) for arg in command.split(b"\0"))
+
+
 def process_matches(pid: int, starttime: str, needle: str,
                     proc: pathlib.Path = pathlib.Path("/proc")) -> bool:
     """Prove a PID is the process this run started, without killing anything."""
@@ -294,7 +302,7 @@ def process_matches(pid: int, starttime: str, needle: str,
         command = (proc / str(pid) / "cmdline").read_bytes()
     except OSError:
         return False
-    return needle.encode() in command
+    return command_owns_overlay(command, needle)
 
 
 def compare_files(before: dict, after: dict, ignore=(), content_keys=True):
@@ -663,7 +671,9 @@ def live_identity(run: dict) -> dict | None:
     command line still match -- the same proof ``stop_owned_process`` demands
     before stopping anything.
     """
-    run_dir = pathlib.Path(run["path"])
+    # QEMU receives the resolved overlay path, so the ownership needle must be
+    # built from the resolved run directory, not a symlinked alias of it.
+    run_dir = pathlib.Path(run["path"]).resolve()
     identity_path = run_dir / "process.json"
     if not identity_path.exists():
         return None
@@ -688,6 +698,20 @@ def refuse_live_run(run: dict) -> None:
             "booting again" % (run["run_id"], live["pid"]))
 
 
+def run_scope_unit(run_dir: pathlib.Path, run_id: str) -> str:
+    """Transient scope name for launches from this run directory, without the
+    ``.scope`` suffix.
+
+    The canonical run directory is bound into the name, hashed because unit
+    names must be plain tokens: two state directories that reuse one run id
+    then derive different scopes, because the run id alone does not prove
+    ownership of a scope under the shared user manager.
+    """
+    canonical = pathlib.Path(run_dir).resolve()
+    digest = hashlib.sha256(str(canonical).encode()).hexdigest()[:12]
+    return "crq-vm-%s-%s" % (run_id, digest)
+
+
 def boot(run: dict, recorder: Recorder, tools: pathlib.Path | None,
          stamp: dict) -> dict:
     require_memory(pathlib.Path("/proc/meminfo").read_text())
@@ -703,7 +727,7 @@ def boot(run: dict, recorder: Recorder, tools: pathlib.Path | None,
             (run_dir / stale).unlink()
         except FileNotFoundError:
             pass
-    unit = "crq-vm-" + run["run_id"]
+    unit = run_scope_unit(run_dir, run["run_id"])
     scope_unit = unit + ".scope"
     qemu = qemu_command(run_dir, run["port"])
     qemu[0] = tool("qemu-system-x86_64", tools)
@@ -1525,7 +1549,9 @@ def stop_owned_process(run: dict, *, purge: bool,
 
 
 def _stop_owned_process(run: dict, *, purge: bool) -> dict:
-    run_dir = pathlib.Path(run["path"])
+    # QEMU receives the resolved overlay path, so the ownership needle must be
+    # built from the resolved run directory, not a symlinked alias of it.
+    run_dir = pathlib.Path(run["path"]).resolve()
     identity_path = run_dir / "process.json"
     identity = None
     if identity_path.exists():
@@ -1547,45 +1573,64 @@ def _stop_owned_process(run: dict, *, purge: bool) -> dict:
     if identity is None:
         # boot() spawns QEMU before it writes process.json, so a failure or
         # interruption before that write leaves a live guest with no recorded
-        # identity. The scope unit is derived from the run id, so the stop does
-        # not need the identity file; report stopped only once the unit is
-        # actually inactive, so --purge never moves a live guest's files.
+        # identity. The scope unit is derived exactly as boot() derives it, so
+        # the stop does not need the identity file; report stopped only once
+        # the unit is actually inactive, so --purge never moves a live guest's
+        # files.
         if not RUN_ID_RE.fullmatch(str(run["run_id"])):
             raise RuntimeError("invalid run id: " + str(run["run_id"]))
-        derived_unit = "crq-vm-" + run["run_id"] + ".scope"
-        # The unit name is derived from the run id alone, so prove the scope
-        # holds this run's QEMU before stopping it: another workspace under the
-        # same user manager can own a scope with the same name.
-        before_rc, before = _show_scope(derived_unit)
-        if before_rc != 0:
-            raise RuntimeError("cannot verify scope ownership: " + derived_unit)
-        if before.get("LoadState") != "not-found":
-            members = _cgroup_pids(before.get("ControlGroup"))
-            if members is None:
+        # A launch from before the scope name bound the run directory used the
+        # run id alone, so an interrupted older guest may still sit in that
+        # scope. Check it as well, with the same overlay ownership proof.
+        for derived_unit, legacy in ((run_scope_unit(run_dir, run["run_id"]) + ".scope", False),
+                                     ("crq-vm-" + run["run_id"] + ".scope", True)):
+            # Another state directory reusing this run id derives another unit
+            # name, but the name still proves nothing on its own: never send
+            # stop for an absent or empty scope, because a launch from another
+            # directory can register a scope under this name between the check
+            # and the stop, and that stop would kill an unverified guest. A
+            # populated scope is stopped only once one of its members carries
+            # this run's overlay path.
+            before_rc, before = _show_scope(derived_unit)
+            if before_rc != 0:
                 raise RuntimeError("cannot verify scope ownership: " + derived_unit)
-            if members:
-                def owns(pid: int) -> bool:
-                    try:
-                        command = pathlib.Path("/proc/%d/cmdline" % pid).read_bytes()
-                    except OSError:
-                        return False
-                    return needle.encode() in command
-                if not any(owns(pid) for pid in members):
-                    raise RuntimeError("refusing to stop a scope this run does not own: "
-                                       + derived_unit)
-        stop_rc = subprocess.run(["systemctl", "--user", "stop", derived_unit],
-                                 capture_output=True, text=True).returncode
-        # Only a successful stop (or a unit that is not loaded at all) plus an
-        # ActiveState of inactive or failed proves QEMU is gone. A scope that
-        # is deactivating is not active yet still holds the guest, and a
-        # failed query (for example a user-bus error) proves nothing. A scope
-        # can also enter failed while QEMU is still in its cgroup, so the
-        # cgroup must be confirmed empty too.
-        shown_rc, props = _show_scope(derived_unit)
-        stopped = (shown_rc == 0
-                   and props.get("ActiveState") in ("inactive", "failed")
-                   and (stop_rc == 0 or props.get("LoadState") == "not-found")
-                   and _cgroup_pids(props.get("ControlGroup")) == [])
+            members = []
+            if before.get("LoadState") != "not-found":
+                members = _cgroup_pids(before.get("ControlGroup"))
+                if members is None:
+                    raise RuntimeError("cannot verify scope ownership: " + derived_unit)
+            if not members:
+                continue
+
+            def owns(pid: int) -> bool:
+                try:
+                    command = pathlib.Path("/proc/%d/cmdline" % pid).read_bytes()
+                except OSError:
+                    return False
+                return command_owns_overlay(command, needle)
+            if not any(owns(pid) for pid in members):
+                if legacy:
+                    # The legacy name is shared across state directories; a
+                    # populated scope without this run's overlay is another
+                    # run's guest. Leave it untouched.
+                    continue
+                raise RuntimeError("refusing to stop a scope this run does not own: "
+                                   + derived_unit)
+            stop_rc = subprocess.run(["systemctl", "--user", "stop", derived_unit],
+                                     capture_output=True, text=True).returncode
+            # Only a successful stop (or a unit that is not loaded at all) plus an
+            # ActiveState of inactive or failed proves QEMU is gone. A scope that
+            # is deactivating is not active yet still holds the guest, and a
+            # failed query (for example a user-bus error) proves nothing. A scope
+            # can also enter failed while QEMU is still in its cgroup, so the
+            # cgroup must be confirmed empty too.
+            shown_rc, props = _show_scope(derived_unit)
+            stopped = stopped and (shown_rc == 0
+                       and props.get("ActiveState") in ("inactive", "failed")
+                       and (stop_rc == 0 or props.get("LoadState") == "not-found")
+                       and _cgroup_pids(props.get("ControlGroup")) == [])
+        # An absent (not-found) or empty scope holds no guest of this run, so
+        # the stop command is skipped and the run reports stopped.
     if identity is not None:
         alive = pathlib.Path("/proc/%d" % pid).exists()
         if alive:
