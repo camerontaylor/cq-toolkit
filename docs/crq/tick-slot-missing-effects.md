@@ -253,8 +253,36 @@ a non-UTF-8 listing, branches ending in Unicode whitespace), pins the failure cl
 the real `recoverPublication` over it. No network, credential or remote service;
 the adapter only lists. Nothing imports it outside tests.
 
-Still unwired after S6-l, S6-m, S6-n and S6-o: `push` (the leased remote write),
-`createPr` (forge write), `verify`, `hackDetector`, `secretScan` and
+S6-p (inactive): `gitPublicationVerify` (`src/adapters/crq/publicationVerify.ts`)
+binds `verify`, `crq_repair.verify(wt, base, commits, job)`, the defensive
+claimed-range check `publish` runs over each replayed repair (and `harvest` over
+each fixer's claim). It ports Python's order and text, not
+`commitVerificationFailure` (`src/plans/review-loop.ts`), which differs
+materially (`diff --quiet`, no range-set or dirty-tree check). It reuses the
+hardened worktree runner of S6-l, now exported as `publicationWorktreeGit`, so
+containment, text decoding and the failure classes are identical. Rejections are
+`ValueError`s with Python's text (empty or duplicate claim, not 40-hex, not a
+strict descendant of `base`, not an ancestor of `HEAD`, empty commit, message
+lacking the job id, unclaimed commits in `base..HEAD`, dirty tree); a failed
+`cat-file` is a `RuntimeError` so a later tick retries; a call with no exit code
+is `OSError`, never read as "not an ancestor". Parity points kept: the `base`
+compare is case-sensitive, and the job id is matched literally at a boundary
+where `\d` is any Unicode decimal digit. Narrowings: `base` must be 40-hex, the
+worktree a direct child of the root, and a non-string claim, base or job a
+`TypeError`. Python returns the verified `HEAD`; callers ignore it, so this
+returns nothing.
+`test/adapters/crq/publicationVerify.test.ts` runs the real `crq_repair.verify`
+(`test/helpers/publicationVerifyOracle.py`) against throwaway local repositories
+(good, multi-repair, duplicate, short and non-hex claims, unknown object, base
+equal to the claim, non-descendant, not an ancestor of `HEAD`, empty and merge
+commits, job-id boundaries including Arabic-Indic digits and regex metacharacters,
+unclaimed commits, upper-case claim, untracked and modified files), pins the
+argv, order and failure classes with a scripted process, and drives
+`publishRepair` over real reads, worktrees and verify. No network, credential,
+forge or remote; the adapter only reads. Nothing imports it outside tests.
+
+Still unwired after S6-l, S6-m, S6-n, S6-o and S6-p: `push` (the leased remote
+write), `createPr` (forge write), `hackDetector`, `secretScan` and
 `repairProvenance`, `newItem` and the `FixPrBacklog`, plus the binding of any of
 these into `tick`.
 

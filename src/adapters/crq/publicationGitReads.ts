@@ -135,24 +135,52 @@ export function commit(value: string, what: string): string {
   return value;
 }
 
-export function gitPublicationReads(options: PublicationGitReadsOptions): PublicationGitReads {
+/** A publish worktree's Git runner: `wt_git` (stripped stdout) and a bare exit code. */
+export interface PublicationWorktreeGit {
+  /** `wt_git(wt, *args)`: stripped stdout; a non-zero exit is `RuntimeError`. */
+  git(worktree: GitReadWorktree, args: readonly string[]): Promise<string>;
+  /**
+   * `command(['git', *args], cwd=wt).returncode`: the exit code, whatever it is.
+   * A call that never produced one is `OSError`, as `command` raises
+   * `FileNotFoundError`/`TimeoutExpired` rather than returning.
+   */
+  exitCode(worktree: GitReadWorktree, args: readonly string[]): Promise<number>;
+}
+
+/** Binds Git to the publish worktrees under one root; refuses any other directory. */
+export function publicationWorktreeGit(
+  options: Pick<PublicationGitReadsOptions, 'worktreeRoot' | 'runGitFor'>,
+): PublicationWorktreeGit {
   const runGitFor = options.runGitFor ?? runGitIn;
   const root = canonicalDir(options.worktreeRoot);
   if (!isAbsolute(root)) throw new PyError('ValueError', 'worktree root must be absolute');
 
-  /** `wt_git`: stripped stdout; a non-zero exit is `RuntimeError`. */
-  const wtGit = async (worktree: GitReadWorktree, args: readonly string[]): Promise<string> => {
+  const owned = (worktree: GitReadWorktree): string => {
     const path = canonicalDir(worktree.path);
     if (!isAbsolute(path) || dirname(path) !== root || path === root) {
       throw new PyError('ValueError', 'publish worktree is outside the worktree root');
     }
-    const call = await runGitFor(path)(args);
-    const text = pyText(call);
-    if (answered(call) !== 0) {
-      throw new PyError('RuntimeError', `git ${args[0]} failed: ${clip(pyStderr(call), 200)}`);
-    }
-    return pyStrip(text);
+    return path;
   };
+
+  return {
+    async git(worktree, args) {
+      const call = await runGitFor(owned(worktree))(args);
+      const text = pyText(call);
+      if (answered(call) !== 0) {
+        throw new PyError('RuntimeError', `git ${args[0]} failed: ${clip(pyStderr(call), 200)}`);
+      }
+      return pyStrip(text);
+    },
+    async exitCode(worktree, args) {
+      return answered(await runGitFor(owned(worktree))(args));
+    },
+  };
+}
+
+export function gitPublicationReads(options: PublicationGitReadsOptions): PublicationGitReads {
+  const runGitFor = options.runGitFor ?? runGitIn;
+  const wtGit = publicationWorktreeGit(options).git;
 
   return {
     async revParseDefaultRef() {
