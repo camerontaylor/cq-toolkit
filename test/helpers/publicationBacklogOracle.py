@@ -5,9 +5,12 @@ and `finalize_publication` (apps/crq-python) driven through several ticks.
 Test tooling only. Usage: python3 -I publicationBacklogOracle.py <apps/crq-python dir>
 Reads {"cases": [case]} on stdin and writes {"results": [result]}.
 
+`c.new_item` only logs the item id: enrollment is not exercised here (see
+publicationEnrollOracle.py).
+
 Everything is a fixture. There is no Git, forge, network, provider, child process or
 queue host: `c.git`, `wt_git`, `verify`, `hack_detector`, `c.secret_scan`,
-`c.make_worktree`, `c.gh_json`, `c.run` and `c.new_item` are scripted over an in-memory
+`c.make_worktree`, `c.gh_json` and `c.run` are scripted over an in-memory
 world (remote refs and PR rows). The only disk is a tmp state tree holding
 `events.jsonl`, the journals (`crq_repair.atomic`), the patch and body files and
 `queue.json`.

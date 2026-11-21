@@ -1,6 +1,6 @@
-// Differential run of the whole offline fix-PR publication path over ONE shared
-// backlog: `refreshFixPrBacklog` -> `publishRepair` (initial, or journal recovery
-// on a later tick) -> `finalizePublication`, composed over a single explicitly
+// Differential run of the offline fix-PR publication path (publish, recovery and
+// finalize, without enrollment) over ONE shared backlog: `refreshFixPrBacklog` -> `publishRepair` (initial, or journal recovery
+// when the job journal holds a publication) -> `finalizePublication`, composed over a single explicitly
 // injected `FixPrBacklog`, against Python's real `refresh_fix_pr_backlog`,
 // `publish`, `recover_publication` and `finalize_publication`
 // (apps/crq-python/repair_tick.py) driven by test/helpers/publicationBacklogOracle.py.
@@ -12,7 +12,8 @@
 // legacy accounting (a backfill item's `revalidated-` retry branch counts, an
 // ordinary item's does not). Every case is a synthetic world: Git, `gh`, the
 // forge and the provider are scripted in memory on both sides, the only disk is
-// a throwaway state tree, and nothing here is bound into `tick` or the runtime.
+// a throwaway state tree, `newItem` is stubbed on both sides (enrollment is pinned
+// by publicationEnroll.test.ts), and nothing here is bound into `tick` or the runtime.
 // The final queue, the journal and backlog files, the ordered effect log and the
 // backlog view after every publish are compared as JSON text.
 import { execFileSync } from 'node:child_process';

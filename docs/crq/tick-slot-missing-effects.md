@@ -383,7 +383,8 @@ network, provider or secret; nothing imports it outside tests.
 S6-t (inactive, test only): no new production code. The existing pieces already
 compose over one explicitly injected `FixPrBacklog`: `refreshFixPrBacklog` (with
 `fileFixPrBacklogEffects`) fills it, `publishRepair` (initial publish, or journal
-recovery when the record holds a publication) reaches `finalizePublication`
+recovery when the job's journal, `state/repair/<job>/publication.json`, holds a
+publication) reaches `finalizePublication`
 through its `finalize` seam, and `finalizePublication` reserves and releases the
 same instance. `test/queue-runner/publicationBacklog.test.ts` pins that composition
 across several ticks against the real `refresh_fix_pr_backlog`, `publish`,
@@ -396,7 +397,10 @@ reserved before `gh pr create`, released only on a `gh` failure and kept on a
 timeout; an unread view (failed or skipped refresh) holding backfill while an
 ordinary PR is not capped; a missing `events.jsonl` as a zero limit; and #2291
 legacy accounting, where a backfill item's `revalidated-` retry branch counts and
-an ordinary item's lookalike does not. The ordered effect log, the backlog view
+an ordinary item's lookalike does not. Enrollment is out of scope: `newItem` is
+stubbed on both sides (it logs only the item id), so the final queue holds no
+enrolled `pr<number>` item and the log no `enrolled` event; `publicationEnroll.test.ts`
+(S6-s) pins that. The ordered effect log, the backlog view
 after every publish, the final queue and the journal, queue and backlog
 files are compared as JSON text. Nothing is bound into `tick` or the runtime.
 
