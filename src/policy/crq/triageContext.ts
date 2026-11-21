@@ -193,19 +193,29 @@ function splitlinesKeepends(text: string): string[] {
   return lines;
 }
 
-/** `int(digits)` for a run of Unicode decimal digits, with CPython's digit limit. */
+/**
+ * `int(digits)` for a run of Unicode decimal digits, with CPython's digit limit.
+ *
+ * CPython refuses an over-long digit string before converting it, so the
+ * count comes first and stops at the first digit past the limit: a hostile
+ * run costs a bounded scan, never a quadratic `BigInt` accumulation.
+ */
 function pythonInt(digits: string): bigint {
   let count = 0;
+  for (let index = 0; index < digits.length; index += 1) {
+    const unit = digits.charCodeAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) index += 1; // a surrogate pair is one digit
+    count += 1;
+    if (count > INT_MAX_STR_DIGITS) {
+      throw new TriageContextFailure(
+        'ValueError',
+        'Exceeds the limit (4300 digits) for integer string conversion',
+      );
+    }
+  }
   let value = 0n;
   for (const character of digits) {
-    count += 1;
     value = value * 10n + BigInt(decimalDigitValue(character.codePointAt(0) as number));
-  }
-  if (count > INT_MAX_STR_DIGITS) {
-    throw new TriageContextFailure(
-      'ValueError',
-      'Exceeds the limit (4300 digits) for integer string conversion',
-    );
   }
   return value;
 }

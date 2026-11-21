@@ -12,7 +12,7 @@
  * No process, filesystem write, provider, judge or network participates.
  */
 import { readFileSync } from 'node:fs';
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 import {
   assembleTriageContext,
   TriageContextFailure,
@@ -20,10 +20,20 @@ import {
   triageContextPreparer,
   triageContextToPlain,
   type TriageContextFailureType,
+  triageSourceExcerpt,
   type TriageContextReads,
 } from '../../../src/policy/crq/triageContext.js';
+import * as findings from '../../../src/policy/crq/prReviewFindings.js';
 import { planTriageDryRun, type TriageRepo } from '../../../src/policy/crq/triagePlan.js';
 import { JsonObject, parseJsonValue, type JsonValue } from '../../../src/policy/crq/jsonValue.js';
+
+// Wrap, never replace: the spy counts digit conversions so the digit-limit
+// regression below measures work done, not wall-clock time.
+vi.mock('../../../src/policy/crq/prReviewFindings.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../../src/policy/crq/prReviewFindings.js')>();
+  return { ...actual, decimalDigitValue: vi.fn(actual.decimalDigitValue) };
+});
 
 interface Spec {
   row: Record<string, unknown>;
@@ -260,5 +270,58 @@ describe('triage context preparer seam', () => {
     const clean = plan(replayReads(ready.input, []));
     expect(clean.report.contextErrors).toEqual([]);
     expect(clean.report.judgmentCandidates).toEqual(['f1']);
+  });
+});
+
+describe('triage source excerpt: the 4300-digit limit is enforced before conversion', () => {
+  const spy = vi.mocked(findings.decimalDigitValue);
+  const excerpt = (digits: string, extra = ''): unknown =>
+    triageSourceExcerpt('x\n'.repeat(20000), 'src/a.py', `${extra}src/a.py:${digits}`);
+
+  test('an over-long run is refused without converting a single digit', () => {
+    for (const digits of ['7'.repeat(4301), '0'.repeat(300_000)]) {
+      spy.mockClear();
+      expect(() => excerpt(digits)).toThrow(TriageContextFailure);
+      expect(spy).not.toHaveBeenCalled();
+    }
+  });
+
+  test('the refusal is the ValueError phase records', () => {
+    expect(() => excerpt('1'.repeat(4301))).toThrow(
+      expect.objectContaining({ pythonType: 'ValueError' }),
+    );
+  });
+
+  test('a run at the limit still converts every digit', () => {
+    spy.mockClear();
+    expect(excerpt('1'.repeat(4300))).toBeDefined();
+    expect(spy).toHaveBeenCalledTimes(4300);
+  });
+
+  test('Unicode digits count once per code point, astral ones included', () => {
+    const arabic = '\u0660';
+    const mathematical = String.fromCodePoint(0x1d7ce);
+    spy.mockClear();
+    expect(excerpt(arabic.repeat(4300))).toBeDefined();
+    expect(excerpt(mathematical.repeat(4300))).toBeDefined();
+    expect(spy).toHaveBeenCalledTimes(8600);
+    spy.mockClear();
+    expect(() => excerpt(arabic.repeat(4301))).toThrow(TriageContextFailure);
+    expect(() => excerpt(mathematical.repeat(4301))).toThrow(TriageContextFailure);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  test('citations convert in order: an earlier valid one is converted, a later over-long one still refuses', () => {
+    spy.mockClear();
+    expect(() => excerpt('9'.repeat(4301), 'src/a.py:12 ')).toThrow(TriageContextFailure);
+    // Python's int() runs over every citation in order, so "12" is converted first.
+    expect(spy).toHaveBeenCalledTimes(2);
+  });
+
+  test('an over-long citation past the four-region cap still refuses, as in Python', () => {
+    const early = [1, 2, 3, 4, 5].map((n) => `src/a.py:${n} `).join('');
+    spy.mockClear();
+    expect(() => excerpt('5'.repeat(4301), early)).toThrow(TriageContextFailure);
+    expect(spy).toHaveBeenCalledTimes(5);
   });
 });
