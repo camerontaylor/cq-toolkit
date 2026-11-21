@@ -261,6 +261,13 @@ async function reconcileTerminal(
       if (get(r, 'verdict') !== 'FAILED') continue;
       const reason = get(r, 'reason', '');
       if (typeof reason !== 'string') throw new TypeError('reason must be a str');
+      if (reason.startsWith('invalid repair inbox: ')) {
+        // The inbox was rejected (malformed or a swapped identity): keep it out
+        // of the sibling replay so no finding decision is derived from it later.
+        const rejected = get(r, 'job');
+        if (typeof rejected === 'string') handled.add(rejected);
+        continue;
+      }
       if (!reason.startsWith('invalid repair result: ')) continue;
       if (
         !inList(asList(pyReq(record, 'jobs'), 'jobs'), get(r, 'job')) ||

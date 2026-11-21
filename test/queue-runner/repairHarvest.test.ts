@@ -628,6 +628,27 @@ describe('repairHarvest result validation (differential)', () => {
     expect(later.calls).toContain('"mark","crq-R-F2"');
   });
 
+  it('keeps a rejected inbox out of the sibling replay on later ticks', async () => {
+    // State after the first tick terminalized J1's swapped inbox (null finding).
+    const rejected = {
+      job: J1,
+      item: 'i1',
+      verdict: 'FAILED',
+      reason: 'invalid repair inbox: repair job identity mismatch',
+      finding: null,
+    };
+    const out = await runTs({
+      item: item({}, { state: 'failed', jobs: [J1, J2], verdicts: [rejected] }),
+      files: files(
+        [J1, job(J1, { job: 'crq-other', canonical_finding_id: 'F1' }), fixed(J1)],
+        [J2, job(J2, { canonical_finding_id: 'F2' }), fixed(J2)],
+      ),
+    });
+    expect(out.error).toBeUndefined();
+    expect(out.calls).not.toContain('"sibling","F1"');
+    expect(out.calls).toContain('"sibling","F2"');
+  });
+
   it('keeps the run open when the inbox read fails with an I/O error', async () => {
     const out = await runTs({
       item: item({}, { jobs: [J1] }),
