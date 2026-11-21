@@ -165,18 +165,29 @@ class BacklogFileTest(unittest.TestCase):
         self.assertEqual(repair_tick.review_start_limit(self.c, self.now), 2)
 
     def test_refresh_writes_open_backfill_prs_and_limit(self):
-        repair_tick.refresh_fix_pr_backlog(self.c)
+        repair_tick.refresh_fix_pr_backlog(self.c, {})
         data = json.loads((self.state / 'repair/fix-pr-backlog.json').read_text())
         self.assertEqual((data['open'], data['limit']), (3, 2))
         self.assertEqual(repair_tick.TICK_BACKLOG, {'open': 3, 'limit': 2})
 
+    def test_refresh_counts_only_backfill_owned_legacy_retry_branches(self):
+        self.prs.extend({'headRefName': 'crq/fix-revalidated-' + name}
+                        for name in ('backfill', 'ordinary', 'unknown'))
+        queue = {'items': [
+            {'id': 'backfill-finding-a',
+             'repair_runs': {'revalidated-backfill': {}, 'revalidated-closed': {}}},
+            {'id': 'pr9', 'repair_runs': {'revalidated-ordinary': {}}},
+        ]}
+        repair_tick.refresh_fix_pr_backlog(self.c, queue)
+        self.assertEqual(repair_tick.TICK_BACKLOG['open'], 4)
+
     def test_failed_gh_call_keeps_previous_file_and_holds_this_tick(self):
-        repair_tick.refresh_fix_pr_backlog(self.c)
+        repair_tick.refresh_fix_pr_backlog(self.c, {})
         before = (self.state / 'repair/fix-pr-backlog.json').read_text()
         def boom(argv):
             raise RuntimeError('gh down')
         self.c.gh_json = boom
-        self.assertIsNone(repair_tick.refresh_fix_pr_backlog(self.c))
+        self.assertIsNone(repair_tick.refresh_fix_pr_backlog(self.c, {}))
         self.assertEqual((self.state / 'repair/fix-pr-backlog.json').read_text(), before)
         self.assertFalse(repair_tick.backfill_slot_free({'id': 'backfill-finding-x'}))
         self.assertTrue(repair_tick.backfill_slot_free({'id': 'pr5'}))
@@ -198,7 +209,8 @@ class TickScopeTest(unittest.TestCase):
         seen = []
         q = {'items': [{'id': 'backfill-finding-a', 'state': 'repairing', 'kind': 'merged',
                         'repair_runs': {'r': {}}}]}
-        def refresh(c):
+        def refresh(c, queue):
+            self.assertIs(queue, q)
             seen.append(('refresh', dict(repair_tick.TICK_BACKLOG), crq._FORGE_BUDGET.remaining))
             repair_tick.TICK_BACKLOG.update(open=2, limit=36)
         def harvest(c, queue, item):

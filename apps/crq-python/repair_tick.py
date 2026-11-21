@@ -600,10 +600,11 @@ def review_start_limit(c, now=None):
     return started * BACKLOG_HOURS_OF_CAPACITY // BACKLOG_WINDOW_HOURS
 
 
-def refresh_fix_pr_backlog(c):
+def refresh_fix_pr_backlog(c, q):
     """Write state/repair/fix-pr-backlog.json once per tick, before any publish.
 
-    Counts open fix PRs on GitHub, never the queue: its cached state lags. A
+    GitHub determines which PRs are open. Queue records identify legacy retry
+    branches whose names alone cannot distinguish backfill from ordinary work. A
     failed read leaves the previous file for the drain and holds creation for
     the rest of this tick.
     """
@@ -612,7 +613,17 @@ def refresh_fix_pr_backlog(c):
     try:
         prs = c.gh_json(['pr', 'list', '--repo', c.REPO, '--state', 'open', '--limit', '1000',
                          '--json', 'headRefName'])
-        open_count = sum(1 for pr in prs if str(pr.get('headRefName', '')).startswith(BACKFILL_BRANCH))
+        # Older backfill retries used the same branch prefix as ordinary retries.
+        legacy_backfill = {
+            'crq/fix-' + run
+            for item in q.get('items', [])
+            if str(item.get('id', '')).startswith(BACKFILL_ITEM)
+            for run in (item.get('repair_runs') or {})
+            if run.startswith('revalidated-')
+        }
+        open_branches = (str(pr.get('headRefName', '')) for pr in prs)
+        open_count = sum(branch.startswith(BACKFILL_BRANCH) or branch in legacy_backfill
+                         for branch in open_branches)
         limit = review_start_limit(c)
         atomic(c.STATE / 'repair' / 'fix-pr-backlog.json',
                {'at': dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
@@ -708,7 +719,12 @@ def publish(c, q, item, run, record, fixed):
                 raise ValueError('PR moved during publication; retry on fresh head')
             remote_branch = record['branch']
         else:
-            remote_branch = 'crq/fix-' + run
+            # The item's backfill status, not the run id, picks the prefix: a
+            # prepared retry (revalidated- run) on a backfill item must keep
+            # the counted backfill prefix or its PR escapes the cap on later
+            # ticks, while ordinary fix PRs stay outside it.
+            prefix = BACKFILL_BRANCH if str(item.get('id', '')).startswith(BACKFILL_ITEM) else 'crq/fix-'
+            remote_branch = prefix + run
         publication = {'head': head, 'target': target, 'branch': remote_branch,
                        'commits': translated, 'open_pr': bool(info), 'at': c.iso()}
         journal = c.STATE / 'repair' / record['jobs'][0] / 'publication.json'
