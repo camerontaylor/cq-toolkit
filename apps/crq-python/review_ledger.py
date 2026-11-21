@@ -649,40 +649,49 @@ class GitLedger:
         validate_sequence(values)
         return values
 
-    def fetch(self):
+    def fetch(self, attempts=3):
         # Bind rollback protection before network I/O; another validator may
         # advance the checkpoint while this invocation obtains its snapshot.
         checkpoint = "refs/crq/review-ledger-validated"
-        previous = self.git("rev-parse", "--verify", "--quiet", checkpoint, check=False).decode().strip()
-        ref = "refs/crq/ledger-fetch/" + uuid.uuid4().hex
-        try:
-            self.git("fetch", "--no-tags", "--no-write-fetch-head", self.remote, "refs/heads/" + self.branch + ":" + ref)
-            head = self.git("rev-parse", ref).decode().strip()
-        finally:
-            self.git("update-ref", "-d", ref)
-        if previous and subprocess.run(["git", "merge-base", "--is-ancestor", previous, head], cwd=self.repo, capture_output=True).returncode:
-            raise IntegrityError("ledger head is not a descendant of validated history")
-        values = self.read(head)
         def ancestor(a, b):
             return subprocess.run(["git", "merge-base", "--is-ancestor", a, b],
                                   cwd=self.repo, capture_output=True).returncode == 0
 
-        expected = previous or "0" * len(head)
-        for _ in range(8):
+        for _ in range(attempts):
+            previous = self.git("rev-parse", "--verify", "--quiet", checkpoint, check=False).decode().strip()
+            ref = "refs/crq/ledger-fetch/" + uuid.uuid4().hex
             try:
-                self.git("update-ref", checkpoint, head, expected)
-                break
-            except subprocess.CalledProcessError:
-                latest = self.git("rev-parse", "--verify", checkpoint).decode().strip()
-                # Never move the checkpoint backward; advance past an older concurrent validation.
-                if ancestor(head, latest):
+                self.git("fetch", "--no-tags", "--no-write-fetch-head", self.remote, "refs/heads/" + self.branch + ":" + ref)
+                head = self.git("rev-parse", ref).decode().strip()
+            finally:
+                self.git("update-ref", "-d", ref)
+            if previous and not ancestor(previous, head):
+                raise IntegrityError("ledger head is not a descendant of validated history")
+            values = self.read(head)
+            stale = False
+            expected = previous or "0" * len(head)
+            for _ in range(8):
+                try:
+                    self.git("update-ref", checkpoint, head, expected)
                     break
-                if not ancestor(latest, head):
-                    raise IntegrityError("validated checkpoint diverged from ledger head")
-                expected = latest
-        else:
-            raise IntegrityError("validated checkpoint contention")
-        return head, values
+                except subprocess.CalledProcessError:
+                    latest = self.git("rev-parse", "--verify", checkpoint).decode().strip()
+                    # Never move the checkpoint backward; advance past an older
+                    # concurrent validation. Equal heads are success, but a
+                    # checkpoint strictly newer than this head makes the whole
+                    # snapshot stale: refetch so publication cannot append
+                    # behind the validated checkpoint.
+                    if ancestor(head, latest):
+                        stale = head != latest
+                        break
+                    if not ancestor(latest, head):
+                        raise IntegrityError("validated checkpoint diverged from ledger head")
+                    expected = latest
+            else:
+                raise IntegrityError("validated checkpoint contention")
+            if not stale:
+                return head, values
+        raise IntegrityError("ledger head is older than the validated checkpoint")
 
     def publish(self, outbox, attempts=3):
         common = self.git("rev-parse", "--git-common-dir").decode().strip()
