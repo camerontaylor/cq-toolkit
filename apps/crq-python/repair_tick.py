@@ -1316,6 +1316,9 @@ def merge_head_evidence(c, record, actual_head):
             total_bytes += head_size
             if head_size > MAX_CONTAINMENT_PATCH_BYTES or total_bytes > MAX_CONTAINMENT_TOTAL_BYTES:
                 raise ValueError('published repair change too large to verify; needs revalidation: ' + path)
+            if any(line.startswith('Binary files ') or line.startswith('GIT binary patch')
+                   for line in head_patch.splitlines()):
+                raise ValueError('merged repair source changed; needs revalidation: ' + path)
             undone = change_undone(diff_changed_locations(published_patch),
                                    diff_changed_locations(head_patch))
             if undone or (mode_changed and after[0] != before[0]):
