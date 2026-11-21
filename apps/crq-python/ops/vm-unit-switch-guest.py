@@ -858,23 +858,24 @@ def completion_baseline(entries):
             "invocations": set(item.get("invocation") for item in entries)}
 
 
-def completion_logged(item, log_entries):
+def completion_logged(item, log_entries, unit=UNIT):
     """Journal completion evidence must match a real fixture log entry."""
     return any(isinstance(entry, dict)
                and type(entry.get("sequence")) is int
                and entry.get("sequence") == item.get("sequence")
                and entry.get("invocation") == item.get("invocation")
-               and entry.get("unit") == UNIT
+               and entry.get("unit") == unit
                and entry.get("runtime") == item.get("runtime")
                and entry.get("success") is True
                for entry in log_entries)
 
 
-def validate_completed(record, runtime, prior, baseline, log_entries):
+def validate_completed(record, runtime, prior, baseline, log_entries,
+                       unit=UNIT):
     require(record["outcome"] == "completed", "switch did not complete")
     require(record["phase"] == "activation_pending",
             "completed record has the wrong phase")
-    require(record["unit"] == UNIT and record["runtime"] == runtime,
+    require(record["unit"] == unit and record["runtime"] == runtime,
             "completed record runtime or unit mismatch")
     require(record["prior_runtime"] == prior,
             "completed record prior runtime mismatch")
@@ -892,10 +893,10 @@ def validate_completed(record, runtime, prior, baseline, log_entries):
     require(len(set(invocations)) == 2, "completion invocations are not distinct")
     require(not set(invocations) & baseline["invocations"],
             "completion invocations were already recorded before the switch")
-    require(all(item.get("unit") == UNIT and item.get("runtime") == runtime
+    require(all(item.get("unit") == unit and item.get("runtime") == runtime
                 and item.get("success") is True for item in evidence),
             "completion evidence is not unit/runtime bound")
-    require(all(completion_logged(item, log_entries) for item in evidence),
+    require(all(completion_logged(item, log_entries, unit) for item in evidence),
             "completion evidence is absent from the fixture completion log")
     return {"sequences": sequences, "invocations": invocations}
 
@@ -2625,14 +2626,9 @@ def activators_switch_back(args):
             "switch back record names another runtime")
     require(record.get("prior_runtime") == NODE_RUNTIME,
             "switch back record names another prior runtime")
-    completions = record.get("completions") or []
-    require(len(completions) == 2,
-            "switch back record does not retain two completions")
-    baseline = max((item.get("sequence", 0)
-                    for item in before["repair_completions"]), default=0)
-    require(all(type(item.get("sequence")) is int
-                and item["sequence"] > baseline for item in completions),
-            "switch back completions do not advance past the baseline")
+    validate_completed(record, PYTHON_RUNTIME, NODE_RUNTIME,
+                       completion_baseline(before["repair_completions"]),
+                       after["repair_completions"], unit=REPAIR_UNIT)
     expected_service = repair_adapter().render_unit(PYTHON_RUNTIME)
     require(after["repair_files"]["service"]["sha256"]
             == sha256_bytes(expected_service.encode()),
