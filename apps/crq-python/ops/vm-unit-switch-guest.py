@@ -1339,8 +1339,8 @@ def recover_phase(args, kill=None, record_dir=RECORDS, label="recover"):
 
 def recover_kill_phase(args):
     payload = recover_phase(args, kill="drain")
-    require(payload["cli"]["rc"] not in (0, None),
-            "interrupted recovery unexpectedly returned success")
+    require(payload["cli"]["rc"] == -9,
+            "interrupted recovery was not terminated by SIGKILL at the drain hook")
     require(payload["record_after"]["sha256"] == payload["record_before"]["sha256"],
             "interrupted recovery changed the retained record")
     require(payload["record_after"]["outcome"] == "pending"
