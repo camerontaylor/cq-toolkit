@@ -2773,7 +2773,7 @@ class RepairDrainTest(unittest.TestCase):
         self.config['repair']['blackout'] = dict(BLACKOUT)
         clock = [1000.0]
         outcomes = iter([{'stop': 'rate-limit'}, {'stop': 'ok', 'changed': False}])
-        def run(*args):
+        def run(*args, **kwargs):
             clock[0] += 15 * 60 if clock[0] == 1000.0 else 0
             return next(outcomes)
         with mock.patch.dict(os.environ, {'ZAI_API_KEY': 'fixture', 'DEEPSEEK_API_KEY': 'fixture'}), \
