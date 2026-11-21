@@ -92,9 +92,9 @@ journaled `target`, and the stale and finalize outcomes. What
   already at `sha` after a failed push as success.
 - The real bindings of `finalize_publication`'s effects (below): its state
   transitions are ported, see S6-i.
-- The first-publication arm of `publish` (journal absent): cherry-pick replay,
-  hack and secret scans, the `refs/crq/publication/<run>` ref and the journal
-  write. `publish` with an existing journal is `recoverPublication`.
+- The first-publication arm of `publish` (journal absent): its decision
+  sequence is ported, see S6-j. The real cherry-pick replay and the scans stay
+  unbound. `publish` with an existing journal is `recoverPublication`.
 - The journal read (`publication.json`) and `record`/`queue` persistence.
 
 S6-i (inactive): `finalizePublication`
@@ -118,6 +118,36 @@ ledger), `writeFixPrBody` and `writeJournal` (`fix-pr.md`, `publication.json`),
 `refreshFixPrBacklog`. Narrowings: PR numbers are modelled as integers (`str()` of
 a float, bool or `None` differs), and a non-list `commits` or
 `repair_own_commits` is a `TypeError` where Python would iterate a string.
+
+S6-j (inactive): `publishRepair` (`src/queue-runner/publicationPublish.ts`) is
+`repair_tick.publish` (`repair_tick.py:665`) over injected effects, to be bound as
+`repair_harvest`'s `publish`. Pinned in
+`test/queue-runner/publicationPublish.test.ts`, which mirrors
+`test_repair_replay.py`, `test_repair_publication_lease.py` and
+`test_repair_backlog.py`: a present journal is `recoverPublication` with
+`finalizePublication` as its finalize and nothing else (no worktree, replay or
+new journal); the pre-worktree `stale` marks (closed PR, base not an ancestor of
+the PR head); the replay's stale-versus-retry split (a recorded `CHERRY_PICK_HEAD`
+with conflicts or an empty index is `stale`, truncated to 200 code points, any
+other failure propagates); each repair verified over its own claimed range; the
+hack scan (any `ValueError`, including `DetectorUnavailable`, rewrapped as
+`publication <message>`) and the secret scan, both before anything is journaled;
+the open-PR re-read refusal; the #2288 item-owned branch name (a backfill _item_
+keeps `crq/fix-backfill-<run>` even for a prepared `revalidated-` run, an
+ordinary item `crq/fix-<run>`, an open-PR publication the record's branch); and
+the ordering `update-ref refs/crq/publication/<run>`, journal, `record.publication`,
+queue save, then the fast-forward refusal (after the journal, so the next tick
+recovers and refuses again), then the leased push (the PR target, `''` for a new
+branch), then finalize, with the worktree always removed. Composed with
+`finalizePublication` the tests show a backfill item taking and holding a slot.
+Effects still unbound, all in the publish worktree or state tree: `makeWorktree`
+and `removeWorktree` (`c.make_worktree`), the Git reads and `cherryPick`,
+`verify` (`crq_repair.verify`), `hackDetector` (`crq_repair.hack_detector` over
+`cq gates.hackDetector`, 120 KB argv cap), `secretScan` (`c.secret_scan`),
+`updateRef`, `readJournal`/`writeJournal`/`writePatch`, `saveQueue`, `push` and the
+`FixPrBacklog`. Narrowings: a non-list `commits` is a `TypeError` where Python
+would iterate a string, a non-string commit or SHA likewise, and `bool(info)` is
+modelled as a non-null PR view.
 
 Closed in S6-g, kept here as the record:
 
