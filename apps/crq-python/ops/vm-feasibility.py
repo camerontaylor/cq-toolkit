@@ -1521,7 +1521,9 @@ def stop_owned_process(run: dict, *, purge: bool,
 
 
 def _stop_owned_process(run: dict, *, purge: bool) -> dict:
-    run_dir = pathlib.Path(run["path"])
+    # QEMU receives the resolved overlay path, so the ownership needle must be
+    # built from the resolved run directory, not a symlinked alias of it.
+    run_dir = pathlib.Path(run["path"]).resolve()
     identity_path = run_dir / "process.json"
     identity = None
     if identity_path.exists():
