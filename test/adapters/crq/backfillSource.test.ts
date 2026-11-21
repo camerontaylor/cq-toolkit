@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
@@ -64,6 +64,24 @@ describe('backfill adapter', () => {
       // missing file means this is not the state root.
       await expect(effects.readQueue()).rejects.toThrow();
       await expect(effects.readTriage()).resolves.toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('the baseline is read as bytes and the accounting seam exists only with a clone', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cq-backfill-adapter-'));
+    try {
+      await mkdir(join(root, 'backfill'));
+      const bytes = new Uint8Array([0x7b, 0xff, 0x7d]);
+      await writeFile(join(root, 'backfill', 'baseline.json'), bytes);
+      // Raw bytes survive: a utf8 decode would have replaced 0xff before
+      // `ledger.loads` could refuse it.
+      await expect(fileBackfillInventoryEffects(root).readBaseline()).resolves.toEqual(
+        Buffer.from(bytes),
+      );
+      expect(fileBackfillInventoryEffects(root).accounting?.()).toBeNull();
+      expect(fileBackfillInventoryEffects(root, { cloneRoot: root }).accounting?.()).not.toBeNull();
     } finally {
       await rm(root, { recursive: true, force: true });
     }
