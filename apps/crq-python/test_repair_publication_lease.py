@@ -48,7 +48,7 @@ class RecoverPublicationLeaseTest(unittest.TestCase):
     def test_open_pr_push_leases_on_the_journaled_target_not_the_stale_remote_read(self):
         # ls-remote reports a maintainer-reset ancestor; the PR head is the journaled target.
         pr = {"state": "OPEN", "headRefName": BRANCH, "headRefOid": TARGET}
-        c = FakeClient(remote=STALE, pr=pr, ancestors={(TARGET, HEAD)})
+        c = FakeClient(remote=STALE, pr=pr, ancestors={(TARGET, HEAD), (STALE, HEAD)})
         finalize, _ = run(c, open_pr=True)
         self.assertEqual(c.pushes, [("push", "origin", "--force-with-lease=refs/heads/" + BRANCH + ":" + TARGET,
                                      HEAD + ":refs/heads/" + BRANCH)])
