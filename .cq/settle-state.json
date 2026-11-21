@@ -15,32 +15,6 @@
         }
       ]
     },
-    "2272": {
-      "tuple": {
-        "head": "e2084b3b9db22d35a7ced080bbca0e171e9c916d",
-        "base": "005f1fa2b84c2b7b1c11d3428c7b7edc962aef3d",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-21T02:32:24.200Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "2273": {
-      "tuple": {
-        "head": "0e3ef139a551b4beaa1775cb9315122a93ce40ba",
-        "base": "005f1fa2b84c2b7b1c11d3428c7b7edc962aef3d",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-21T02:31:10.444Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
     "2275": {
       "tuple": {
         "head": "8012fdfab6a453a47886749c1b118968b0bc95a4",
