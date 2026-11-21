@@ -285,10 +285,42 @@ argv, order and failure classes with a scripted process, and drives
 `publishRepair` over real reads, worktrees and verify. No network, credential,
 forge or remote; the adapter only reads. Nothing imports it outside tests.
 
-Still unwired after S6-l, S6-m, S6-n, S6-o and S6-p: `push` (the leased remote
-write), `createPr` (forge write), `hackDetector`, `secretScan` and
-`repairProvenance`, `newItem` and the `FixPrBacklog`, plus the binding of any of
-these into `tick`.
+S6-q (inactive): `gitPublicationSecretScan`
+(`src/adapters/crq/publicationSecretScan.ts`) binds `secretScan`,
+`c.secret_scan(target, head, STATE/repair/<job>/publication-secret-scan.json)`,
+the defensive scan `publish` runs over the final rebased publication after the
+hack detector and before the ref update. It does not re-implement the engine:
+`scanReviewDiff` (the port of `secret_scan_diff`) and the review matcher and
+gitleaks bindings are reused, and the module binds what `secret_scan` does around
+them, in Python's order: the `--unified=0` diff, the base commit's
+`.crq/scan-exemptions.toml`, `origin/main:policy/denylist/patterns.yml`, the scan,
+and the report written with `Path.write_text` semantics (no `mkdir`; a dirty
+verdict writes it too). A dirty verdict is `false`, which `publishRepair` turns
+into `ValueError`; a refusal skips the ref update, journal, queue save and push
+but leaves `publication.patch` and the report. Failure classes: a non-zero Git
+read is `RuntimeError` with Python's `c.git` text (built from Python's argv), a
+call with no exit code is `OSError`, invalid UTF-8 is `ValueError`, unusable
+patterns are `RuntimeError('denylist parse failed (fail closed)')`, an
+unwritable report is `OSError`, and an unavailable matcher or gitleaks writes no
+report and throws. Parity points kept: exemptions come from the base commit only
+(a head cannot exempt itself); the blob read is unchecked as in Python, so a
+non-zero exit is an empty document (no exemptions, no error) while an
+unanswered or undecodable read is `exemption_error`; either way exemptions are
+only lost, which adds hits. Narrowings, all refusals or more scanning: base and
+head must be 40-hex, the diff adds the hardened flags (binary and renamed files
+are scanned by content), quoted paths are decoded, the patterns parser is strict
+and the job id must match the repair grammar. `repairJobDir` and `writeText` are
+now exported from `publicationFiles.ts` for the report path.
+`test/adapters/crq/publicationSecretScan.test.ts` runs the real
+`crq.secret_scan` (`test/helpers/publicationSecretScanOracle.py`) over 30
+throwaway local cases with synthetic patterns and a fake gitleaks (verdict,
+error class and text, report bytes), pins the argv and failure classes with a
+scripted process, and drives `publishRepair` over real repositories. No real
+secret, network, forge or provider; nothing imports it outside tests.
+
+Still unwired after S6-l, S6-m, S6-n, S6-o, S6-p and S6-q: `push` (the leased
+remote write), `createPr` (forge write), `hackDetector` and `repairProvenance`,
+`newItem` and the `FixPrBacklog`, plus the binding of any of these into `tick`.
 
 Closed in S6-g, kept here as the record:
 

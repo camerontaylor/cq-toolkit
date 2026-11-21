@@ -92,7 +92,7 @@ async function asOsError<T>(work: () => Promise<T>): Promise<T> {
  * with a lone surrogate therefore leaves the file empty and raises
  * `UnicodeEncodeError` (a `ValueError`), where Node would write U+FFFD.
  */
-async function writeText(path: string, text: string): Promise<void> {
+export async function writeText(path: string, text: string): Promise<void> {
   await asOsError(async () => {
     const file = await open(path, 'w');
     try {
@@ -128,17 +128,19 @@ async function atomicJson(path: string, value: unknown): Promise<void> {
   await asOsError(() => atomicWrite(path, text));
 }
 
+/** `STATE / 'repair' / record['jobs'][0]`, for a job id that matches the repair grammar. */
+export function repairJobDir(stateRoot: string, jobId: unknown): string {
+  if (typeof jobId !== 'string') {
+    throw new PyError('TypeError', 'repair job id must be a str');
+  }
+  if (!checkRepairJobId(jobId)) throw new PyError('ValueError', 'invalid repair job id');
+  return join(stateRoot, 'repair', jobId);
+}
+
 export function filePublicationEffects(options: PublicationFilesOptions): PublicationFileEffects {
   const { stateRoot } = options;
   const queuePath = options.queuePath ?? join(stateRoot, 'queue.json');
-  /** `STATE / 'repair' / record['jobs'][0]`. */
-  const jobDir = (jobId: unknown): string => {
-    if (typeof jobId !== 'string') {
-      throw new PyError('TypeError', 'repair job id must be a str');
-    }
-    if (!checkRepairJobId(jobId)) throw new PyError('ValueError', 'invalid repair job id');
-    return join(stateRoot, 'repair', jobId);
-  };
+  const jobDir = (jobId: unknown): string => repairJobDir(stateRoot, jobId);
 
   return {
     async readJournal(jobId) {
