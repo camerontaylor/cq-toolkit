@@ -431,6 +431,16 @@ describe('repairHarvest open runs (differential vs repair_tick.harvest)', () => 
     await same({ ...spec, dry: true });
   });
 
+  it('keeps the run retryable while the triage row is unreadable', async () => {
+    const spec: Spec = {
+      item: item(),
+      files: files([J1, job(J1), fixed(J1)]),
+      stale: { [J1]: 'value:canonical delivery state unavailable' },
+    };
+    await same(spec);
+    await same({ ...spec, dry: true });
+  });
+
   it('lets any other canonical-delivery failure escape', async () => {
     await same({
       item: item(),

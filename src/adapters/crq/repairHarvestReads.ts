@@ -1,5 +1,5 @@
 /**
- * File-backed reads for the repair harvest (repair_tick.py:422-578): the inbox
+ * File-backed reads for the repair harvest (repair_tick.py:422-584): the inbox
  * job, the result artifact and `Path.resolve()`. Inactive: nothing imports
  * this outside tests. Verification, worktrees, the finding ledger and
  * publication stay injected; they have no TS wiring yet.
