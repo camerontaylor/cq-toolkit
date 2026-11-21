@@ -474,8 +474,16 @@ def harvest(c, q, item, dry=False):
                 break
             expected = json.loads((c.STATE / 'repair/inbox' / (job_id + '.json')).read_text())
             try:
-                require_canonical_delivery(c.STATE.parent, expected)
+                require_canonical_delivery(c.STATE.parent, expected, written_back=True,
+                                           retained=lambda: finding_inbox(c).publication.retained())
             except ValueError as exc:
+                if 'canonical delivery state unavailable' in str(exc):
+                    # An unreadable triage row leaves ownership unproven, not
+                    # lost: unlike a confirmed mismatch this can pass on a later
+                    # tick, so keep the run retryable instead of stranding the
+                    # retained verified result in a terminal state. Publish
+                    # nothing from this tick.
+                    break
                 if not dry:
                     record.update(state='stale', error=str(exc))
                     item['state'] = 'done'

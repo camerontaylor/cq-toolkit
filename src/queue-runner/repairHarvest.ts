@@ -1,5 +1,5 @@
 /**
- * The queue side of `repair_tick.harvest` (repair_tick.py:422-578), with
+ * The queue side of `repair_tick.harvest` (repair_tick.py:422-584), with
  * `record_terminal_failure` and `record_unpublished_siblings` (:339-421).
  * Inactive: nothing imports this outside tests.
  *
@@ -49,7 +49,18 @@ export interface RepairHarvestEffects {
    * a `ValueError` (harvest terminalizes it); a read failure is an `OSError`.
    */
   readResult(jobId: string): Promise<unknown>;
-  /** `require_canonical_delivery(STATE.parent, job)`; a stale selection is a `ValueError`. */
+  /**
+   * `require_canonical_delivery(STATE.parent, job)`. A confirmed ownership
+   * mismatch is a `ValueError` (the run terminalizes as `stale`); the literal
+   * `canonical delivery state unavailable` read failure stays retryable
+   * without publishing. It is Python's `written_back=True` form: a row an
+   * earlier job of this same run already wrote back (status `fixed`,
+   * `needs-retriage`, `needs-human` or `dismissed`, receipt still naming this
+   * task) is owned only when its `previous_event_id` names this job's own
+   * retained `repair-outcome` event (actor `crq-repair`, same `repair_task`,
+   * action equal to the row status); an operator disposition that kept the
+   * receipt is a mismatch, as is any row naming another task.
+   */
   requireCanonicalDelivery(job: Rec): Promise<void>;
   /** `Path(p).resolve()`: a non-string never reaches it; an embedded NUL is a `ValueError`. */
   resolvePath(path: string): Promise<string>;
@@ -452,6 +463,13 @@ export async function repairHarvest(
         await fx.requireCanonicalDelivery(expected);
       } catch (e) {
         if (!isPyError(e, 'ValueError')) throw e;
+        if (excText(e).includes('canonical delivery state unavailable')) {
+          // An unreadable triage row leaves ownership unproven, not lost:
+          // unlike a confirmed mismatch this can pass on a later tick, so keep
+          // the run retryable instead of stranding the retained verified
+          // result in a terminal state. Publish nothing from this tick.
+          break;
+        }
         if (!dry) {
           record.state = 'stale';
           record.error = excText(e);

@@ -297,3 +297,117 @@ class ChangeUndoneLocationTest(unittest.TestCase):
     def test_replacement_text_at_another_location_is_not_an_undo(self):
         published = '@@ -4 +3,0 @@\n-gone\n'
         self.assertEqual(self.undone(published, '@@ -7 +7,2 @@\n-hold\n+gone\n+keep\n'), [])
+
+
+class ResumedHarvestOwnershipTest(unittest.TestCase):
+    """A resumed run keeps a sibling's own write-back from reading as lost ownership."""
+    ITEM = 'item1'
+    J1, J2 = 'crq-run1-F1', 'crq-run1-F2'
+    F1, F2 = '1' * 64, '2' * 64
+    BASE = 'c' * 40
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.state = self.root / 'state'
+        self.triage = self.state / 'backfill/findings/triage'
+        self.triage.mkdir(parents=True)
+        (self.state / 'repair/inbox').mkdir(parents=True)
+        self.item = {'id': self.ITEM, 'kind': 'merged', 'state': 'repairing', 'repair_runs': {
+            'run1': {'jobs': [self.J1, self.J2], 'base': self.BASE, 'state': 'queued'}}}
+        self.c = SimpleNamespace(STATE=self.state, WT_ROOT=self.root / 'wt', CLONE=self.root / 'clone',
+                                 ROOT=self.root, CONFIG={'repair': {}}, iso=lambda: 'T',
+                                 save_queue=mock.Mock(), make_worktree=mock.Mock(side_effect=RuntimeError('verify reached')))
+        for job, fid in ((self.J1, self.F1), (self.J2, self.F2)):
+            (self.state / 'repair' / job).mkdir(parents=True)
+            self.write(self.state / 'repair/inbox' / (job + '.json'),
+                       {'job': job, 'item': self.ITEM, 'canonical_finding_id': fid,
+                        'finding': {'id': job}})
+        self.write(self.state / 'repair' / self.J1 / 'result.json',
+                   {'job': self.J1, 'item': self.ITEM, 'verdict': 'NOT-FIXED', 'reason': 'no'})
+        self.write(self.state / 'repair' / self.J2 / 'result.json',
+                   {'job': self.J2, 'item': self.ITEM, 'verdict': 'FIXED', 'reason': 'ok',
+                    'commits': ['d' * 40], 'attempts': [{'rung': 'A0'}], 'repair_base': self.BASE,
+                    'worktree': str(self.c.WT_ROOT / ('crq-repair-' + self.ITEM + '-' + self.J2))})
+
+    @staticmethod
+    def write(path, value):
+        path.write_text(json.dumps(value))
+
+    def row(self, fid, status, task, event=None):
+        self.write(self.triage / (fid + '.json'),
+                   {'status': status, 'receipt': {'repair_task': task}, 'previous_event_id': event})
+
+    def outcome_event(self, fid, task, action, actor='crq-repair', key='repair-outcome:t', evidence=None):
+        event = {'id': 'ev-' + task, 'event_type': 'finding-event', 'source_key': key,
+                 'payload': {'finding_id': fid, 'actor': actor, 'action': action,
+                             'evidence': {'repair_task': task} if evidence is None else evidence}}
+        self.events.append(event)
+        return event['id']
+
+    def writeback(self, _c, job, result, *args, **kwargs):
+        # What mark_finding_outcome leaves behind: status off `delivered`, receipt kept,
+        # previous_event_id naming this task's repair-outcome event.
+        fid = job['canonical_finding_id']
+        self.row(fid, 'needs-retriage', job['job'], self.outcome_event(fid, job['job'], 'needs-retriage'))
+
+    def run(self, result=None):
+        self.events = []
+        inbox = SimpleNamespace(publication=SimpleNamespace(retained=lambda: list(self.events)))
+        with mock.patch.object(repair_tick, 'finding_inbox', return_value=inbox):
+            return super().run(result)
+
+    def assert_stale(self, f1_status='needs-human', **event):
+        self.row(self.F1, f1_status, self.J1, self.outcome_event(self.F1, self.J1, f1_status, **event))
+        self.row(self.F2, 'delivered', self.J2)
+        with mock.patch.object(repair_tick, 'mark_finding_outcome') as mark:
+            repair_tick.harvest(self.c, {}, self.item)
+        self.assertEqual(self.item['repair_runs']['run1']['state'], 'stale')
+        mark.assert_not_called()
+        self.c.make_worktree.assert_not_called()
+
+    def test_operator_disposition_keeping_the_receipt_is_a_mismatch(self):
+        self.assert_stale('dismissed', actor='operator', key='finding:x',
+                          evidence={'reason': 'manual'})
+
+    def test_repair_actor_event_for_another_task_is_a_mismatch(self):
+        self.assert_stale(evidence={'repair_task': 'crq-other-F1'})
+
+    def test_disposition_whose_event_is_not_retained_is_a_mismatch(self):
+        self.row(self.F1, 'needs-human', self.J1, 'ev-missing')
+        self.row(self.F2, 'delivered', self.J2)
+        repair_tick.harvest(self.c, {}, self.item)
+        self.assertEqual(self.item['repair_runs']['run1']['state'], 'stale')
+
+    def test_sibling_writeback_does_not_strand_a_later_fixed_result(self):
+        self.row(self.F1, 'delivered', self.J1)
+        (self.triage / (self.F2 + '.json')).write_text('{')
+        with mock.patch.object(repair_tick, 'mark_finding_outcome', side_effect=self.writeback) as mark:
+            repair_tick.harvest(self.c, {}, self.item)
+            run = self.item['repair_runs']['run1']
+            self.assertEqual(run['state'], 'queued')
+            self.assertEqual(self.item['state'], 'repairing')
+            self.assertEqual(json.loads((self.triage / (self.F1 + '.json')).read_text())['status'], 'needs-retriage')
+            self.row(self.F2, 'delivered', self.J2)
+            with self.assertRaisesRegex(RuntimeError, 'verify reached'):
+                repair_tick.harvest(self.c, {}, self.item)
+        self.assertEqual(self.item['repair_runs']['run1']['state'], 'queued')
+        self.c.make_worktree.assert_called_once()
+        self.assertEqual(mark.call_count, 2)
+
+    def test_written_back_row_naming_another_task_is_still_a_mismatch(self):
+        self.row(self.F1, 'needs-retriage', 'crq-other-F1')
+        self.row(self.F2, 'delivered', self.J2)
+        with mock.patch.object(repair_tick, 'mark_finding_outcome') as mark:
+            repair_tick.harvest(self.c, {}, self.item)
+        self.assertEqual(self.item['repair_runs']['run1']['state'], 'stale')
+        self.assertEqual(self.item['state'], 'done')
+        mark.assert_not_called()
+        self.c.make_worktree.assert_not_called()
+
+    def test_unwritten_row_without_a_delivery_is_still_a_mismatch(self):
+        self.row(self.F1, 'confirmed', self.J1)
+        self.row(self.F2, 'delivered', self.J2)
+        repair_tick.harvest(self.c, {}, self.item)
+        self.assertEqual(self.item['repair_runs']['run1']['state'], 'stale')

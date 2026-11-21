@@ -172,7 +172,7 @@ def _harvest_case(name, outcome, *, row=None, seeds=(), replay=False,
             },
         }
 
-        def delivery(_root, _expected):
+        def delivery(_root, _expected, **_kwargs):
             if delivery_error is not None:
                 raise ValueError(delivery_error)
 
