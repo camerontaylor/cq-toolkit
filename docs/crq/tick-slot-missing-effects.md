@@ -113,8 +113,7 @@ exit (`RuntimeError`), and the #2290 requirement that the result be exactly one
 PR at the prepared `head` (else `ValueError`, nothing recorded or enrolled)
 before the item is enrolled and the record `published`. Effects still unbound:
 `listBranchPrs` (`gh pr list ... --state all`), `createPr` (`gh pr create`),
-`repairProvenance` (`repair_provenance`, reads inbox jobs, triage rows and the
-ledger), `writeFixPrBody` and `writeJournal` (`fix-pr.md`, `publication.json`),
+`repairProvenance` (bound in S6-r), `writeFixPrBody` and `writeJournal` (`fix-pr.md`, `publication.json`),
 `saveQueue`, `newItem` (`crq.new_item`) and the `FixPrBacklog` shared with
 `refreshFixPrBacklog`. Narrowings: PR numbers are modelled as integers (`str()` of
 a float, bool or `None` differs), and a non-list `commits` or
@@ -318,9 +317,49 @@ error class and text, report bytes), pins the argv and failure classes with a
 scripted process, and drives `publishRepair` over real repositories. No real
 secret, network, forge or provider; nothing imports it outside tests.
 
-Still unwired after S6-l, S6-m, S6-n, S6-o, S6-p and S6-q: `push` (the leased
-remote write), `createPr` (forge write), `hackDetector` and `repairProvenance`,
-`newItem` and the `FixPrBacklog`, plus the binding of any of these into `tick`.
+S6-r (inactive): `filePublicationProvenance`
+(`src/adapters/crq/publicationProvenance.ts`) binds `repairProvenance`,
+`repair_tick.repair_provenance(c, record, run)`, the provenance table
+`finalizePublication` appends after the verdict rows and before `writeFixPrBody`.
+It is read-only and reuses the existing readers: `readJsonValue`
+(`repairStateSource.ts`) for the job files, a local `exists` for `Path.exists()`
+(it stats the `os.fsencode` bytes, so a lone `U+DC80..U+DCFF` is the raw byte and
+any other lone surrogate does not exist, never Node's `U+FFFD`), pathlib-style
+joins that keep `..` (a symlinked state root resolves through the kernel),
+Python `str.strip()` blankness for the spool key, `checkBackfillRollout` (now split out of `readBackfillRollout`) and `sortedJsonNames`
+(now exported from `triageRows.ts`) for the retained-reviews lookup, `ledgerLoads`,
+`validate` and the ledger record path for the link. Pinned in order and text: the
+five header lines, then one row per job in record order; the finding-id and
+source-cell `or` chains (lazy, so `job['finding']` and `job['source']` are only
+dereferenced where Python reaches them, and a present `null` is not the `{}`
+default); a truthy `pr` is the PR URL with Python `str()` of the number (`7.0`,
+`1e+22`, `True`); otherwise the local locator, the source run's `review.ndjson`
+when it `exists()`, else the job file, joined and `relative_to`'d as `pathlib`
+does (dots and empty segments drop, an absolute segment replaces, a path outside
+`STATE.parent` is `ValueError`). A job with `canonical_finding_id` uses its triage
+row (or the job file) and then, once per call, the retained reviews: the review is
+found by `review_id` or `source.review_id`, must validate, belong to this repo and
+hold the finding, and links to `blob/cq/review-ledger/records/YYYY/MM/<id>.json`.
+Error ownership: `OSError`, `ValueError` and `KeyError` anywhere in the lookup
+collapse to no reviews, and `ValueError`, `KeyError` and `TypeError` in validation
+keep the local locator, but a `TypeError` (a non-string durable root, an
+unhashable review `id` or lookup key, even against an empty map) and a non-object
+rollout (`AttributeError`) escape and abort the table, as does any unreadable or
+malformed job file. `LedgerTypeError` is a `LedgerIntegrityError` yet is not a
+collapsed class. Narrowings, all refusals: a job id must match the repair grammar,
+`jobs` must be a list (a string or object would iterate characters or keys), and a
+`pr`, finding id or review id that is a list or object (`str()` of a container) is
+not modelled. `test/adapters/crq/publicationProvenance.test.ts` runs the real
+`repair_provenance` (`test/helpers/publicationProvenanceOracle.py`, with valid
+reviews built by the Python ledger) against the binding over throwaway synthetic
+state trees and compares the table or the exception family, then pins the exact
+text, the refusals, the `Pick<PublicationFinalizeEffects, 'repairProvenance'>`
+ownership and the composition inside `finalizePublication`. No real forge, network,
+provider or secret; nothing imports it outside tests.
+
+Still unwired after S6-l, S6-m, S6-n, S6-o, S6-p, S6-q and S6-r: `push` (the
+leased remote write), `createPr` (forge write), `hackDetector`, `newItem` and the
+`FixPrBacklog`, plus the binding of any of these into `tick`.
 
 Closed in S6-g, kept here as the record:
 
