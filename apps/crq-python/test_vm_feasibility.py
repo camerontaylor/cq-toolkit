@@ -872,8 +872,8 @@ class LifecycleTests(unittest.TestCase):
 
     def _run_probe_cli(self, script, state, commit):
         return subprocess.run(
-            [sys.executable, str(script), "run", "--source-commit", commit,
-             "--state-dir", str(state), "--json"],
+            [sys.executable, str(script), "--source-commit", commit,
+             "--state-dir", str(state), "--json", "run"],
             capture_output=True, text=True, timeout=120)
 
     def test_run_refuses_modified_bytes_before_any_preparation(self):
