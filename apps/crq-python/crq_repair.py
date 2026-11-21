@@ -1561,13 +1561,25 @@ def run(argv=None):
         narrate('repair dispatch refused: --triage-dry-run takes no job selector')
         return 2, {'status': 'refused', 'reason': '--triage-dry-run takes no job selector'}
     if args.triage_dry_run:
-        # triage_phase returns its report only when triage is configured and
-        # has a rollout; otherwise it returns None having written nothing, so
-        # report that explicitly to keep one JSON artifact per exit.
-        result = triage_phase(config, dry_run=True)
-        if result is None:
-            return 0, {'status': 'no-triage', 'reason': 'triage is not configured for this state directory'}
-        return 0, result
+        # dry_run stops delivery, not judging: the preview dispatches paid
+        # judgments with the same job identity and output directory the drain
+        # uses, so it must hold service.lock or a concurrent pass could start
+        # a second judgment on the same pending row. Return busy when another
+        # pass owns the lock.
+        directory = ROOT / 'state/repair'
+        directory.mkdir(parents=True, exist_ok=True)
+        with (directory / 'service.lock').open('a') as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return 0, {'status': 'busy', 'reason': 'service.lock held by another repair pass'}
+            # triage_phase returns its report only when triage is configured and
+            # has a rollout; otherwise it returns None having written nothing, so
+            # report that explicitly to keep one JSON artifact per exit.
+            result = triage_phase(config, dry_run=True)
+            if result is None:
+                return 0, {'status': 'no-triage', 'reason': 'triage is not configured for this state directory'}
+            return 0, result
     if any(supplied) and not all(supplied):
         narrate('repair dispatch refused: --job, --source-sha and --finding-sha256 go together')
         return 2, {'status': 'refused', 'reason': '--job, --source-sha and --finding-sha256 go together'}
