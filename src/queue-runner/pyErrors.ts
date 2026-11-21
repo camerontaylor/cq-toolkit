@@ -12,6 +12,7 @@ export type PyErrorKind =
   | 'IndexError'
   | 'OSError'
   | 'RuntimeError'
+  | 'AttributeError'
   /** `crq_repair.DetectorUnavailable`, a `ValueError` subclass. */
   | 'DetectorUnavailable';
 

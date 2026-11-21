@@ -90,12 +90,34 @@ journaled `target`, and the stale and finalize outcomes. What
   differs from the one Python raises (`recoverPublication` refuses first with
   Python's text). Unlike Python's `git push origin`, it also treats a remote
   already at `sha` after a failed push as success.
-- `finalize_publication` (`repair_tick.py:804`): PR creation or body edit, the
-  `repair_own_commits` and `published_commits` bookkeeping and its rollback.
+- The real bindings of `finalize_publication`'s effects (below): its state
+  transitions are ported, see S6-i.
 - The first-publication arm of `publish` (journal absent): cherry-pick replay,
   hack and secret scans, the `refs/crq/publication/<run>` ref and the journal
   write. `publish` with an existing journal is `recoverPublication`.
 - The journal read (`publication.json`) and `record`/`queue` persistence.
+
+S6-i (inactive): `finalizePublication`
+(`src/queue-runner/publicationFinalize.ts`) is `repair_tick.finalize_publication`
+(`repair_tick.py:804`) over injected effects, to be passed as
+`recoverPublication`'s `finalize`. Pinned in
+`test/queue-runner/publicationFinalize.test.ts`: the `record.publication`,
+`repair_own_commits` (deduped as `list.extend(generator)` does, repeats inside
+one publication too) and `published_commits` writes; the same-PR `last_push` and
+`fix_pr`; the branch arm's listing, then attempts limit (`stale`, bookkeeping
+kept), then the #2288 backlog hold (bookkeeping restored, no attempt counted),
+then body, journal (`pr_create_pending`, `pr_create_attempts`) and queue save
+before the create, the slot reserved before and released only on a `gh` non-zero
+exit (`RuntimeError`), and the #2290 requirement that the result be exactly one
+PR at the prepared `head` (else `ValueError`, nothing recorded or enrolled)
+before the item is enrolled and the record `published`. Effects still unbound:
+`listBranchPrs` (`gh pr list ... --state all`), `createPr` (`gh pr create`),
+`repairProvenance` (`repair_provenance`, reads inbox jobs, triage rows and the
+ledger), `writeFixPrBody` and `writeJournal` (`fix-pr.md`, `publication.json`),
+`saveQueue`, `newItem` (`crq.new_item`) and the `FixPrBacklog` shared with
+`refreshFixPrBacklog`. Narrowings: PR numbers are modelled as integers (`str()` of
+a float, bool or `None` differs), and a non-list `commits` or
+`repair_own_commits` is a `TypeError` where Python would iterate a string.
 
 Closed in S6-g, kept here as the record:
 
