@@ -83,7 +83,9 @@ export interface BackfillInventoryEffects {
   /**
    * The Git provenance seam a pinned baseline is accounted against, or `null`
    * (also when the member is absent) when this runtime has no clone to read.
-   * Only consulted when a baseline exists; the no-baseline report never calls it.
+   * Only consulted when a baseline exists; the route does not call it for a
+   * no-baseline report. A returned repository is used for one replay, so it
+   * should already have begun its invocation.
    */
   accounting?(): BackfillReportRepo | null;
   /** The remaining triage rows, unread beyond their bytes. */
@@ -266,7 +268,9 @@ export async function runBackfillInventory(
       return refused('no retained inventory manifest; inventory capture has not run');
     }
     const baselineText = await effects.readBaseline();
-    const accounting = effects.accounting?.() ?? null;
+    // Consulted only when a baseline exists, so a no-baseline replay never
+    // touches the seam (a custom `accounting()` may open or validate a clone).
+    const accounting = baselineText === null ? null : (effects.accounting?.() ?? null);
     if (baselineText !== null && accounting === null) {
       return refused(accountingSeam().message);
     }

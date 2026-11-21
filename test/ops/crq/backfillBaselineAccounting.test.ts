@@ -11,7 +11,7 @@
  * refuse (or stay visible as unresolved) exactly as Python does.
  */
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterAll, describe, expect, test } from 'vitest';
@@ -378,9 +378,16 @@ describe('baseline accounting is differential with the Python oracle', () => {
     const python = pythonSummary(fixture.root, current, QUEUE, text);
     const typescript = await typescriptSummary(fixture.root, current, QUEUE, text);
     // A baseline commit the clone does not hold is never reported as zero debt:
-    // both fail on the Git lookup (the wrapper text differs, the refusal does not).
+    // both fail on the Git object lookup (the wrapper text differs, the cause
+    // does not), not on a digest or parse error.
     expect(python.ok).toBe(false);
     expect(typescript.ok).toBe(false);
+    expect((python as Refusal).error).toContain('CalledProcessError');
+    expect((python as Refusal).error).toContain(`${missing}^{commit}`);
+    expect((python as Refusal).error).not.toContain('baseline hash mismatch');
+    expect((typescript as Refusal).error).toContain('git rev-parse failed');
+    expect((typescript as Refusal).error).toContain(`${missing}^{commit}`);
+    expect((typescript as Refusal).error).not.toContain('baseline hash mismatch');
   });
 });
 
@@ -490,6 +497,39 @@ describe('the report-only route accounts a pinned baseline', () => {
     expect(routeReport['baseline']).toEqual(pythonReport['baseline']);
     expect(routeReport['tiers']).toEqual(pythonReport['tiers']);
     expect(routeReport['states']).toEqual(pythonReport['states']);
+  });
+
+  test('the file adapter begins the accounting invocation so immutable git output is cached', async () => {
+    const { fixture, old, target } = history();
+    const accounting = fileBackfillInventoryEffects('/nonexistent-state', {
+      cloneRoot: fixture.root,
+    }).accounting?.();
+    if (accounting === null || accounting === undefined) throw new Error('expected a repository');
+    const lineage = () =>
+      (accounting as unknown as GitAccountingRepository).lineage(old, target, 'keep.ts');
+    expect(await lineage()).toBe('keep.ts');
+    // Hide the object store: only a memoised (begun-invocation) answer survives.
+    renameSync(join(fixture.root, '.git'), join(fixture.root, '.git-hidden'));
+    try {
+      expect(await lineage()).toBe('keep.ts');
+    } finally {
+      renameSync(join(fixture.root, '.git-hidden'), join(fixture.root, '.git'));
+    }
+  });
+
+  test('a no-baseline replay never consults the accounting seam', async () => {
+    const { fixture, target } = history();
+    const manifest = retargeted(target, fixture.git('rev-parse', `${target}^{tree}`));
+    const writes = new Map<string, Buffer>();
+    const effects = {
+      ...routeEffects({ baseline: null, manifest, clone: fixture.root, writes }),
+      accounting: () => {
+        throw new Error('accounting must not be consulted without a baseline');
+      },
+    };
+    const result = await runBackfillInventory(['--report-only'], effects);
+    expect(result.exitCode).toBe(0);
+    expect(writes.has('report')).toBe(true);
   });
 
   test('a clone that lacks the retained target fails closed with nothing written', async () => {

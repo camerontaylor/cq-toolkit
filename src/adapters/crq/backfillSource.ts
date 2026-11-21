@@ -116,10 +116,17 @@ export function fileBackfillInventoryEffects(
     readBaseline: () => readOptionalBytes(join(stateRoot, 'backfill', 'baseline.json')),
     // S4: with a clone the replay accounts a pinned baseline offline against its
     // local objects (no fetch); without one the route refuses a baseline.
-    accounting: () =>
-      cloneRoot === undefined
-        ? null
-        : new GitAccountingRepository({ repo: cloneRoot, runGit: runGitIn(cloneRoot) }),
+    accounting: () => {
+      if (cloneRoot === undefined) return null;
+      const repository = new GitAccountingRepository({
+        repo: cloneRoot,
+        runGit: runGitIn(cloneRoot),
+      });
+      // The instance serves exactly one replay; begin its invocation so the
+      // immutable-object caches are on (the full route does the same).
+      repository.beginInvocation();
+      return repository;
+    },
     readTriage: () => readTriageRows(stateRoot),
     artifacts: (durableArtifactRoot: string) => fileBackfillStore(durableArtifactRoot),
     writeRanked: (bytes: Uint8Array) =>
