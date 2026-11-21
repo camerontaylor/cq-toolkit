@@ -281,6 +281,12 @@ describe('repairEnqueue vs the real repair_tick.enqueue', () => {
     );
   });
 
+  it('raises on a present inbox file that is not a JSON object (as Python does)', async () => {
+    await same(enqueue({ state: { 'repair/inbox/crq-r1-F1.json': null } })); // JSON null
+    await same(enqueue({ state: { 'repair/inbox/crq-r1-F1.json': [1] } })); // an array
+    await same(enqueue({ state: { 'repair/inbox/crq-r1-F1.json': 'nul' } })); // malformed text
+  });
+
   it('backfills a missing source onto an existing job without a second record', async () => {
     const existing = { jobs: ['crq-r1-F1', 'crq-r1-F2'], state: 'ready', pin: 'b0' };
     await same(
@@ -442,10 +448,13 @@ describe('repairEnqueue vs the real repair_tick.enqueue', () => {
     await same(enqueue({ ...base, state: {} }));
   });
 
-  // crq review (F4, F10) flagged the next two as defects. Python behaves exactly
-  // this way, and the port is differential against it, so they are pinned as parity.
-  it('keeps a completed inbox job for another finding and still binds the blocker to it (as Python does)', async () => {
-    const out = await same(
+  // crq review (F3) supersedes the older parity pin: a completed slot belonging
+  // to a different finding must not be reused for this finding, and a record that
+  // omits the finding would read as complete. The port deliberately deviates from
+  // Python (repair_tick still binds the blocker): it refuses the enqueue before any
+  // write, and the backfill test below shows the cycle recorded as debt.
+  it('refuses to enqueue over a completed inbox job for another finding', async () => {
+    const out = await runTs(
       enqueue({
         queue: { items: [openItem({ blocking: [{ run: 'r1', run_finding: 1 }] })] },
         findings: { r1: rows(F2) }, // finding B now occupies slot 1
@@ -455,10 +464,15 @@ describe('repairEnqueue vs the real repair_tick.enqueue', () => {
         },
       }),
     );
+    expect(out.error).toBe(false);
+    expect(out.ret).toBe(false);
     expect(out.files['state/repair/inbox/crq-r1-F1.json']).toContain('fix a'); // still finding A
-    expect(out.queue).toContain('"repair_job":"crq-r1-F1"');
+    expect(out.queue).not.toContain('"repair_job"'); // never bound to another finding's job
+    expect(out.queue).not.toContain('"repair_runs":{"r1"'); // no record that claims completeness
   });
 
+  // crq review (F4, F10) flagged the next one as a defect. Python behaves exactly
+  // this way, and the port is differential against it, so it is pinned as parity.
   it('counts a foreign repository PR with the same number toward the round ceiling (as Python does)', async () => {
     const done = (run: string): Record<string, unknown> => ({
       jobs: [],
@@ -590,15 +604,44 @@ describe('repairBackfill vs the real repair_tick.backfill', () => {
     );
   });
 
-  it('enqueues from a meta.json that names another run, and stamps (as Python does)', async () => {
-    const out = await same(
+  // crq review (PR #2241) flagged the next one as a defect. Python enqueues a
+  // cycle's findings under the meta's run id even when it names another run,
+  // leaving the cycle itself without a repair record, so the ledger could
+  // archive while it is unresolved. The port deliberately deviates: the meta
+  // must match the cycle or the debt is recorded and nothing is enqueued, and
+  // repairEnqueue stays available for matching metadata so the other run's
+  // record still serves its own evidence.
+  it('records unresolved debt when the meta names another run instead of enqueueing', async () => {
+    const out = await runTs(
       backfill({
         findings: { r1: rows(F1) },
         runs: { r1: evidence({ run_id: 'r2' }) },
       }),
     );
-    expect(Object.keys(out.files)).toContain('state/repair/inbox/crq-r2-F1.json');
-    expect(out.queue).toContain('legacy_repair_backfilled');
+    expect(out.error).toBe(false);
+    const queue = JSON.parse(out.queue) as Record<string, unknown>;
+    expect(queue.legacy_repair_missing).toEqual([
+      { item: 'pr-5', run: 'r1', reason: 'meta names another run' },
+    ]);
+    expect(queue.legacy_repair_backfilled).toBeUndefined();
+    expect(Object.keys(out.files)).toEqual(['runs/r1/meta.json', 'runs/r1/review.ndjson']);
+  });
+
+  it("records debt, not a short record, when a slot holds another finding's completed job", async () => {
+    const out = await runTs(
+      backfill({
+        findings: { r1: rows(F2) },
+        runs: { r1: evidence() },
+        state: {
+          'repair/inbox/crq-r1-F1.json': { job: 'crq-r1-F1', finding: F1, repair_base: 'b0' },
+          'repair/crq-r1-F1/result.json': { verdict: 'FIXED' },
+        },
+      }),
+    );
+    expect(out.error).toBe(false);
+    const queue = JSON.parse(out.queue) as Record<string, unknown>;
+    expect(queue.legacy_repair_missing).toHaveLength(1);
+    expect(queue.legacy_repair_backfilled).toBeUndefined();
   });
 
   it('raises on a cycle without a run_id and on unreadable meta', async () => {
@@ -694,6 +737,34 @@ describe('injected effects only', () => {
     expect(calls).toEqual(['has:r9']);
     expect(q.legacy_repair_missing).toEqual([]);
     expect(q.legacy_repair_backfilled).toBe(ISO);
+  });
+});
+
+describe('file-backed repair inbox reads', () => {
+  it('returns null only for an absent file and rejects a non-object document', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'repair-bf-inbox-'));
+    dirs.push(root);
+    const fx = fileRepairBackfillEffects({
+      stateRoot: join(root, 'state'),
+      runsRoot: join(root, 'runs'),
+      ledgerRoot: join(root, 'ledger'),
+      primaryRepo: 'o/r',
+      defaultRef: 'origin/main',
+      mergedCurrentEnabled: false,
+      maxRoundsPerPin: 2,
+      iso: () => ISO,
+      git: async () => '',
+      findings: async () => [],
+    });
+    const path = join(root, 'state', 'repair', 'inbox', 'crq-x-F1.json');
+    expect(await fx.readInbox('crq-x-F1')).toBeNull(); // absent
+    await fx.writeInbox('crq-x-F1', { job: 'crq-x-F1', finding: F1 });
+    expect(await fx.readInbox('crq-x-F1')).toEqual({ job: 'crq-x-F1', finding: F1 });
+    for (const text of ['null', '[1]', '7', '"s"', 'nul']) {
+      writeFileSync(path, text);
+      await expect(fx.readInbox('crq-x-F1')).rejects.toThrow();
+    }
+    expect(existsSync(path)).toBe(true); // invalid content is never treated as absence
   });
 });
 

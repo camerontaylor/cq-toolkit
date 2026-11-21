@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { parseJsonValue, toPlainJson } from '../../policy/crq/jsonValue.js';
 import { PyError } from '../../queue-runner/pyErrors.js';
 import type { RepairHarvestEffects } from '../../queue-runner/repairHarvest.js';
+import { checkRepairJobId } from './repairPreparation.js';
 
 export interface FileRepairHarvestInput {
   /** `c.STATE`. */
@@ -100,17 +101,31 @@ async function pyRealpath(filename: string): Promise<string> {
   return path;
 }
 
+/** `bounded.job_path`: a non-grammar job id is a `ValueError` before any read. */
+function requireJobId(jobId: string): void {
+  if (!checkRepairJobId(jobId)) throw new PyError('ValueError', 'expected one exact CRQ job id');
+}
+
 export function fileRepairHarvestReads(input: FileRepairHarvestInput): FileRepairHarvestReads {
   const repair = (...parts: string[]): string => join(input.stateRoot, 'repair', ...parts);
   return {
     worktreeRoot: input.worktreeRoot,
-    readJob: (jobId) => readJson(repair('inbox', `${jobId}.json`)),
-    readResult: (jobId) => readJson(repair(jobId, 'result.json')),
-    resultExists: (jobId) =>
-      stat(repair(jobId, 'result.json')).then(
+    readJob: (jobId) => {
+      requireJobId(jobId);
+      return readJson(repair('inbox', `${jobId}.json`));
+    },
+    readResult: (jobId) => {
+      requireJobId(jobId);
+      return readJson(repair(jobId, 'result.json'));
+    },
+    /** `Path.exists()` swallows the invalid-id `ValueError` as a miss. */
+    resultExists: (jobId) => {
+      if (!checkRepairJobId(jobId)) return Promise.resolve(false);
+      return stat(repair(jobId, 'result.json')).then(
         () => true,
         () => false,
-      ),
+      );
+    },
     /** `Path.resolve()`: CPython 3.14 `posixpath.realpath(strict=False)`. */
     resolvePath: pyRealpath,
   };

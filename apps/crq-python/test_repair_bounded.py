@@ -526,6 +526,8 @@ class BoundedRepairTest(unittest.TestCase):
                      'review_id': 'e' * 64, 'previous_event_id': None})
         atomic(self.root / 'state/repair' / sibling_id / 'result.json',
                {'job': sibling_id, 'item': job['item'], 'verdict': 'FIXED', 'commits': ['a' * 40],
+                # Sibling results are validated like harvest's: bind them to the job.
+                **{k: sibling.get(k) for k in ('source_sha', 'finding_sha256', 'origin_job')},
                 'attempts': [{'rung': 'A0'}], 'repair_base': record['base'],
                 'worktree': str(self.root / 'wt/crq-repair-pr1-merged')})
         atomic(self.root / 'state/repair' / job_id / 'result.json',
@@ -628,6 +630,8 @@ class BoundedRepairTest(unittest.TestCase):
                      'review_id': 'e' * 64, 'previous_event_id': None})
         atomic(self.root / 'state/repair' / sibling_id / 'result.json',
                {'job': sibling_id, 'item': job['item'], 'verdict': 'FIXED', 'commits': ['a' * 40],
+                # Sibling results are validated like harvest's: bind them to the job.
+                **{k: sibling.get(k) for k in ('source_sha', 'finding_sha256', 'origin_job')},
                 'attempts': [{'rung': 'A0'}], 'repair_base': record['base'],
                 'worktree': str(self.root / 'wt/crq-repair-pr1-merged')})
         # The first job's artifact is defective, so the run can never publish.
@@ -650,6 +654,46 @@ class BoundedRepairTest(unittest.TestCase):
         self.assertEqual(sibling[0].args[1], sibling_id)
         self.assertEqual(sibling[0].args[2], 'needs-human')
         self.assertIn('not published', sibling[0].args[3])
+
+    def test_terminal_failure_does_not_record_an_unbound_sibling_decision(self):
+        job_id, job = self.prepare()
+        item = self.queue['items'][0]
+        record = item['repair_runs'][job['run']]
+        sibling_id = 'crq-run1-F2'
+        sibling = copy.deepcopy(job)
+        sibling.update(job=sibling_id, canonical_finding_id='d' * 64)
+        atomic(bounded.job_path(self.root, sibling_id), sibling)
+        record['jobs'] = [job_id, sibling_id]
+        row = self.root / 'state/backfill/findings/triage' / ('d' * 64 + '.json')
+        atomic(row, {'status': 'delivered', 'receipt': {'repair_task': sibling_id},
+                     'review_id': 'e' * 64, 'previous_event_id': None})
+        atomic(self.root / 'state/repair' / sibling_id / 'result.json',
+               {'job': sibling_id, 'item': job['item'], 'verdict': 'FIXED', 'commits': ['a' * 40],
+                # Sibling results are validated like harvest's: bind them to the job.
+                'source_sha': 'f' * 40, 'finding_sha256': sibling['finding_sha256'], 'origin_job': sibling['origin_job'],
+                'attempts': [{'rung': 'A0'}], 'repair_base': record['base'],
+                'worktree': str(self.root / 'wt/crq-repair-pr1-merged')})
+        # The first job's artifact is defective, so the run can never publish.
+        atomic(self.root / 'state/repair' / job_id / 'result.json',
+               {'job': job_id, 'item': job['item'], 'verdict': 'FIXED', 'commits': [],
+                'source_sha': job['source_sha'], 'finding_sha256': job['finding_sha256'],
+                'origin_job': OLD, 'repair_base': record['base']})
+        self.c.iso = lambda: '2026-11-12T00:00:00Z'
+        import finding_delivery
+        import review_ledger as ledger
+        out = ledger.Outbox(self.root / 'outbox', ledger.ArtifactStore(self.root / 'durable'))
+        inbox = finding_delivery.Inbox(self.root / 'state/backfill/findings', out)
+        with mock.patch.object(inbox, 'repair_outcome', wraps=inbox.repair_outcome) as outcome, \
+             mock.patch.object(repair_tick, 'finding_inbox', return_value=inbox):
+            repair_tick.harvest(self.c, self.queue, item)
+        self.assertEqual(record['state'], 'failed')
+        # A mismatched artifact records a failure outcome, never its FIXED decision.
+        self.assertEqual(json.loads(row.read_text())['status'], 'needs-retriage')
+        sibling = [call for call in outcome.call_args_list if call.args[0] == 'd' * 64]
+        self.assertEqual(len(sibling), 1)
+        self.assertEqual(sibling[0].args[1], sibling_id)
+        self.assertEqual(sibling[0].args[2], 'needs-retriage')
+        self.assertIn('sibling source/evidence binding mismatch', sibling[0].args[3])
 
     def test_bad_fixed_attempts_fail_once_across_ticks(self):
         for attempts in (None, [], [{}], [{'rung': 'A3'}], 'invalid'):

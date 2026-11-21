@@ -564,9 +564,10 @@ describe('repairHarvest result validation (differential)', () => {
     });
   });
 
-  // These two cases pin the Python behavior around sibling identity and retry timing
-  // until the repair behavior changes in both runtimes.
-  it('writes the unpublished-FIXED decision from a sibling whose identity does not match (as Python does)', async () => {
+  // The retry-timing case still pins the Python behavior; the identity case
+  // now shares the checks that run ahead of the verdict dispatch in both
+  // runtimes.
+  it('terminalizes a mismatched sibling instead of recording its unpublished-FIXED decision', async () => {
     const out = await same({
       item: item({}, { jobs: [J1, J2] }),
       files: files(
@@ -578,7 +579,84 @@ describe('repairHarvest result validation (differential)', () => {
         ],
       ),
     });
-    expect(out.calls).toContain('"sibling","F2","crq-R-F2"');
+    expect(out.calls).not.toContain('["sibling"');
+    expect(out.calls).toContain('invalid repair result: sibling identity mismatch');
+  });
+
+  // TS-only: Python raises on any unreadable inbox. A malformed document is a
+  // deterministic defect and fails its run without a finding write; a read
+  // fault is not a content defect, so the run stays open for the next tick.
+  it('terminalizes a malformed inbox without any finding write', async () => {
+    const out = await runTs({
+      item: item({}, { jobs: [J1] }),
+      files: files([J1, '[]', fixed(J1)]),
+    });
+    expect(out.error).toBeUndefined();
+    expect(out.queue).toContain('invalid repair inbox');
+    expect(out.queue).toContain('"state":"failed"');
+    expect(out.calls).not.toContain('["mark"');
+  });
+
+  it('terminalizes a mismatched inbox identity and still harvests a later run', async () => {
+    const swapped = await runTs({
+      item: item({}, { jobs: [J1] }),
+      files: files([J1, job(J1, { job: 'crq-other', canonical_finding_id: 'F1' }), fixed(J1)]),
+    });
+    expect(swapped.error).toBeUndefined();
+    expect(swapped.queue).toContain('invalid repair inbox: repair job identity mismatch');
+    expect(swapped.queue).toContain('"state":"failed"');
+    expect(swapped.calls).not.toContain('["mark"');
+    const wrongItem = await runTs({
+      item: item({}, { jobs: [J1] }),
+      files: files([J1, job(J1, { item: 'zzz', canonical_finding_id: 'F1' }), fixed(J1)]),
+    });
+    expect(wrongItem.error).toBeUndefined();
+    expect(wrongItem.queue).toContain('"state":"failed"');
+    expect(wrongItem.calls).not.toContain('["mark"');
+
+    // A later run on the same item is not blocked by the swapped inbox.
+    const two = item({}, { jobs: [J1] }) as { repair_runs: Record<string, unknown> };
+    two.repair_runs.R2 = { state: 'queued', base: 'b0', jobs: [J2] };
+    const later = await runTs({
+      item: two,
+      files: files(
+        [J1, job(J1, { job: 'crq-other' }), fixed(J1)],
+        [J2, job(J2, { canonical_finding_id: 'F2' }), verdict(J2, 'FAILED')],
+      ),
+    });
+    expect(later.error).toBeUndefined();
+    expect(later.calls).toContain('"mark","crq-R-F2"');
+  });
+
+  it('keeps a rejected inbox out of the sibling replay on later ticks', async () => {
+    // State after the first tick terminalized J1's swapped inbox (null finding).
+    const rejected = {
+      job: J1,
+      item: 'i1',
+      verdict: 'FAILED',
+      reason: 'invalid repair inbox: repair job identity mismatch',
+      finding: null,
+    };
+    const out = await runTs({
+      item: item({}, { state: 'failed', jobs: [J1, J2], verdicts: [rejected] }),
+      files: files(
+        [J1, job(J1, { job: 'crq-other', canonical_finding_id: 'F1' }), fixed(J1)],
+        [J2, job(J2, { canonical_finding_id: 'F2' }), fixed(J2)],
+      ),
+    });
+    expect(out.error).toBeUndefined();
+    expect(out.calls).not.toContain('"sibling","F1"');
+    expect(out.calls).toContain('"sibling","F2"');
+  });
+
+  it('keeps the run open when the inbox read fails with an I/O error', async () => {
+    const out = await runTs({
+      item: item({}, { jobs: [J1] }),
+      files: { [`repair/${J1}/result.json`]: fixed(J1) }, // inbox file absent: readFile fails
+    });
+    expect(out.error).toBe('other');
+    expect(out.queue).not.toContain('"state":"failed"');
+    expect(out.calls).not.toContain('["mark"');
   });
 
   it('records a sibling FAILED outcome even with retry_after set (as Python does)', async () => {
