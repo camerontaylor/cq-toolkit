@@ -201,6 +201,21 @@ class CliTests(unittest.TestCase):
         self.assertEqual(saved["outcome"], "completed")
         self.assertEqual(len(saved["completions"]), 2)
 
+    def test_switch_reports_uncertain_journal_durability(self):
+        warning = "OSError: directory sync failed"
+        completed = {"outcome": "completed", "runtime": NODE,
+                     "journal_durability_uncertain": warning}
+        with mock.patch.object(cli.adapter_mod, "GuestFixtureAdapter", FakeAdapter), \
+                mock.patch.object(cli.dc, "switch_unit", return_value=completed):
+            status, output = self._run([
+                "switch", "--root", str(self.root),
+                "--record-dir", str(self.records), "--runtime", NODE,
+                "--proof-fixture"])
+        self.assertEqual(status, 0, output)
+        record = json.loads(output)["record"]
+        self.assertEqual(record["outcome"], "completed")
+        self.assertEqual(record["journal_durability_uncertain"], warning)
+
     def test_switch_wires_the_controller_queue_drain_into_the_adapter(self):
         with mock.patch.object(cli.adapter_mod, "GuestFixtureAdapter",
                                FakeAdapter):
