@@ -114,7 +114,7 @@ PR at the prepared `head` (else `ValueError`, nothing recorded or enrolled)
 before the item is enrolled and the record `published`. Effects still unbound:
 `listBranchPrs` (`gh pr list ... --state all`), `createPr` (`gh pr create`),
 `repairProvenance` (bound in S6-r), `writeFixPrBody` and `writeJournal` (`fix-pr.md`, `publication.json`),
-`saveQueue`, `newItem` (`crq.new_item`) and the `FixPrBacklog` shared with
+`saveQueue`, `newItem` (bound in S6-s) and the `FixPrBacklog` shared with
 `refreshFixPrBacklog`. Narrowings: PR numbers are modelled as integers (`str()` of
 a float, bool or `None` differs), and a non-list `commits` or
 `repair_own_commits` is a `TypeError` where Python would iterate a string.
@@ -357,9 +357,32 @@ text, the refusals, the `Pick<PublicationFinalizeEffects, 'repairProvenance'>`
 ownership and the composition inside `finalizePublication`. No real forge, network,
 provider or secret; nothing imports it outside tests.
 
-Still unwired after S6-l, S6-m, S6-n, S6-o, S6-p, S6-q and S6-r: `push` (the
-leased remote write), `createPr` (forge write), `hackDetector`, `newItem` and the
-`FixPrBacklog`, plus the binding of any of these into `tick`.
+S6-s (inactive): `publicationNewItem` (`src/queue-runner/publicationEnroll.ts`)
+binds `newItem`, `crq.new_item(q, [], False, **fields)`, the call
+`finalizePublication` makes to enroll a verified repair's fix PR. It mutates the
+plain queue in place and owns no I/O: `iso` and the `enrolled` event are injected
+(`fileEnrolledEvent` is the event binding). Pinned in order: the first live item
+with an equal `id` is returned untouched (any kind or state, a skipped one too;
+a `promotion` item is not live; ids are read lazily to the first match, so an
+earlier id-less live item is `KeyError` and a later one is never read);
+`kind == "open"` overwrites any `prior_cycles` with 0, so `finalizePublication`'s
+`2 - fix_pr_cycles` is never stored (the key keeps its place in the fields); the
+item is `order, state, cycles, attempts, **fields` with `notes` replaced by the
+single `<iso> auto-enrolled: <why>` note and `why` removed; `order` is one past
+the largest live `order` (a missing one is 0, a bool is an int); the item is
+appended before the event, so a failing event leaves it in the unsaved queue, and
+a field set with no `id` is appended and then fails reading it (`KeyError`).
+Narrowings, all refusals: a float, string or null `order` and a non-string `why`.
+`test/queue-runner/publicationEnroll.test.ts` runs the real `crq.new_item` and the
+real `finalize_publication` (`test/helpers/publicationEnrollOracle.py`, every
+effect a fixture) against the binding and compares the final queue, item, record,
+publication, journal, body, backlog and ordered effect log as JSON text, so key
+order is pinned, and an exception by family. No real queue, event log, forge,
+network, provider or secret; nothing imports it outside tests.
+
+Still unwired after S6-l through S6-s: `push` (the leased remote write),
+`createPr` (forge write), `hackDetector` and the `FixPrBacklog`, plus the binding
+of any of these into `tick`.
 
 Closed in S6-g, kept here as the record:
 
