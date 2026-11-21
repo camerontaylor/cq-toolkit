@@ -224,16 +224,26 @@ export async function mergeHeadEvidence(
     }
     if (before && !after)
       throw new Error('merged repair source changed; needs revalidation: ' + path);
-    // A root publication spans the empty tree through the published head,
-    // not just the first commit. Git recognizes its empty tree object by ID.
-    let changeBase = parent;
-    if (!changeBase) {
-      const format = decoder.decode(await run(['rev-parse', '--show-object-format'])).trim();
-      // This proof's commit/blob validation currently supports SHA-1 only.
-      if (format !== 'sha1') throw new Error('unsupported Git object format; needs revalidation');
-      changeBase = createHash('sha1').update('tree 0\0').digest('hex');
-    }
-    const original = await patch(['diff', ...options, changeBase, published, '--', path]);
+    // Python's published_change_patch: a parented publication is diffed from the
+    // parent of its first commit through the published head, but a root
+    // publication (no parent) is the root commit alone (`diff-tree --root`), not
+    // the empty tree through the published head. Later commits of a root
+    // publication are therefore outside the compared change; that is the Python
+    // contract this port keeps (see mergeHeadEvidence.root.test.ts).
+    const original = await patch(
+      parent
+        ? ['diff', ...options, parent, published, '--', path]
+        : [
+            'diff-tree',
+            '-p',
+            '--root',
+            '--no-commit-id',
+            ...options,
+            input.commits[0]!,
+            '--',
+            path,
+          ],
+    );
     const originalText = patchText(original);
     if (!originalText.trim()) {
       containment[path] = {
