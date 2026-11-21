@@ -3,9 +3,12 @@
 // test/helpers/publicationForgeReadsOracle.py, `subprocess.run` replaced by the
 // fake transport) and through the TS forge reads driving the real
 // `recoverPublication`. Argv, working directory, timeout, outcome class and the
-// consumer-visible events must be equal. No forge, network or process is
-// touched by any case: every `gh` is a scripted function; two cases spawn a
-// throwaway shell stub through the real runner to pin its exit-code contract.
+// consumer-visible events must be equal. No forge or network is touched and no
+// `gh` process is spawned by a differential case: every `gh` there is a scripted
+// function (only the Python oracle itself runs). Three
+// real-runner cases spawn a throwaway shell stub (argv/cwd, the time bound, an
+// exit failure) and a fourth runs the runner against a nonexistent binary, to
+// pin its exit-code contract; none of them reaches a forge.
 import { execFileSync } from 'node:child_process';
 import { chmod, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -192,7 +195,8 @@ async function runTs(item: OracleCase): Promise<Outcome> {
 }
 
 // What each Python exception class is on the TS side. `TimeoutExpired` and
-// `FileNotFoundError` are `OSError`s in Python and `PyError('OSError')` here;
+// `FileNotFoundError` both map to `PyError('OSError')` here; in Python
+// `TimeoutExpired` is a `SubprocessError` and `FileNotFoundError` an `OSError`.
 // `JSONDecodeError` is a `ValueError` whose text is the parser's, not CPython's.
 const CLASS: Record<string, string> = {
   TimeoutExpired: 'OSError',
@@ -290,7 +294,12 @@ const CASES: OracleCase[] = [
     pr: 5,
     script: [fail(124, 'gh: its own 124')],
   },
-  { name: 'the time bound is TimeoutExpired, an OSError', op: 'pr_info', pr: 5, script: [TIMEOUT] },
+  {
+    name: 'the time bound is TimeoutExpired, mapped to OSError',
+    op: 'pr_info',
+    pr: 5,
+    script: [TIMEOUT],
+  },
   {
     name: 'a missing gh is FileNotFoundError, an OSError',
     op: 'pr_info',
