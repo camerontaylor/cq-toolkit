@@ -1995,7 +1995,11 @@ describe('repairHarvest JSON integer digit limit (Python vs port)', () => {
   // RESIDUAL (#2312): Python raises ValueError ("Exceeds the limit (4300 digits) for
   // integer string conversion"); the port parses the literal as a bigint and returns it.
   // When `readJson` gains the guard, flip these to `toMatchObject({ kind: 'ValueError' })`
-  // and move the 4301 cases into the agreement block above.
+  // and move the 4301 cases into the agreement block above. That brings the READER into
+  // agreement only: the harvest-level RESIDUAL below does not become a parity case, because
+  // the port then terminalizes the inbox (`invalid repair inbox: Exceeds the limit ...`,
+  // `repair_failed`) where Python raises and leaves the run queued. That is #2312's
+  // terminalization-vs-raise difference, pinned in 'malformed inbox content'.
   describe('Python refuses, the port still reads (residual)', () => {
     for (const [name, literal] of [
       ['4301 digits', OVER],
@@ -2035,6 +2039,7 @@ describe('repairHarvest JSON integer digit limit (Python vs port)', () => {
       const spec = specWith(OVER);
       const py = runPython(spec);
       // Uncaught: the run stays open, nothing is terminalized and no outcome is written.
+      // With the reader guard this case flips to the #2312 terminalization difference, not to parity.
       expect(py.error).toBe('ValueError');
       expect(py.queue).toContain('"state":"queued"');
       expect(py.calls).not.toContain('"mark"');
