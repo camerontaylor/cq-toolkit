@@ -296,12 +296,14 @@ function findOffsetStart(text: string): number {
 
 function parseClock(text: string): Omit<ParsedTime, 'offsetMicros'> | null {
   let match = /^(\d{2})(?::(\d{2})(?::(\d{2})(?:[.,](\d+))?)?)?$/.exec(text);
-  if (match === null) match = /^(\d{2})(\d{2})(?:(\d{2})(?:[.,](\d+))?)?$/.exec(text);
+  // CPython's compact form also reads digits after `hhmmss` as a fraction with
+  // no `.`/`,` (`12345678` is 12:34:56.78); a single extra digit is not one.
+  if (match === null) match = /^(\d{2})(\d{2})(?:(\d{2})(?:[.,](\d+)|(\d{2,}))?)?$/.exec(text);
   if (match === null) return null;
   const hour = Number(match[1]);
   const minute = Number(match[2] ?? '0');
   const second = Number(match[3] ?? '0');
-  const microsecond = parseFraction(match[4]);
+  const microsecond = parseFraction(match[4] ?? match[5]);
   if (hour === 24) {
     if (minute !== 0 || second !== 0 || microsecond !== 0) {
       throw new UtcParseError('minute, second, and microsecond must be 0 when hour is 24');
@@ -318,16 +320,17 @@ function parseOffset(text: string): bigint | null {
   if (text === '') return 0n;
   // CPython fixes the separator style at the first offset component: after
   // `hh` a `:` means every later component is colon-separated, anything else
-  // means none is. Mixed styles (`+01:0203`, `+0102:03`) are malformed.
+  // means none is. Mixed styles (`+01:0203`, `+0102:03`) are malformed. A
+  // compact offset reads digits after `hhmmss` as a bare fraction, like a clock.
   const match =
     /^([+-])(\d{2})(?::(\d{2})(?::(\d{2})(?:[.,](\d+))?)?)?$/.exec(text) ??
-    /^([+-])(\d{2})(?:(\d{2})(?:(\d{2})(?:[.,](\d+))?)?)?$/.exec(text);
+    /^([+-])(\d{2})(?:(\d{2})(?:(\d{2})(?:[.,](\d+)|(\d{2,}))?)?)?$/.exec(text);
   if (match === null) return null;
   const sign = match[1] === '-' ? -1n : 1n;
   const hours = BigInt(match[2] as string);
   const minutes = BigInt(match[3] ?? '0');
   const seconds = BigInt(match[4] ?? '0');
-  const micros = BigInt(parseFraction(match[5]));
+  const micros = BigInt(parseFraction(match[5] ?? match[6]));
   const wholeSeconds = hours * 3_600n + minutes * 60n + seconds;
   // CPython >= 3.14.7 (gh-152079, commit 6f9c76d8d869) and 3.15+ return UTC only
   // when both the whole-second offset and its microseconds are zero;

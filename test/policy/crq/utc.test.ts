@@ -260,3 +260,48 @@ describe('year-10000 rollover and mixed-separator offsets (CPython 3.14 pinned)'
     expect(parseUtcDetailed(value)).toBe(micros);
   });
 });
+
+describe('compact bare fractions (CPython 3.14 pinned)', () => {
+  // `parse_hh_mm_ss_ff` reads digits after compact `hhmmss` as microseconds with no
+  // `.`/`,`. Expected values are `datetime.fromisoformat` on python3.14. Offsets use
+  // non-zero whole seconds, where 3.14.4 and >= 3.14.7 agree.
+  test.each([
+    ['2026-01-01T00:00:00+000003123456', 1767225596876544n],
+    ['2026-01-01T00:00:00-000003123456', 1767225603123456n],
+    ['2026-01-01T00:00:00+0000123456', 1767225587654400n],
+    ['2026-01-01T00:00:00+00:00:03.123456', 1767225596876544n],
+    ['2026-01-01T12345678Z', 1767270896780000n],
+    ['2026-01-01T123456789Z', 1767270896789000n],
+    ['2026-01-01T12345678', 1767270896780000n],
+    ['2026-01-01T120000123456789+01:00', 1767265200123456n],
+    ['20260101T12000050Z', 1767268800500000n],
+  ])('%s parses with the bare fraction as microseconds', (value, micros) => {
+    expect(parseUtcDetailed(value)).toBe(micros);
+    expect(parseUtcUnchecked(value)).toBe(micros);
+    expect(parseUtc(value)?.epochMicros).toBe(micros);
+  });
+
+  test.each([
+    // A single digit after hhmmss is not a fraction (naive clocks and offsets).
+    '2026-01-01T1200005',
+    '2026-01-01T00:00:00+0000035',
+    '2026-01-01T00:00:00-0000035',
+    // The colon style is fixed at the first component, so no bare fraction follows it.
+    '2026-01-01T00:00:00+00:00:0312',
+    '2026-01-01T12:00:0050',
+    // Mixed separators from #2330 stay malformed.
+    '2026-01-01T00:00:00+01:0203',
+    '2026-01-01T00:00:00+0102:03',
+    // A fraction needs hhmmss first.
+    '2026-01-01T1200123',
+  ])('%s stays malformed (null)', (value) => {
+    expect(parseUtcDetailed(value)).toBeNull();
+    expect(parseUtc(value)).toBeNull();
+    expect(parseUtcUnchecked(value)).toBeNull();
+  });
+
+  test('component validation still wins over a bare fraction', () => {
+    expect(() => parseUtcDetailed('2026-01-01T12009900Z')).toThrow('second must be in 0..59');
+    expect(() => parseUtcDetailed('2026-01-01T00:00:00+240000123456')).toThrow('offset must be');
+  });
+});
