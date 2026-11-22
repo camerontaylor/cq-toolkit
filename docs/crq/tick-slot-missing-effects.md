@@ -404,6 +404,24 @@ enrolled `pr<number>` item and the log no `enrolled` event; `publicationEnroll.t
 after every publish, the final queue and the journal, queue and backlog
 files are compared as JSON text. Nothing is bound into `tick` or the runtime.
 
+S6-u (inactive, test only): the composed offline shadow of the repair-harvest path.
+`test/queue-runner/repairHarvestShadow.test.ts` drives the TypeScript `repairHarvest`
+through its `publish` seam (`publishRepair`, `finalizePublication`, `publicationNewItem`
+over `filePublicationEffects`) and its `cleanupHarvested` seam (`decideRepairCleanup`),
+and the real `repair_tick.harvest`, `publish`, `recover_publication`,
+`finalize_publication`, `crq.new_item` and `crq_repair.retain.cleanup_harvested`
+(`test/helpers/repairHarvestShadowOracle.py`), over fixed synthetic queues with a
+restart (queue JSON round trip, fresh `FixPrBacklog`) between ticks. Forge, Git,
+`gh` and the ledger are in-memory fixtures; `git worktree remove` is only recorded and
+adds the tree to an in-memory removed set that the directory probe consults, so no
+directory is deleted; the only disk is a throwaway tree for the journal, patch, body
+and `queue.json`. Per tick the queue, ordered effects (including `enrolled` events and
+cleanup calls), files and removed set are compared as JSON text. No mismatch was found
+in the composed scenarios. Not composed: the backlog refresh (pinned by
+`publicationBacklog.test.ts`), the rejected-inbox replay divergence (pinned by
+`repairHarvest.test.ts`), and the text of a timed-out `gh pr create`, which the fixture
+renders as CPython does because the real `createPr` binding does not exist yet.
+
 Still unwired after S6-l through S6-t: `push` (the leased remote write),
 `createPr` (forge write) and `hackDetector`, plus the binding of any of these, or
 of the shared `FixPrBacklog`, into `tick`.
