@@ -26,6 +26,20 @@
 // patch/body/queue files the real writers produce there. Nothing is bound into `tick` or the runtime, nothing
 // is pushed, and nothing leaves the process.
 //
+// A second family of scenarios (the "durable restart" describe at the end) makes
+// every restart a real process boundary instead. Python runs one separate
+// `python3` process per segment; each reloads `state/queue.json` with the real
+// `crq.load_queue` and the in-memory world from `world.json`, a scratch file
+// outside `state/`. The TypeScript side runs each segment through `runTs` with
+// a fresh effects world, backlog and reads built only from disk: the queue
+// comes back through `loadQueueDocument` and the world from `world.json`, and
+// nothing is carried in memory between segments. (The vitest process is shared,
+// so this is isolation by construction, not a separate OS process.) A tick's
+// `save_fail` makes its N-th queue save fail before writing. A durable tick
+// also does what `crq.tick` does around `harvest`: an exception becomes
+// `last_error` and the queue is saved at the end of the tick; a tick's `crash`
+// is the process dying right after harvest, so neither happens.
+//
 // Out of scope here, pinned elsewhere: the fix-PR backlog accounting
 // (publicationBacklog.test.ts), the individual policy edges of harvest
 // (repairHarvest.test.ts), of cleanup (repairCleanup.test.ts) and of enrollment
@@ -48,7 +62,9 @@ import { basename, dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
 import { filePublicationEffects } from '../../src/adapters/crq/publicationFiles.js';
+import { loadQueueDocument } from '../../src/adapters/crq/queueEffects.js';
 import { fileRepairHarvestReads } from '../../src/adapters/crq/repairHarvestReads.js';
+import { toPlainJson } from '../../src/policy/crq/jsonValue.js';
 import { receiptJsonDigest } from '../../src/policy/crq/pythonJson.js';
 import { FixPrBacklog } from '../../src/queue-runner/fixPrBacklog.js';
 import {
@@ -102,6 +118,18 @@ interface Tick {
   outcome?: Record<string, string>;
   /** `git rev-parse HEAD` in a cleanup tree fails with this message. */
   head_error?: string;
+  /** The N-th (1-based) queue save of this tick raises OSError before writing. */
+  save_fail?: number;
+  /** Durable runs: the process dies right after harvest, so no `last_error` and no tick-end save. */
+  crash?: boolean;
+}
+
+/** One process of a durable run: the ticks it runs and where they sit in the whole run. */
+interface Segment {
+  root: string;
+  spec: Spec;
+  ticks: Tick[];
+  offset: number;
 }
 
 interface Retained {
@@ -177,7 +205,7 @@ function materialize(spec: Spec, root: string): Spec {
 }
 
 /** Lay out one side's throwaway tree. Both sides get byte-identical state. */
-function layout(spec: Spec): { root: string; spec: Spec } {
+function layout(spec: Spec, durable = false): { root: string; spec: Spec } {
   const root = mkdtempSync(join(tmpdir(), 'repair-shadow-'));
   cleanups.push(root);
   const bound = materialize(spec, root);
@@ -185,6 +213,9 @@ function layout(spec: Spec): { root: string; spec: Spec } {
   mkdirSync(join(root, 'state'), { recursive: true });
   writeFileSync(join(root, 'crq_repair.py'), STUB_REPAIR);
   for (const [rel, doc] of Object.entries(bound.files)) putFile(join(root, 'state'), rel, doc);
+  // A durable run starts from a queue on disk; both sides get these exact bytes.
+  if (durable)
+    putFile(join(root, 'state'), 'queue.json', { items: [bound.item, ...(bound.extra ?? [])] });
   for (const name of Object.keys(bound.trees))
     mkdirSync(join(root, 'wt', name), { recursive: true });
   for (const [index, r] of (bound.retained ?? []).entries()) writeRetained(root, r, index);
@@ -202,6 +233,42 @@ function runPython(spec: Spec): { out: Outcome; root: string } {
     env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
   });
   return { out: JSON.parse(stdout) as Outcome, root };
+}
+
+/** One durable run: a separate `python3` process per segment, outcomes concatenated. */
+function runPythonDurable(spec: Spec): { out: Outcome; root: string } {
+  const { root, spec: bound } = layout(spec, true);
+  const parts = segmentsOf(bound.ticks).map((segment) => {
+    const stdout = execFileSync('python3', ['-I', ORACLE, APPS], {
+      input: JSON.stringify({ root, spec: bound, segment }),
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+      env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
+    });
+    return JSON.parse(stdout) as Outcome;
+  });
+  return { out: joinSegments(parts), root };
+}
+
+/** A `restart` tick starts the next process; the first segment starts at tick 0. */
+function segmentsOf(ticks: Tick[]): { ticks: Tick[]; offset: number }[] {
+  const segments: { ticks: Tick[]; offset: number }[] = [];
+  for (const [index, tick] of ticks.entries()) {
+    if (segments.length === 0 || tick.restart) segments.push({ ticks: [], offset: index });
+    segments.at(-1)!.ticks.push(tick);
+  }
+  return segments;
+}
+
+/** The effect log and ticks concatenate; the files and removals are the last process's view. */
+function joinSegments(parts: Outcome[]): Outcome {
+  const last = parts.at(-1)!;
+  return {
+    log: parts.flatMap((p) => p.log),
+    ticks: parts.flatMap((p) => p.ticks),
+    files: last.files,
+    removed: last.removed,
+  };
 }
 
 // --- the TypeScript side ----------------------------------------------------
@@ -277,21 +344,44 @@ function listFiles(dir: string): string[] {
   return out;
 }
 
-async function runTs(spec: Spec): Promise<{ out: Outcome; root: string }> {
-  const { root, spec: bound } = layout(spec);
+async function runTs(spec: Spec, segment?: Segment): Promise<{ out: Outcome; root: string }> {
+  const { root, spec: bound } = segment ?? layout(spec);
+  const ticksToRun = segment?.ticks ?? bound.ticks;
   const stateRoot = join(root, 'state');
   const wtRoot = join(root, 'wt');
   const log: Entry[] = [];
+  const worldPath = join(root, 'world.json');
+  const saved = segment
+    ? (() => {
+        try {
+          return JSON.parse(readFileSync(worldPath, 'utf8')) as {
+            prs: Record<string, PrRow[]>;
+            remote: Record<string, string>;
+            removed: string[];
+            n: number;
+          };
+        } catch {
+          return undefined;
+        }
+      })()
+    : undefined;
   const world = {
-    prs: new Map<string, PrRow[]>(Object.entries((bound.prs ?? {}) as Record<string, PrRow[]>)),
-    remote: new Map<string, string>(Object.entries(bound.remote ?? {})),
-    removed: [] as string[],
-    n: 0,
+    prs: new Map<string, PrRow[]>(
+      Object.entries(saved?.prs ?? ((bound.prs ?? {}) as Record<string, PrRow[]>)),
+    ),
+    remote: new Map<string, string>(Object.entries(saved?.remote ?? bound.remote ?? {})),
+    removed: saved?.removed ?? ([] as string[]),
+    n: saved?.n ?? 0,
   };
-  const cur = { tick: {} as Tick, run: '', picked: false };
+  const cur = { tick: {} as Tick, run: '', picked: false, saves: 0 };
   const reads = fileRepairHarvestReads({ stateRoot, worktreeRoot: wtRoot });
   const files = filePublicationEffects({ stateRoot });
   const saveQueue = async (queue: Rec): Promise<void> => {
+    cur.saves += 1;
+    if (cur.tick.save_fail === cur.saves) {
+      log.push(['save-fail', cur.saves]);
+      throw new PyError('OSError', 'disk full');
+    }
     log.push(['save', structuredClone(queue)]);
     await files.saveQueue(queue);
   };
@@ -563,13 +653,20 @@ async function runTs(spec: Spec): Promise<{ out: Outcome; root: string }> {
   };
 
   const ticks: Outcome['ticks'] = [];
-  for (const [index, tick] of bound.ticks.entries()) {
+  for (const [index, tick] of ticksToRun.entries()) {
     cur.tick = tick;
-    log.push(['tick', index]);
+    cur.saves = 0;
+    log.push(['tick', index + (segment?.offset ?? 0)]);
     for (const [rel, doc] of Object.entries(tick.files ?? {})) putFile(stateRoot, rel, doc);
+    if (segment && index === 0) {
+      // A fresh process: the queue is only what is on disk.
+      q = toPlainJson(await loadQueueDocument(join(stateRoot, 'queue.json'))) as unknown as Queue;
+    }
     if (tick.restart) {
-      q = JSON.parse(JSON.stringify(q)) as Queue;
-      backlog = new FixPrBacklog();
+      if (!segment) {
+        q = JSON.parse(JSON.stringify(q)) as Queue;
+        backlog = new FixPrBacklog();
+      }
       log.push(['restart']);
     }
     const item = q.items[0]!;
@@ -578,20 +675,51 @@ async function runTs(spec: Spec): Promise<{ out: Outcome; root: string }> {
       cur.picked = false;
     }
     const out: Partial<Outcome['ticks'][number]> = {};
+    let caught = '';
     try {
       out.messages = await repairHarvest(q, item, fx, tick.dry === true);
     } catch (e) {
       out.error = familyOf(e);
+      caught = e instanceof Error ? e.message : String(e);
     }
     // Key order matters to the JSON-text comparison: messages|error, queue, files.
+    if (segment && !tick.crash) {
+      if (out.error !== undefined) {
+        // `crq.tick` catches a harvest failure into the item.
+        q.items[0]!.last_error = `repair harvest failed: ${caught.slice(0, 300)}`;
+      }
+      log.push(['tick-save']);
+      await files.saveQueue(q as Rec);
+    }
     out.queue = structuredClone(q) as Rec;
     out.files = snapshotFiles();
     ticks.push(out as Outcome['ticks'][number]);
     log.push(['backlog', { open: backlog.open, limit: backlog.limit }]);
   }
 
+  if (segment) {
+    writeFileSync(
+      worldPath,
+      JSON.stringify({
+        prs: Object.fromEntries(world.prs),
+        remote: Object.fromEntries(world.remote),
+        removed: world.removed,
+        n: world.n,
+      }),
+    );
+  }
   const out = snapshotFiles();
   return { out: { log, ticks, files: out, removed: world.removed }, root };
+}
+
+/** One durable run: each segment is built from disk alone, nothing carried between them. */
+async function runTsDurable(spec: Spec): Promise<{ out: Outcome; root: string }> {
+  const { root, spec: bound } = layout(spec, true);
+  const parts: Outcome[] = [];
+  for (const segment of segmentsOf(bound.ticks)) {
+    parts.push((await runTs(bound, { root, spec: bound, ...segment })).out);
+  }
+  return { out: joinSegments(parts), root };
 }
 
 // --- the comparison ---------------------------------------------------------
@@ -600,9 +728,9 @@ const norm = (value: unknown, root: string): unknown =>
   JSON.parse(JSON.stringify(value).replaceAll(root, '<ROOT>')) as unknown;
 
 /** Run one scenario on both sides; fail naming the first diverging piece. */
-async function parity(spec: Spec): Promise<Outcome> {
-  const py = runPython(spec);
-  const ts = await runTs(spec);
+async function parity(spec: Spec, durable = false): Promise<Outcome> {
+  const py = durable ? runPythonDurable(spec) : runPython(spec);
+  const ts = durable ? await runTsDurable(spec) : await runTs(spec);
   const a = norm(py.out, py.root) as Outcome;
   const b = norm(ts.out, ts.root) as Outcome;
   const at = a.log.findIndex((e, i) => JSON.stringify(e) !== JSON.stringify(b.log[i]));
@@ -918,5 +1046,197 @@ describe('S6 repair-harvest shadow: harvest -> publish -> finalize -> enroll -> 
     const o = await parity(base({ ticks: [{ dry: true }, {}, {}, { restart: true }] }));
     expect(o.ticks[0]!.messages).toEqual(['would harvest repair R']);
     expect(states(o)).toEqual(['queued', 'published', 'published', 'published']);
+  });
+});
+
+// --- durable restarts -------------------------------------------------------
+
+const durable = (spec: Spec): Promise<Outcome> => parity(spec, true);
+
+/** `state/queue.json` as it stood when tick `index` ended (disk, not memory). */
+function diskItem(o: Outcome, index: number): Rec {
+  return (JSON.parse(o.ticks[index]!.files['queue.json']!) as { items: Rec[] }).items[0]!;
+}
+
+/** The run's state in that file. */
+function diskState(o: Outcome, index: number): string {
+  return (diskItem(o, index).repair_runs as Record<string, Rec>).R!.state as string;
+}
+
+const JOURNAL = `repair/${J1}/publication.json`;
+
+describe('S6 repair-harvest shadow: durable restarts reload state/queue.json', () => {
+  it('a clean publish across three processes performs each external effect once', async () => {
+    const o = await durable(base({ ticks: [{}, { restart: true }, { restart: true }] }));
+    expect(states(o)).toEqual(['published', 'published', 'published']);
+    for (const kind of ['push', 'create', 'event', 'mark', 'wt-remove']) {
+      expect(count(o, kind), kind).toBe(1);
+    }
+    expect(count(o, 'restart')).toBe(2);
+    // What the next process starts from is what the last one persisted.
+    expect([0, 1, 2].map((i) => diskState(o, i))).toEqual(['published', 'published', 'published']);
+    // Only the first process publishes; the later ones reload a published run
+    // and go straight to cleanup, which removes the tree once.
+    expect(removals(o)).toEqual([tree(J1)]);
+    expect(o.removed).toEqual([tree(J1)]);
+    expect(Object.keys(o.files).sort()).toEqual(
+      [JOURNAL, `repair/${J1}/publication.patch`, `repair/${J1}/fix-pr.md`, 'queue.json'].sort(),
+    );
+  });
+
+  it('a crash before the first queue save leaves queue.json untouched and the next process starts over', async () => {
+    const o = await durable(
+      base({
+        ticks: [
+          { save_fail: 1, crash: true },
+          { restart: true },
+          { restart: true },
+          { restart: true },
+        ],
+      }),
+    );
+    expect(states(o)[0]).toBe('publish_failed');
+    // In memory the run failed; on disk it never left its seeded state.
+    expect(diskState(o, 0)).toBe('queued');
+    expect(states(o).slice(1)).toEqual(['published', 'published', 'published']);
+    expect(count(o, 'push')).toBe(1);
+    expect(count(o, 'create')).toBe(1);
+    // The ledger write is not suppressed: the second process re-harvests the run.
+    expect(count(o, 'mark')).toBe(2);
+    expect(removals(o)).toEqual([tree(J1)]);
+  });
+
+  it('a push that landed before the queue save was lost is adopted from the remote, never pushed twice', async () => {
+    const o = await durable(
+      base({
+        ticks: [
+          { save_fail: 2, crash: true },
+          { restart: true },
+          { restart: true },
+          { restart: true },
+        ],
+      }),
+    );
+    // The first save (`ready`) landed; the one after the push did not.
+    expect(diskState(o, 0)).toBe('ready');
+    expect(JOURNAL in o.ticks[0]!.files).toBe(true);
+    expect(count(o, 'push')).toBe(1);
+    expect(count(o, 'ls-remote')).toBe(1);
+    expect(count(o, 'create')).toBe(1);
+    expect(states(o).at(-1)).toBe('published');
+  });
+
+  it('a create that landed before the final queue save was lost is adopted; only the enrolment event repeats', async () => {
+    const o = await durable(
+      base({
+        ticks: [
+          { save_fail: 3, crash: true },
+          { restart: true },
+          { restart: true },
+          { restart: true },
+        ],
+      }),
+    );
+    expect(diskState(o, 0)).toBe('ready');
+    expect(count(o, 'push')).toBe(1);
+    expect(count(o, 'create')).toBe(1);
+    // The PR is adopted by the second process, which enrols it again: Python's
+    // `enrolled` event is a log line, not a deduplicated effect.
+    expect(count(o, 'event')).toBe(2);
+    expect(states(o).at(-1)).toBe('published');
+    expect(removals(o)).toEqual([tree(J1)]);
+  });
+
+  it('a ledger write that fails late is caught into last_error and saved; the next process completes the run once', async () => {
+    const o = await durable(
+      base({
+        ticks: [{ outcome: { [J1]: 'os:ledger offline' } }, { restart: true }, { restart: true }],
+      }),
+    );
+    expect(o.ticks[0]!.error).toBe('OSError');
+    expect(diskState(o, 0)).toBe('queued');
+    expect(diskItem(o, 0).last_error).toBe('repair harvest failed: ledger offline');
+    expect(states(o).slice(1)).toEqual(['published', 'published']);
+    expect(count(o, 'mark')).toBe(2);
+    expect(count(o, 'push')).toBe(1);
+    expect(count(o, 'create')).toBe(1);
+  });
+
+  it('a create that timed out after landing is adopted by a later process, never created twice', async () => {
+    const o = await durable(
+      base({
+        ticks: [
+          { create: 'timeout-landed' },
+          { restart: true },
+          { restart: true },
+          { restart: true },
+        ],
+      }),
+    );
+    expect(count(o, 'create')).toBe(1);
+    expect(states(o).at(-1)).toBe('published');
+    expect(removals(o)).toEqual([tree(J1)]);
+  });
+
+  it('repeated create failures across processes end stale, and the persisted counter survives each reload', async () => {
+    const o = await durable(
+      base({
+        ticks: [
+          { create: 'runtime' },
+          { restart: true, create: 'runtime' },
+          { restart: true, create: 'runtime' },
+          { restart: true },
+          { restart: true },
+        ],
+      }),
+    );
+    expect(states(o).at(-1)).toBe('stale');
+    expect(diskState(o, 4)).toBe('stale');
+    expect(count(o, 'push')).toBe(1);
+    expect(removals(o)).toEqual([tree(J1)]);
+  });
+
+  it('the queue on disk is authoritative: an operator edit between processes beats the last in-memory state', async () => {
+    const edited = { items: [item({}, { state: 'done' })] };
+    const o = await durable(
+      base({
+        ticks: [
+          { save_fail: 1, crash: true },
+          { restart: true, files: { 'queue.json': edited } },
+          { restart: true },
+        ],
+      }),
+    );
+    // Without the edit the second process would harvest and publish the queued run.
+    expect(diskState(o, 0)).toBe('queued');
+    expect(diskState(o, 1)).toBe('done');
+    expect(count(o, 'push')).toBe(0);
+    expect(count(o, 'create')).toBe(0);
+  });
+
+  it('a failed queue save is survivable: the tick persists publish_failed and the next process recovers from the journal', async () => {
+    const o = await durable(
+      base({ ticks: [{ save_fail: 1 }, { restart: true }, { restart: true }, { restart: true }] }),
+    );
+    expect(diskState(o, 0)).toBe('publish_failed');
+    expect(JOURNAL in o.ticks[0]!.files).toBe(true);
+    expect(states(o).slice(1)).toEqual(['published', 'published', 'published']);
+    expect(count(o, 'push')).toBe(1);
+    expect(count(o, 'create')).toBe(1);
+    expect(removals(o)).toEqual([tree(J1)]);
+  });
+
+  it('a NOT-FIXED-only run is done on disk after one process and never publishes', async () => {
+    const o = await durable(
+      base({
+        files: jobFiles(J1, notFixed(J1)),
+        ticks: [{}, { restart: true }, { restart: true }],
+      }),
+    );
+    expect(states(o)).toEqual(['done', 'done', 'done']);
+    expect([0, 1, 2].map((i) => diskState(o, i))).toEqual(['done', 'done', 'done']);
+    expect(count(o, 'push')).toBe(0);
+    expect(count(o, 'mark')).toBe(1);
+    expect(removals(o)).toEqual([tree(J1)]);
   });
 });
