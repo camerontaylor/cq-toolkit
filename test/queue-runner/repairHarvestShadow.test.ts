@@ -26,56 +26,63 @@
 // patch/body/queue files the real writers produce there. Nothing is bound into `tick` or the runtime, nothing
 // is pushed, and nothing leaves the process.
 //
+// A second family of scenarios (the "durable restart" describe at the end) makes
+// every restart a real process boundary instead. Python runs one separate
+// `python3` process per segment; each reloads `state/queue.json` with the real
+// `crq.load_queue` and the in-memory world from `world.json`, a scratch file
+// outside `state/`. The TypeScript side is just as separate: each segment is a
+// `node` child process that runs test/helpers/repairHarvestShadowTs.ts (native
+// type stripping) against the built `dist/` modules, with a fresh effects world,
+// backlog and reads built only from disk: the queue comes back through
+// `loadQueueDocument` and the world from `world.json`. The in-process scenarios
+// run the same helper against `src/`. A tick's
+// `save_fail` makes the N-th queue save made through the harvest effect seam fail
+// before writing (the tick-end write is not counted). A durable live tick
+// also does what `crq.tick` does around `harvest`: an exception becomes
+// `last_error` and the queue is saved at the end of the tick; a tick's `crash`
+// is the process dying right after harvest, so neither happens.
+//
 // Out of scope here, pinned elsewhere: the fix-PR backlog accounting
 // (publicationBacklog.test.ts), the individual policy edges of harvest
 // (repairHarvest.test.ts), of cleanup (repairCleanup.test.ts) and of enrollment
 // (publicationEnroll.test.ts). The scenarios here are the cross-component ones.
 import { execFileSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import {
-  lstatSync,
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
-import { lstat } from 'node:fs/promises';
+import { mkdirSync, mkdtempSync, existsSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, relative } from 'node:path';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
 import { filePublicationEffects } from '../../src/adapters/crq/publicationFiles.js';
+import { loadQueueDocument } from '../../src/adapters/crq/queueEffects.js';
 import { fileRepairHarvestReads } from '../../src/adapters/crq/repairHarvestReads.js';
+import { toPlainJson } from '../../src/policy/crq/jsonValue.js';
 import { receiptJsonDigest } from '../../src/policy/crq/pythonJson.js';
 import { FixPrBacklog } from '../../src/queue-runner/fixPrBacklog.js';
-import {
-  finalizePublication,
-  type PublicationFinalizeEffects,
-} from '../../src/queue-runner/publicationFinalize.js';
+import { finalizePublication } from '../../src/queue-runner/publicationFinalize.js';
 import { publicationNewItem } from '../../src/queue-runner/publicationEnroll.js';
-import {
-  publishRepair,
-  type PublicationPublishEffects,
-} from '../../src/queue-runner/publicationPublish.js';
+import { publishRepair } from '../../src/queue-runner/publicationPublish.js';
 import { PyError } from '../../src/queue-runner/pyErrors.js';
-import type { Item, Queue } from '../../src/queue-runner/repairBackfill.js';
+import { decideRepairCleanup, RETAINED_ARCHIVES } from '../../src/queue-runner/repairCleanup.js';
+import { repairHarvest } from '../../src/queue-runner/repairHarvest.js';
 import {
-  decideRepairCleanup,
-  RETAINED_ARCHIVES,
-  type RepairCleanupProbes,
-  type RetentionRecord,
-} from '../../src/queue-runner/repairCleanup.js';
-import { repairHarvest, type RepairHarvestEffects } from '../../src/queue-runner/repairHarvest.js';
+  putFile,
+  runTs as runTsModule,
+  sha,
+  type Mods,
+  type Outcome,
+  type Rec,
+  type Retained,
+  type Spec,
+  type Tick,
+} from '../helpers/repairHarvestShadowTs.js';
 
 const ORACLE = fileURLToPath(new URL('../helpers/repairHarvestShadowOracle.py', import.meta.url));
 const APPS = fileURLToPath(new URL('../../apps/crq-python', import.meta.url));
-
-type Rec = Record<string, unknown>;
-type Entry = unknown[];
-type Mode = 'ok' | 'runtime' | 'timeout-landed' | 'timeout-lost';
+// The durable TypeScript side is this helper run as `node <helper>` against the built `dist/`.
+const TS_CHILD = fileURLToPath(new URL('../helpers/repairHarvestShadowTs.ts', import.meta.url));
+const DIST_CHECK = fileURLToPath(
+  new URL('../../dist/queue-runner/repairHarvest.js', import.meta.url),
+);
 
 const SHA1 = 'a'.repeat(40);
 const BASE = 'b0';
@@ -89,56 +96,12 @@ afterAll(() => {
   for (const dir of cleanups) rmSync(dir, { recursive: true, force: true });
 });
 
-interface Tick {
-  restart?: boolean;
-  dry?: boolean;
-  /** Files under `state/` written before the tick (an object is JSON, a string is raw). */
-  files?: Record<string, unknown>;
-  create?: Mode;
-  push_fail?: boolean;
-  /** job -> `kind:message` raise from `require_canonical_delivery`. */
-  stale?: Record<string, string>;
-  /** job -> `kind:message` raise from `mark_finding_outcome`. */
-  outcome?: Record<string, string>;
-  /** `git rev-parse HEAD` in a cleanup tree fails with this message. */
-  head_error?: string;
-}
-
-interface Retained {
-  job: string;
-  head: string;
-  base: string;
-}
-
-interface Spec {
-  item: Rec;
-  extra?: Rec[];
-  files: Record<string, unknown>;
-  /** Worktree directories under WT_ROOT: name -> scripted head and `git status` text. */
-  trees: Record<string, { head: string; status: string }>;
-  retained?: Retained[];
-  remote?: Record<string, string>;
-  prs?: Record<string, unknown[]>;
-  pr_info?: Rec | null;
-  ancestor?: boolean;
-  ticks: Tick[];
-}
-
-interface Outcome {
-  log: Entry[];
-  ticks: { messages?: string[]; error?: string; queue: Rec; files: Record<string, string> }[];
-  files: Record<string, string>;
-  removed: string[];
-}
-
 // --- the synthetic world ----------------------------------------------------
 
 const STUB_REPAIR = `import builtins
 def mechanical(config, wt, predecessor, commits, job_id, directory):
     builtins.SHADOW_LOG.append(['mechanical', wt.name, predecessor, list(commits), job_id, directory.name])
 `;
-
-const sha = (text: string): string => createHash('sha256').update(text).digest('hex');
 
 /** One `retained-<token>/` snapshot written the way `retain()` does. */
 function writeRetained(root: string, r: Retained, index: number): void {
@@ -165,19 +128,13 @@ function writeRetained(root: string, r: Retained, index: number): void {
   writeFileSync(join(target, 'manifest.json'), JSON.stringify(manifest));
 }
 
-function putFile(state: string, rel: string, doc: unknown): void {
-  const path = join(state, rel);
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, typeof doc === 'string' ? doc : JSON.stringify(doc));
-}
-
 /** The spec with `{WT}` bound to this side's worktree root. */
 function materialize(spec: Spec, root: string): Spec {
   return JSON.parse(JSON.stringify(spec).replaceAll('{WT}', join(root, 'wt'))) as Spec;
 }
 
 /** Lay out one side's throwaway tree. Both sides get byte-identical state. */
-function layout(spec: Spec): { root: string; spec: Spec } {
+function layout(spec: Spec, durable = false): { root: string; spec: Spec } {
   const root = mkdtempSync(join(tmpdir(), 'repair-shadow-'));
   cleanups.push(root);
   const bound = materialize(spec, root);
@@ -185,6 +142,9 @@ function layout(spec: Spec): { root: string; spec: Spec } {
   mkdirSync(join(root, 'state'), { recursive: true });
   writeFileSync(join(root, 'crq_repair.py'), STUB_REPAIR);
   for (const [rel, doc] of Object.entries(bound.files)) putFile(join(root, 'state'), rel, doc);
+  // A durable run starts from a queue on disk; both sides get these exact bytes.
+  if (durable)
+    putFile(join(root, 'state'), 'queue.json', { items: [bound.item, ...(bound.extra ?? [])] });
   for (const name of Object.keys(bound.trees))
     mkdirSync(join(root, 'wt', name), { recursive: true });
   for (const [index, r] of (bound.retained ?? []).entries()) writeRetained(root, r, index);
@@ -204,394 +164,88 @@ function runPython(spec: Spec): { out: Outcome; root: string } {
   return { out: JSON.parse(stdout) as Outcome, root };
 }
 
+/** One durable run: a separate `python3` process per segment, outcomes concatenated. */
+function runPythonDurable(spec: Spec): { out: Outcome; root: string } {
+  const { root, spec: bound } = layout(spec, true);
+  const parts = segmentsOf(bound.ticks).map((segment) => {
+    const stdout = execFileSync('python3', ['-I', ORACLE, APPS], {
+      input: JSON.stringify({ root, spec: bound, segment }),
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+      env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
+    });
+    return JSON.parse(stdout) as Outcome;
+  });
+  return { out: joinSegments(parts), root };
+}
+
+/** A `restart` tick starts the next process; the first segment starts at tick 0. */
+function segmentsOf(ticks: Tick[]): { ticks: Tick[]; offset: number }[] {
+  const segments: { ticks: Tick[]; offset: number }[] = [];
+  for (const [index, tick] of ticks.entries()) {
+    if (segments.length === 0 || tick.restart) segments.push({ ticks: [], offset: index });
+    segments.at(-1)!.ticks.push(tick);
+  }
+  return segments;
+}
+
+/** The effect log and ticks concatenate; the files and removals are the last process's view. */
+function joinSegments(parts: Outcome[]): Outcome {
+  const last = parts.at(-1)!;
+  return {
+    log: parts.flatMap((p) => p.log),
+    ticks: parts.flatMap((p) => p.ticks),
+    files: last.files,
+    removed: last.removed,
+  };
+}
+
 // --- the TypeScript side ----------------------------------------------------
 
-const NAMES: Record<string, PyError['kind']> = {
-  value: 'ValueError',
-  runtime: 'RuntimeError',
-  os: 'OSError',
-  key: 'KeyError',
-  type: 'TypeError',
+/** The modules under test as vitest sees them: `src/`, in this process. */
+const SRC: Mods = {
+  PyError,
+  FixPrBacklog,
+  filePublicationEffects,
+  loadQueueDocument,
+  fileRepairHarvestReads,
+  toPlainJson,
+  finalizePublication,
+  publicationNewItem,
+  publishRepair,
+  decideRepairCleanup,
+  repairHarvest,
 };
-
-function raise(directive: string | undefined): void {
-  if (!directive) return;
-  const [kind, ...rest] = directive.split(':');
-  const text = rest.join(':');
-  throw new PyError(NAMES[kind as string] as PyError['kind'], kind === 'key' ? `'${text}'` : text);
-}
-
-/** Python's `family()` reports the exception class name; PyError carries it as `kind`. */
-const familyOf = (e: unknown): string => (e instanceof PyError ? e.kind : (e as Error).name);
-
-interface PrRow extends Rec {
-  number: number;
-  url: string;
-  state: string;
-  headRefOid: string;
-}
-
-function walkRetained(dir: string, out: string[]): void {
-  let entries: string[];
-  try {
-    entries = readdirSync(dir);
-  } catch {
-    return;
-  }
-  for (const entry of entries) {
-    const path = join(dir, entry);
-    let walk = false;
-    try {
-      walk = !lstatSync(path).isSymbolicLink() && statSync(path).isDirectory();
-    } catch {
-      walk = false;
-    }
-    if (!walk) continue;
-    if (entry.startsWith('retained-')) {
-      try {
-        statSync(join(path, 'manifest.json'));
-        out.push(path);
-      } catch {
-        // no manifest: not a snapshot
-      }
-    }
-    walkRetained(path, out);
-  }
-}
-
-function readBytes(path: string): Promise<Buffer> {
-  try {
-    return Promise.resolve(readFileSync(path));
-  } catch (e) {
-    return Promise.reject(new PyError('OSError', e instanceof Error ? e.message : String(e)));
-  }
-}
-
-function listFiles(dir: string): string[] {
-  const out: string[] = [];
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const path = join(dir, entry.name);
-    if (entry.isDirectory()) out.push(...listFiles(path));
-    else out.push(path);
-  }
-  return out;
-}
 
 async function runTs(spec: Spec): Promise<{ out: Outcome; root: string }> {
   const { root, spec: bound } = layout(spec);
-  const stateRoot = join(root, 'state');
-  const wtRoot = join(root, 'wt');
-  const log: Entry[] = [];
-  const world = {
-    prs: new Map<string, PrRow[]>(Object.entries((bound.prs ?? {}) as Record<string, PrRow[]>)),
-    remote: new Map<string, string>(Object.entries(bound.remote ?? {})),
-    removed: [] as string[],
-    n: 0,
-  };
-  const cur = { tick: {} as Tick, run: '', picked: false };
-  const reads = fileRepairHarvestReads({ stateRoot, worktreeRoot: wtRoot });
-  const files = filePublicationEffects({ stateRoot });
-  const saveQueue = async (queue: Rec): Promise<void> => {
-    log.push(['save', structuredClone(queue)]);
-    await files.saveQueue(queue);
-  };
-  let backlog = new FixPrBacklog();
-
-  /** The journal, patch, body and queue files the real writers have produced so far. */
-  const snapshotFiles = (): Record<string, string> => {
-    const found: Record<string, string> = {};
-    for (const path of listFiles(stateRoot).sort()) {
-      if (
-        !['publication.json', 'queue.json', 'publication.patch', 'fix-pr.md'].includes(
-          basename(path),
-        )
-      ) {
-        continue;
-      }
-      found[relative(stateRoot, path)] = readFileSync(path, 'utf8');
-    }
-    return found;
-  };
-
-  // The cleanup probes: read-only questions over the fixture, with an in-memory
-  // removal overlay in place of the directory deletion.
-  const probes: RepairCleanupProbes = {
-    resolve: (path) => reads.resolvePath(path),
-    isSymlink: async (path) => {
-      try {
-        return (await lstat(path)).isSymbolicLink();
-      } catch {
-        return false;
-      }
-    },
-    isDirectory: (path) => {
-      if (world.removed.includes(basename(path)) && dirname(path) === wtRoot) {
-        return Promise.resolve(false);
-      }
-      try {
-        return Promise.resolve(statSync(path).isDirectory());
-      } catch {
-        return Promise.resolve(false);
-      }
-    },
-    status: (worktree) => {
-      log.push(['wt-status', basename(worktree)]);
-      return Promise.resolve({
-        failed: false,
-        stdout: bound.trees[basename(worktree)]?.status ?? '',
-      });
-    },
-    head: (worktree) => {
-      log.push(['wt-head', basename(worktree)]);
-      if (cur.tick.head_error !== undefined) {
-        return Promise.reject(new PyError('RuntimeError', cur.tick.head_error));
-      }
-      return Promise.resolve(bound.trees[basename(worktree)]!.head);
-    },
-    retainedManifests: (directory) => {
-      const found: string[] = [];
-      walkRetained(directory, found);
-      return Promise.resolve(
-        found.map((path): RetentionRecord => {
-          const name = basename(path);
-          return {
-            directoryName: name,
-            readManifest: () => readBytes(join(path, 'manifest.json')),
-            archiveDigest: async (archive) =>
-              sha((await readBytes(join(path, archive))).toString()),
-          };
-        }),
-      );
-    },
-  };
-
-  const listBranchPrs = async (branch: string): Promise<PrRow[]> => {
-    log.push(['list', branch]);
-    return structuredClone(world.prs.get(branch) ?? []);
-  };
-
-  const finalizeEffects: PublicationFinalizeEffects = {
-    repo: 'o/r',
-    iso: () => 'now',
-    listBranchPrs,
-    repairProvenance: async () => [],
-    writeFixPrBody: (job, body) => files.writeFixPrBody(job, body),
-    writeJournal: (job, publication) => files.writeJournal(job, publication),
-    saveQueue,
-    async createPr(request) {
-      const mode = cur.tick.create ?? 'ok';
-      log.push(['create', request.head, mode, request.title]);
-      if (mode === 'runtime') throw new PyError('RuntimeError', 'gh pr create failed');
-      if (mode !== 'timeout-lost') {
-        world.n += 1;
-        const rows = world.prs.get(request.head) ?? [];
-        rows.push({
-          number: 100 + world.n,
-          url: `u${world.n}`,
-          state: 'OPEN',
-          headRefOid: `head-${cur.run}`,
-        });
-        world.prs.set(request.head, rows);
-      }
-      if (mode.startsWith('timeout')) {
-        // `str(subprocess.TimeoutExpired(argv, 600))`: harvest stores it in the
-        // record, so the fixture reproduces CPython's text for the exact argv.
-        const argv = [
-          'gh',
-          'pr',
-          'create',
-          '--repo',
-          'o/r',
-          '--base',
-          request.base,
-          '--head',
-          request.head,
-          '--title',
-          request.title,
-          '--body-file',
-          request.bodyFile,
-        ];
-        const text = `[${argv.map((a) => `'${a}'`).join(', ')}]`;
-        throw Object.assign(new Error(`Command '${text}' timed out after 600 seconds`), {
-          name: 'TimeoutExpired',
-        });
-      }
-    },
-    newItem: publicationNewItem({
-      iso: () => 'now',
-      event: async (id, reason) => {
-        log.push(['event', id, reason]);
-      },
-    }),
-  };
-
-  const publishEffects = (p: {
-    q: Rec;
-    item: Rec;
-    run: string;
-    rec: Rec;
-  }): PublicationPublishEffects => ({
-    iso: () => 'now',
-    readJournal: (job) => files.readJournal(job),
-    async revParseDefaultRef() {
-      return 'target-main';
-    },
-    async prInfo(pr) {
-      log.push(['pr-info', pr]);
-      return structuredClone(bound.pr_info) as never;
-    },
-    async isAncestor(older, newer) {
-      log.push(['ancestor', older, newer]);
-      return bound.ancestor ?? true;
-    },
-    async makeWorktree(name, sha1) {
-      log.push(['worktree', name, sha1]);
-      return { path: join(wtRoot, `x-${name}`), branch: `wtb-${name}` };
-    },
-    async removeWorktree(worktree) {
-      log.push(['remove-worktree', basename(worktree.path), worktree.branch]);
-    },
-    async revParseHead() {
-      return cur.picked ? `head-${cur.run}` : `base-${cur.run}`;
-    },
-    async cherryPick() {
-      cur.picked = true;
-    },
-    async verifyCherryPickHead() {
-      throw new PyError('RuntimeError', 'no CHERRY_PICK_HEAD');
-    },
-    async conflictedFiles() {
-      return '';
-    },
-    async stagedFiles() {
-      return '';
-    },
-    async revListSince() {
-      return [`claim-${cur.run}`];
-    },
-    async verify(wt, before, claims, job) {
-      log.push(['verify', basename(wt.path), before, [...claims], job]);
-    },
-    async diffSince() {
-      return `diff-${cur.run}`;
-    },
-    writePatch: (job, body) => files.writePatch(job, body),
-    async hackDetector(_wt, diff) {
-      log.push(['hack', diff]);
-    },
-    async secretScan(_job, target, head) {
-      log.push(['secret-scan', target, head]);
-      return true;
-    },
-    async updateRef(ref, sha1) {
-      log.push(['update-ref', ref, sha1]);
-    },
-    writeJournal: (job, publication) => files.writeJournal(job, publication),
-    saveQueue,
-    async push(branch, expected, sha1) {
-      log.push(['push', branch, expected, sha1]);
-      if (cur.tick.push_fail) throw new PyError('RuntimeError', 'git push failed: network');
-      world.remote.set(branch, sha1);
-    },
-    async lsRemoteHeads(branch) {
-      log.push(['ls-remote', branch]);
-      const head = world.remote.get(branch);
-      return head === undefined ? '' : `${head}\trefs/heads/${branch}`;
-    },
-    listBranchPrs,
-    finalize: (publication) =>
-      finalizePublication(finalizeEffects, backlog, p.q, p.item, p.run, p.rec, publication),
+  const out = await runTsModule(SRC, {
+    root,
+    spec: bound,
+    ticks: bound.ticks,
+    offset: 0,
+    durable: false,
   });
+  return { out, root };
+}
 
-  let q: Queue = { items: [bound.item as Item, ...((bound.extra ?? []) as Item[])] };
-
-  const fx: RepairHarvestEffects = {
-    ...reads,
-    async requireCanonicalDelivery(job) {
-      log.push(['canonical', job.job]);
-      raise(cur.tick.stale?.[job.job as string]);
-    },
-    async makeWorktree(name, commit) {
-      log.push(['worktree', name, commit]);
-      return { path: join(wtRoot, `x-${name}`), branch: `wtb-${name}` };
-    },
-    async removeWorktree(path, branch) {
-      log.push(['remove-worktree', basename(path), branch]);
-    },
-    async verify(wt, predecessor, commits, jobId) {
-      log.push(['verify', basename(wt), predecessor, [...commits], jobId]);
-    },
-    async mechanical(wt, predecessor, commits, jobId) {
-      log.push(['mechanical', basename(wt), predecessor, [...commits], jobId, jobId]);
-    },
-    saveQueue: (queue) => saveQueue(queue as Rec),
-    async markFindingOutcome(job, result) {
-      log.push(['mark', job.job ?? null, JSON.stringify(result)]);
-      raise(cur.tick.outcome?.[job.job as string]);
-    },
-    async recordUnpublishedFixedSibling(findingId, jobId, reason, repairBase) {
-      log.push(['sibling', findingId, jobId, 'needs-human', reason, repairBase, 'exhausted']);
-    },
-    async cleanupHarvested(itemId, jobId, result, alternate) {
-      log.push(['cleanup', itemId, jobId, alternate]);
-      const decision = await decideRepairCleanup(
-        {
-          worktreeRoot: wtRoot,
-          directory: join(stateRoot, 'repair', jobId),
-          itemId,
-          jobId,
-          result,
-          alternate,
-        },
-        probes,
-      );
-      if (decision.remove) {
-        // `git worktree remove` is recorded, never run; the overlay is the removal.
-        log.push(['wt-remove', basename(decision.worktree)]);
-        world.removed.push(basename(decision.worktree));
-      }
-    },
-    publish: (queue, item, run, record, fixed) =>
-      publishRepair(
-        publishEffects({ q: queue as Rec, item, run, rec: record }),
-        queue as Rec,
-        item,
-        run,
-        record,
-        fixed,
-      ),
-  };
-
-  const ticks: Outcome['ticks'] = [];
-  for (const [index, tick] of bound.ticks.entries()) {
-    cur.tick = tick;
-    log.push(['tick', index]);
-    for (const [rel, doc] of Object.entries(tick.files ?? {})) putFile(stateRoot, rel, doc);
-    if (tick.restart) {
-      q = JSON.parse(JSON.stringify(q)) as Queue;
-      backlog = new FixPrBacklog();
-      log.push(['restart']);
-    }
-    const item = q.items[0]!;
-    for (const run of Object.keys((item.repair_runs ?? {}) as Rec)) {
-      cur.run = run;
-      cur.picked = false;
-    }
-    const out: Partial<Outcome['ticks'][number]> = {};
-    try {
-      out.messages = await repairHarvest(q, item, fx, tick.dry === true);
-    } catch (e) {
-      out.error = familyOf(e);
-    }
-    // Key order matters to the JSON-text comparison: messages|error, queue, files.
-    out.queue = structuredClone(q) as Rec;
-    out.files = snapshotFiles();
-    ticks.push(out as Outcome['ticks'][number]);
-    log.push(['backlog', { open: backlog.open, limit: backlog.limit }]);
-  }
-
-  const out = snapshotFiles();
-  return { out: { log, ticks, files: out, removed: world.removed }, root };
+/**
+ * One durable run: a separate `node` process per segment, each running the built
+ * `dist/` modules. Nothing but the scratch tree is shared between them.
+ */
+function runTsDurable(spec: Spec): { out: Outcome; root: string } {
+  if (!existsSync(DIST_CHECK)) throw new Error('dist is missing: run pnpm run build');
+  const { root, spec: bound } = layout(spec, true);
+  const parts = segmentsOf(bound.ticks).map((segment) => {
+    const stdout = execFileSync(process.execPath, ['--no-warnings', TS_CHILD], {
+      input: JSON.stringify({ root, spec: bound, durable: true, ...segment }),
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+      env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
+    });
+    return JSON.parse(stdout) as Outcome;
+  });
+  return { out: joinSegments(parts), root };
 }
 
 // --- the comparison ---------------------------------------------------------
@@ -600,9 +254,9 @@ const norm = (value: unknown, root: string): unknown =>
   JSON.parse(JSON.stringify(value).replaceAll(root, '<ROOT>')) as unknown;
 
 /** Run one scenario on both sides; fail naming the first diverging piece. */
-async function parity(spec: Spec): Promise<Outcome> {
-  const py = runPython(spec);
-  const ts = await runTs(spec);
+async function parity(spec: Spec, durable = false): Promise<Outcome> {
+  const py = durable ? runPythonDurable(spec) : runPython(spec);
+  const ts = durable ? runTsDurable(spec) : await runTs(spec);
   const a = norm(py.out, py.root) as Outcome;
   const b = norm(ts.out, ts.root) as Outcome;
   const at = a.log.findIndex((e, i) => JSON.stringify(e) !== JSON.stringify(b.log[i]));
@@ -918,5 +572,223 @@ describe('S6 repair-harvest shadow: harvest -> publish -> finalize -> enroll -> 
     const o = await parity(base({ ticks: [{ dry: true }, {}, {}, { restart: true }] }));
     expect(o.ticks[0]!.messages).toEqual(['would harvest repair R']);
     expect(states(o)).toEqual(['queued', 'published', 'published', 'published']);
+  });
+});
+
+// --- durable restarts -------------------------------------------------------
+
+const durable = (spec: Spec): Promise<Outcome> => parity(spec, true);
+
+/** `state/queue.json` as it stood when tick `index` ended (disk, not memory). */
+function diskItem(o: Outcome, index: number): Rec {
+  return (JSON.parse(o.ticks[index]!.files['queue.json']!) as { items: Rec[] }).items[0]!;
+}
+
+/** The run's state in that file. */
+function diskState(o: Outcome, index: number): string {
+  return (diskItem(o, index).repair_runs as Record<string, Rec>).R!.state as string;
+}
+
+const JOURNAL = `repair/${J1}/publication.json`;
+
+describe('S6 repair-harvest shadow: durable restarts reload state/queue.json', () => {
+  it('a clean publish across three processes performs each external effect once', async () => {
+    const o = await durable(base({ ticks: [{}, { restart: true }, { restart: true }] }));
+    expect(states(o)).toEqual(['published', 'published', 'published']);
+    for (const kind of ['push', 'create', 'event', 'mark', 'wt-remove']) {
+      expect(count(o, kind), kind).toBe(1);
+    }
+    expect(count(o, 'restart')).toBe(2);
+    // What the next process starts from is what the last one persisted.
+    expect([0, 1, 2].map((i) => diskState(o, i))).toEqual(['published', 'published', 'published']);
+    // Only the first process publishes; the later ones reload a published run
+    // and go straight to cleanup, which removes the tree once.
+    expect(removals(o)).toEqual([tree(J1)]);
+    expect(o.removed).toEqual([tree(J1)]);
+    expect(Object.keys(o.files).sort()).toEqual(
+      [JOURNAL, `repair/${J1}/publication.patch`, `repair/${J1}/fix-pr.md`, 'queue.json'].sort(),
+    );
+  });
+
+  it('a dry tick never reaches harvest: no canonical or harvest effect, scratch unchanged, and the next process publishes once', async () => {
+    // A `stale` directive would raise if harvest ran, so any error here means it was called.
+    const o = await durable(
+      base({
+        ticks: [{ dry: true, stale: { [J1]: 'value:x' } }, { restart: true }, { restart: true }],
+      }),
+    );
+    const next = o.log.findIndex((e) => e[0] === 'tick' && e[1] === 1);
+    // The dry tick's whole effect log is its own bookkeeping: no canonical, mark, push or save.
+    expect(o.log.slice(0, next).map((e) => e[0])).toEqual(['tick', 'backlog']);
+    expect(o.ticks[0]).not.toHaveProperty('messages');
+    expect(o.ticks[0]).not.toHaveProperty('error');
+    // Scratch is as seeded: queue.json is the fixture and nothing else was written.
+    expect(Object.keys(o.ticks[0]!.files)).toEqual(['queue.json']);
+    expect(JSON.parse(o.ticks[0]!.files['queue.json']!)).toEqual(o.ticks[0]!.queue);
+    expect(diskItem(o, 0)).not.toHaveProperty('last_error');
+    // Only the two live ticks save at tick end, and the run then publishes once.
+    expect(count(o, 'tick-save')).toBe(2);
+    expect(diskState(o, 0)).toBe('queued');
+    expect(states(o)).toEqual(['queued', 'published', 'published']);
+    expect(count(o, 'canonical')).toBe(1);
+    expect(count(o, 'push')).toBe(1);
+    expect(count(o, 'create')).toBe(1);
+    expect(removals(o)).toEqual([tree(J1)]);
+  });
+
+  it('a crash before the first queue save leaves queue.json untouched and the next process starts over', async () => {
+    const o = await durable(
+      base({
+        ticks: [
+          { save_fail: 1, crash: true },
+          { restart: true },
+          { restart: true },
+          { restart: true },
+        ],
+      }),
+    );
+    expect(states(o)[0]).toBe('publish_failed');
+    // In memory the run failed; on disk it never left its seeded state.
+    expect(diskState(o, 0)).toBe('queued');
+    expect(states(o).slice(1)).toEqual(['published', 'published', 'published']);
+    expect(count(o, 'push')).toBe(1);
+    expect(count(o, 'create')).toBe(1);
+    // The ledger write is not suppressed: the second process re-harvests the run.
+    expect(count(o, 'mark')).toBe(2);
+    expect(removals(o)).toEqual([tree(J1)]);
+  });
+
+  it('a push that landed before the queue save was lost is adopted from the remote, never pushed twice', async () => {
+    const o = await durable(
+      base({
+        ticks: [
+          { save_fail: 2, crash: true },
+          { restart: true },
+          { restart: true },
+          { restart: true },
+        ],
+      }),
+    );
+    // The first save (`ready`) landed; the one after the push did not.
+    expect(diskState(o, 0)).toBe('ready');
+    expect(JOURNAL in o.ticks[0]!.files).toBe(true);
+    expect(count(o, 'push')).toBe(1);
+    expect(count(o, 'ls-remote')).toBe(1);
+    expect(count(o, 'create')).toBe(1);
+    expect(states(o).at(-1)).toBe('published');
+  });
+
+  it('a create that landed before the final queue save was lost is adopted; only the enrolment event repeats', async () => {
+    const o = await durable(
+      base({
+        ticks: [
+          { save_fail: 3, crash: true },
+          { restart: true },
+          { restart: true },
+          { restart: true },
+        ],
+      }),
+    );
+    expect(diskState(o, 0)).toBe('ready');
+    expect(count(o, 'push')).toBe(1);
+    expect(count(o, 'create')).toBe(1);
+    // The PR is adopted by the second process, which enrols it again: Python's
+    // `enrolled` event is a log line, not a deduplicated effect.
+    expect(count(o, 'event')).toBe(2);
+    expect(states(o).at(-1)).toBe('published');
+    expect(removals(o)).toEqual([tree(J1)]);
+  });
+
+  it('a ledger write that fails late is caught into last_error and saved; the next process completes the run once', async () => {
+    const o = await durable(
+      base({
+        ticks: [{ outcome: { [J1]: 'os:ledger offline' } }, { restart: true }, { restart: true }],
+      }),
+    );
+    expect(o.ticks[0]!.error).toBe('OSError');
+    expect(diskState(o, 0)).toBe('queued');
+    expect(diskItem(o, 0).last_error).toBe('repair harvest failed: ledger offline');
+    expect(states(o).slice(1)).toEqual(['published', 'published']);
+    expect(count(o, 'mark')).toBe(2);
+    expect(count(o, 'push')).toBe(1);
+    expect(count(o, 'create')).toBe(1);
+  });
+
+  it('a create that timed out after landing is adopted by a later process, never created twice', async () => {
+    const o = await durable(
+      base({
+        ticks: [
+          { create: 'timeout-landed' },
+          { restart: true },
+          { restart: true },
+          { restart: true },
+        ],
+      }),
+    );
+    expect(count(o, 'create')).toBe(1);
+    expect(states(o).at(-1)).toBe('published');
+    expect(removals(o)).toEqual([tree(J1)]);
+  });
+
+  it('repeated create failures across processes end stale, and the persisted counter survives each reload', async () => {
+    const o = await durable(
+      base({
+        ticks: [
+          { create: 'runtime' },
+          { restart: true, create: 'runtime' },
+          { restart: true, create: 'runtime' },
+          { restart: true },
+          { restart: true },
+        ],
+      }),
+    );
+    expect(states(o).at(-1)).toBe('stale');
+    expect(diskState(o, 4)).toBe('stale');
+    expect(count(o, 'push')).toBe(1);
+    expect(removals(o)).toEqual([tree(J1)]);
+  });
+
+  it('the queue on disk is authoritative: an operator edit between processes beats the last in-memory state', async () => {
+    const edited = { items: [item({}, { state: 'done' })] };
+    const o = await durable(
+      base({
+        ticks: [
+          { save_fail: 1, crash: true },
+          { restart: true, files: { 'queue.json': edited } },
+          { restart: true },
+        ],
+      }),
+    );
+    // Without the edit the second process would harvest and publish the queued run.
+    expect(diskState(o, 0)).toBe('queued');
+    expect(diskState(o, 1)).toBe('done');
+    expect(count(o, 'push')).toBe(0);
+    expect(count(o, 'create')).toBe(0);
+  });
+
+  it('a failed queue save is survivable: the tick persists publish_failed and the next process recovers from the journal', async () => {
+    const o = await durable(
+      base({ ticks: [{ save_fail: 1 }, { restart: true }, { restart: true }, { restart: true }] }),
+    );
+    expect(diskState(o, 0)).toBe('publish_failed');
+    expect(JOURNAL in o.ticks[0]!.files).toBe(true);
+    expect(states(o).slice(1)).toEqual(['published', 'published', 'published']);
+    expect(count(o, 'push')).toBe(1);
+    expect(count(o, 'create')).toBe(1);
+    expect(removals(o)).toEqual([tree(J1)]);
+  });
+
+  it('a NOT-FIXED-only run is done on disk after one process and never publishes', async () => {
+    const o = await durable(
+      base({
+        files: jobFiles(J1, notFixed(J1)),
+        ticks: [{}, { restart: true }, { restart: true }],
+      }),
+    );
+    expect(states(o)).toEqual(['done', 'done', 'done']);
+    expect([0, 1, 2].map((i) => diskState(o, i))).toEqual(['done', 'done', 'done']);
+    expect(count(o, 'push')).toBe(0);
+    expect(count(o, 'mark')).toBe(1);
+    expect(removals(o)).toEqual([tree(J1)]);
   });
 });

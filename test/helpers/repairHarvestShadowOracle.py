@@ -4,7 +4,8 @@
 (apps/crq-python) over a fixed synthetic world, restarted between ticks.
 
 Test tooling only. Usage: python3 -I repairHarvestShadowOracle.py <apps/crq-python dir>
-Reads {"root": <laid-out tmp tree>, "spec": <spec>} on stdin and writes the outcome.
+Reads {"root": <laid-out tmp tree>, "spec": <spec>[, "segment": {"ticks": [..], "offset": n}]}
+on stdin and writes the outcome.
 
 Everything effectful is a fixture and nothing leaves the process:
 
@@ -24,16 +25,33 @@ test reads (state files, result and inbox files, retained snapshots, empty
 worktree directories); the oracle writes the journal, patch, fix-PR body and
 `queue.json` into it through the real writers.
 
-A restart is an in-memory queue JSON round trip plus `reset_fix_pr_backlog()`,
-within the same process: it does NOT re-read `state/queue.json`. The world
-(remote refs, PRs, removed trees, files) persists. What a restart exercises
-from disk is the publication journal (`state/repair/<job>/publication.json`)
-that `recover_publication` reads back, and the result/inbox/snapshot files.
+By default a restart is an in-memory queue JSON round trip plus
+`reset_fix_pr_backlog()`, within the same process: it does NOT re-read
+`state/queue.json`. The world (remote refs, PRs, removed trees, files) persists.
+What it exercises from disk is the publication journal
+(`state/repair/<job>/publication.json`) that `recover_publication` reads back,
+and the result/inbox/snapshot files.
+
+With a "segment" in the payload this process is one durable segment of a run
+whose restarts are real process boundaries: the queue is reloaded from
+`state/queue.json` with the real `crq.load_queue` (after the first tick's files
+are laid down), and the in-memory world (remote refs, PRs, removed trees, the
+PR counter) is read from and written back to `root/world.json`, a scratch file
+outside `state/`. The caller runs one process per segment and concatenates the
+outcomes. A tick's "save_fail": N makes the N-th `save_queue` made through the harvest
+effect seam raise OSError before anything is written; the durable tick-end write
+below is not counted. A live durable tick also does what `crq.tick` does around
+`harvest`: an exception is caught into `item['last_error'] = 'repair harvest
+failed: ' + str(exc)[:300]` and the queue is saved at the end of the tick. A dry
+durable tick does not call `harvest` at all and saves nothing (`crq.tick(dry=True)`
+does neither); non-durable ticks still call `harvest(dry=True)` directly. A tick's "crash": true
+is the process dying right after `harvest`, so neither happens (it must be the
+last tick of its segment).
 
 Spec: {"item": {..}, "extra": [{..}], "ticks": [{"restart": bool, "files": {rel: json|str},
  "create": "ok"|"runtime"|"timeout-landed"|"timeout-lost", "push_fail": bool,
  "outcome": {job: "<directive>"}, "stale": {job: "<directive>"},
- "head_error": str|null, "dry": bool}],
+ "head_error": str|null, "dry": bool, "save_fail": int, "crash": bool}],
  "remote": {branch: sha}, "prs": {branch: [row]}, "pr_info": row|null,
  "trees": {name: {"head": sha, "status": str}}, "ancestor": bool}
 
@@ -78,11 +96,16 @@ def main():
     payload = json.load(sys.stdin)
     root, spec = Path(payload['root']), payload['spec']
     state, wt_root = root / 'state', root / 'wt'
+    segment = payload.get('segment')
+    world_path = root / 'world.json'
     log = []
     builtins.SHADOW_LOG = log  # the stub crq_repair.py records `mechanical` here
-    world = {'prs': copy.deepcopy(spec.get('prs', {})), 'remote': dict(spec.get('remote', {})),
-             'removed': [], 'n': 0}
-    cur = {'tick': {}, 'run': None, 'picked': False}
+    if segment and world_path.exists():
+        world = json.loads(world_path.read_text())
+    else:
+        world = {'prs': copy.deepcopy(spec.get('prs', {})), 'remote': dict(spec.get('remote', {})),
+                 'removed': [], 'n': 0}
+    cur = {'tick': {}, 'run': None, 'picked': False, 'saves': 0}
     trees = spec.get('trees', {})
 
     # --- the in-memory removal overlay over retain's `Path` -------------------
@@ -185,6 +208,10 @@ def main():
         return wt_root / ('x-' + name), 'wtb-' + name
 
     def save_queue(q):
+        cur['saves'] += 1
+        if cur['tick'].get('save_fail') == cur['saves']:
+            log.append(['save-fail', cur['saves']])
+            raise OSError('disk full')
         log.append(['save', copy.deepcopy(q)])
         crq_repair.atomic(state / 'queue.json', q)
 
@@ -239,8 +266,11 @@ def main():
         mock.patch.object(retain, 'Path', Overlay),
         mock.patch.object(retain, 'cleanup_harvested', cleanup_wrapper(retain.cleanup_harvested)),
     ]
+    if segment:
+        patches.append(mock.patch.object(crq, 'QUEUE', state / 'queue.json'))
     for patch in patches:
         patch.start()
+
     def snapshot_files():
         found = {}
         for path in sorted(state.rglob('*')):
@@ -251,26 +281,38 @@ def main():
     ticks = []
     try:
         q = {'items': [spec['item'], *copy.deepcopy(spec.get('extra', []))]}
-        for index, tick in enumerate(spec['ticks']):
+        for index, tick in enumerate(segment['ticks'] if segment else spec['ticks']):
             cur['tick'] = tick
-            log.append(['tick', index])
+            cur['saves'] = 0
+            log.append(['tick', index + (segment['offset'] if segment else 0)])
             for rel_path, doc in tick.get('files', {}).items():
                 path = state / rel_path
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(doc if isinstance(doc, str) else json.dumps(doc))
+                path.write_text(doc if isinstance(doc, str) else json.dumps(doc, separators=(',', ':')))
+            if segment and index == 0:
+                q = crq.load_queue()  # a fresh process: the queue is only what is on disk
             if tick.get('restart'):
-                q = json.loads(json.dumps(q))  # in-memory round trip; queue.json is not re-read
-                repair_tick.reset_fix_pr_backlog()
+                if not segment:
+                    q = json.loads(json.dumps(q))  # in-memory round trip; queue.json is not re-read
+                    repair_tick.reset_fix_pr_backlog()
                 log.append(['restart'])
             item = q['items'][0]
             for run_id, record in item.get('repair_runs', {}).items():
                 cur['run'] = run_id
                 cur['picked'] = False
             out = {}
-            try:
-                out['messages'] = repair_tick.harvest(c, q, item, dry=bool(tick.get('dry')))
-            except Exception as exc:  # noqa: BLE001 - the exception family is the result
-                out['error'] = family(exc)
+            # crq.tick(dry=True) never calls harvest: a durable dry tick does not either.
+            skip_harvest = bool(segment) and bool(tick.get('dry'))
+            if not skip_harvest:
+                try:
+                    out['messages'] = repair_tick.harvest(c, q, item, dry=bool(tick.get('dry')))
+                except Exception as exc:  # noqa: BLE001 - the exception family is the result
+                    out['error'] = family(exc)
+                    if segment and not tick.get('crash'):
+                        item['last_error'] = 'repair harvest failed: ' + str(exc)[:300]
+            if segment and not tick.get('crash') and not skip_harvest:
+                log.append(['tick-save'])
+                crq_repair.atomic(state / 'queue.json', q)
             out['queue'] = copy.deepcopy(q)
             out['files'] = snapshot_files()
             ticks.append(out)
@@ -278,6 +320,8 @@ def main():
     finally:
         for patch in patches:
             patch.stop()
+    if segment:
+        world_path.write_text(json.dumps(world))
     json.dump({'log': log, 'ticks': ticks, 'files': snapshot_files(), 'removed': world['removed']}, sys.stdout)
 
 
