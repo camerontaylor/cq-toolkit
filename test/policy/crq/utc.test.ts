@@ -292,7 +292,7 @@ describe('compact bare fractions (CPython 3.14 pinned)', () => {
     // Mixed separators from #2330 stay malformed.
     '2026-01-01T00:00:00+01:0203',
     '2026-01-01T00:00:00+0102:03',
-    // A fraction needs hhmmss first.
+    // hhmmss plus one trailing digit is not a fraction either (same rule as above).
     '2026-01-01T1200123',
   ])('%s stays malformed (null)', (value) => {
     expect(parseUtcDetailed(value)).toBeNull();
