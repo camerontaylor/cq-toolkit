@@ -198,3 +198,65 @@ describe('parseUtcDetailed — component-validation messages', () => {
     expect(parseUtc(value)?.iso).toBe(expected);
   });
 });
+
+describe('year-10000 rollover and mixed-separator offsets (CPython 3.14 pinned)', () => {
+  // Verified against python3.14 and python3.15 `datetime.fromisoformat`.
+  const YEAR_10000 = 'year must be in 1..9999, not 10000';
+
+  test.each([
+    '9999-12-31T24:00:00+00:00',
+    '9999-12-31T24:00:00Z',
+    '9999-12-31T24:00:00',
+    '9999-12-31T24:00:00-23:59',
+    '9999-12-31T24Z',
+    '9999-12-31T2400Z',
+    '99991231T240000Z',
+    '9999-W52-5T24:00:00Z',
+    '9999-W52-6T00:00:00Z',
+  ])('%s is a ValueError, not an overflow, in every wrapper', (value) => {
+    expect(() => parseUtcDetailed(value)).toThrow(YEAR_10000);
+    expect(parseUtc(value)).toBeNull();
+    expect(parseUtcUnchecked(value)).toBeNull();
+  });
+
+  test('the year error follows offset and 24:00 validation, as in CPython', () => {
+    expect(() => parseUtcDetailed('9999-12-31T24:00:00+25:00')).toThrow('offset must be');
+    expect(() => parseUtcDetailed('9999-12-31T24:00:01+00:00')).toThrow(
+      'minute, second, and microsecond must be 0 when hour is 24',
+    );
+    expect(parseUtcDetailed('9999-12-31T24:00:00+01:0203')).toBeNull();
+  });
+
+  test('the last representable instants and the 24:00 on the day before still parse', () => {
+    expect(parseUtcDetailed('9999-12-31T23:59:59Z')).toBe(253402300799000000n);
+    expect(parseUtcDetailed('9999-12-31T23:59:59.999999Z')).toBe(253402300799999999n);
+    expect(parseUtcDetailed('9999-12-30T24:00:00Z')).toBe(253402214400000000n);
+    expect(parseUtc('9999-12-30T24:00:00Z')?.iso).toBe('9999-12-31T00:00:00.000000Z');
+  });
+
+  test.each([
+    '2026-01-01T00:00:00+01:0203',
+    '2026-01-01T00:00:00+0102:03',
+    '2026-01-01T00:00:00-01:0203',
+    '2026-01-01T00:00:00-0102:03',
+    '2026-01-01T00:00:00+01:0203.5',
+    '2026-01-01T00:00:00+0102:03.5',
+    '2026-01-01T00:00:00+0102:03,5',
+    '2026-01-01T00:00:00+0102:0',
+  ])('mixed-separator offset %s is malformed (null), never an instant', (value) => {
+    expect(parseUtcDetailed(value)).toBeNull();
+    expect(parseUtc(value)).toBeNull();
+    expect(parseUtcUnchecked(value)).toBeNull();
+  });
+
+  test.each([
+    ['2026-01-01T00:00:00+01:02:03', 1767221877000000n],
+    ['2026-01-01T00:00:00+010203', 1767221877000000n],
+    ['2026-01-01T00:00:00+01:02', 1767221880000000n],
+    ['2026-01-01T00:00:00+0102', 1767221880000000n],
+    ['2026-01-01T00:00:00+01', 1767222000000000n],
+    ['2026-01-01T00:00:00-01:02:03.5', 1767229323500000n],
+  ])('consistent-separator offset %s still parses', (value, micros) => {
+    expect(parseUtcDetailed(value)).toBe(micros);
+  });
+});

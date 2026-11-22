@@ -166,6 +166,13 @@ function parseIsoLike(text: string): bigint | null {
   if (date === null) return null;
   const time = parseTime(timeText);
   if (time === null) return null;
+  // The 24:00 rollover can carry 9999-12-31 into year 10000. CPython rejects
+  // that while building the datetime, after the offset has been validated, with
+  // a ValueError (not the OverflowError `astimezone` raises for offsets).
+  const { year: localYear } = civilFromDays(date.days + time.dayOffset);
+  if (localYear > 9999) {
+    throw new UtcParseError(`year must be in 1..9999, not ${localYear}`);
+  }
   const localMicros =
     BigInt(date.days + time.dayOffset) * MICROS_PER_DAY +
     BigInt(time.hour) * 3_600n * MICROS_PER_SECOND +
@@ -309,7 +316,12 @@ function parseClock(text: string): Omit<ParsedTime, 'offsetMicros'> | null {
 
 function parseOffset(text: string): bigint | null {
   if (text === '') return 0n;
-  const match = /^([+-])(\d{2})(?::?(\d{2})(?::?(\d{2})(?:[.,](\d+))?)?)?$/.exec(text);
+  // CPython fixes the separator style at the first offset component: after
+  // `hh` a `:` means every later component is colon-separated, anything else
+  // means none is. Mixed styles (`+01:0203`, `+0102:03`) are malformed.
+  const match =
+    /^([+-])(\d{2})(?::(\d{2})(?::(\d{2})(?:[.,](\d+))?)?)?$/.exec(text) ??
+    /^([+-])(\d{2})(?:(\d{2})(?:(\d{2})(?:[.,](\d+))?)?)?$/.exec(text);
   if (match === null) return null;
   const sign = match[1] === '-' ? -1n : 1n;
   const hours = BigInt(match[2] as string);
