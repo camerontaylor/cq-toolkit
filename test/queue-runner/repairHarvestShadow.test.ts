@@ -7,19 +7,23 @@
 // (apps/crq-python) via test/helpers/repairHarvestShadowOracle.py.
 //
 // Each scenario is a fixed synthetic queue plus files, replayed over several
-// ticks with restarts between them (a queue JSON round trip and a fresh
-// `FixPrBacklog`; the world persists). Per tick the queue, the ordered effect
-// log, the journal/patch/body/queue files and the in-memory removal set are
-// compared as JSON text, and the first diverging effect is named.
+// ticks with restarts between them. A restart is an in-memory queue JSON round
+// trip and a fresh `FixPrBacklog` in the same process; it does not re-read
+// `state/queue.json`. The world persists, and what recovery reads back from disk
+// is the publication journal (`state/repair/<job>/publication.json`) plus the
+// result, inbox and snapshot files. Per tick the queue and the journal/patch/
+// body/queue files are snapshotted and compared as JSON text; the ordered effect
+// log and the in-memory removal set are compared once over the whole run, and the
+// first diverging effect is named.
 //
 // Offline and non-destructive by construction. Git, `gh`, the forge, the
 // provider, the finding ledger and the worktree removal are all scripted in
 // memory on BOTH sides: a push moves a ref in a dict, a PR create appends a
 // row, and `git worktree remove` is only recorded and added to a removed set
 // that the directory probe consults. No directory is ever deleted; the only
-// disk is a throwaway tree the layout writes (state files, retained snapshots,
-// empty worktree directories) and the journal/patch/body/queue files the real
-// writers produce there. Nothing is bound into `tick` or the runtime, nothing
+// disk is a throwaway tree: the inputs the layout writes (state, result, inbox
+// and retained-snapshot files, empty worktree directories) and the journal/
+// patch/body/queue files the real writers produce there. Nothing is bound into `tick` or the runtime, nothing
 // is pushed, and nothing leaves the process.
 //
 // Out of scope here, pinned elsewhere: the fix-PR backlog accounting
@@ -122,7 +126,7 @@ interface Spec {
 
 interface Outcome {
   log: Entry[];
-  ticks: { messages?: string[]; error?: string; queue: Rec }[];
+  ticks: { messages?: string[]; error?: string; queue: Rec; files: Record<string, string> }[];
   files: Record<string, string>;
   removed: string[];
 }
@@ -292,6 +296,22 @@ async function runTs(spec: Spec): Promise<{ out: Outcome; root: string }> {
     await files.saveQueue(queue);
   };
   let backlog = new FixPrBacklog();
+
+  /** The journal, patch, body and queue files the real writers have produced so far. */
+  const snapshotFiles = (): Record<string, string> => {
+    const found: Record<string, string> = {};
+    for (const path of listFiles(stateRoot).sort()) {
+      if (
+        !['publication.json', 'queue.json', 'publication.patch', 'fix-pr.md'].includes(
+          basename(path),
+        )
+      ) {
+        continue;
+      }
+      found[relative(stateRoot, path)] = readFileSync(path, 'utf8');
+    }
+    return found;
+  };
 
   // The cleanup probes: read-only questions over the fixture, with an in-memory
   // removal overlay in place of the directory deletion.
@@ -563,21 +583,14 @@ async function runTs(spec: Spec): Promise<{ out: Outcome; root: string }> {
     } catch (e) {
       out.error = familyOf(e);
     }
-    // Key order matters to the JSON-text comparison: messages|error, then queue.
+    // Key order matters to the JSON-text comparison: messages|error, queue, files.
     out.queue = structuredClone(q) as Rec;
+    out.files = snapshotFiles();
     ticks.push(out as Outcome['ticks'][number]);
     log.push(['backlog', { open: backlog.open, limit: backlog.limit }]);
   }
 
-  const out: Record<string, string> = {};
-  for (const path of listFiles(stateRoot).sort()) {
-    if (
-      !['publication.json', 'queue.json', 'publication.patch', 'fix-pr.md'].includes(basename(path))
-    ) {
-      continue;
-    }
-    out[relative(stateRoot, path)] = readFileSync(path, 'utf8');
-  }
+  const out = snapshotFiles();
   return { out: { log, ticks, files: out, removed: world.removed }, root };
 }
 

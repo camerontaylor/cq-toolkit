@@ -411,12 +411,16 @@ over `filePublicationEffects`) and its `cleanupHarvested` seam (`decideRepairCle
 and the real `repair_tick.harvest`, `publish`, `recover_publication`,
 `finalize_publication`, `crq.new_item` and `crq_repair.retain.cleanup_harvested`
 (`test/helpers/repairHarvestShadowOracle.py`), over fixed synthetic queues with a
-restart (queue JSON round trip, fresh `FixPrBacklog`) between ticks. Forge, Git,
-`gh` and the ledger are in-memory fixtures; `git worktree remove` is only recorded and
-adds the tree to an in-memory removed set that the directory probe consults, so no
-directory is deleted; the only disk is a throwaway tree for the journal, patch, body
-and `queue.json`. Per tick the queue, ordered effects (including `enrolled` events and
-cleanup calls), files and removed set are compared as JSON text. No mismatch was found
+restart between ticks: an in-memory queue JSON round trip and a fresh `FixPrBacklog` in
+the same process, not a re-read of `state/queue.json`; recovery reads the publication
+journal back from disk. Forge, Git, `gh` and the ledger are in-memory fixtures;
+`git worktree remove` is only recorded and adds the tree to an in-memory removed set
+that the directory probe consults, so no directory is deleted. The only disk is a
+throwaway tree holding the inputs the code under test reads (result, inbox and
+retained-snapshot files, empty worktree directories) and the journal, patch, body and
+`queue.json` it writes. Per tick the queue and those written files are snapshotted and
+compared as JSON text; the ordered effect log (including `enrolled` events and cleanup
+calls), the final files and the removed set are compared once over the whole run. No mismatch was found
 in the composed scenarios. Not composed: the backlog refresh (pinned by
 `publicationBacklog.test.ts`), the rejected-inbox replay divergence (pinned by
 `repairHarvest.test.ts`), and the text of a timed-out `gh pr create`, which the fixture

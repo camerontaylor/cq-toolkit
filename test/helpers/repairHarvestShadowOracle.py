@@ -19,12 +19,16 @@ Everything effectful is a fixture and nothing leaves the process:
   recording stubs (as in repairHarvest.test.ts); `crq.iso` and `crq.event` are
   constants and a recorder. There is no network, provider, queue host or live data.
 
-The only disk is `root`, a throwaway tree TS laid out (state files, the result
-files, retained snapshots, empty worktree directories); the oracle writes the
-journal, patch, fix-PR body and `queue.json` into it through the real writers.
+The only disk is `root`, a throwaway tree. TS lays out the inputs the code under
+test reads (state files, result and inbox files, retained snapshots, empty
+worktree directories); the oracle writes the journal, patch, fix-PR body and
+`queue.json` into it through the real writers.
 
-A restart is a queue JSON round trip plus `reset_fix_pr_backlog()`: the world
-(remote refs, PRs, removed trees, files) persists, the process memory does not.
+A restart is an in-memory queue JSON round trip plus `reset_fix_pr_backlog()`,
+within the same process: it does NOT re-read `state/queue.json`. The world
+(remote refs, PRs, removed trees, files) persists. What a restart exercises
+from disk is the publication journal (`state/repair/<job>/publication.json`)
+that `recover_publication` reads back, and the result/inbox/snapshot files.
 
 Spec: {"item": {..}, "extra": [{..}], "ticks": [{"restart": bool, "files": {rel: json|str},
  "create": "ok"|"runtime"|"timeout-landed"|"timeout-lost", "push_fail": bool,
@@ -33,8 +37,10 @@ Spec: {"item": {..}, "extra": [{..}], "ticks": [{"restart": bool, "files": {rel:
  "remote": {branch: sha}, "prs": {branch: [row]}, "pr_info": row|null,
  "trees": {name: {"head": sha, "status": str}}, "ancestor": bool}
 
-The result is {"log": [..], "ticks": [{"messages", "error", "queue"}], "files": {..},
-"removed": [..]}; the ordered `log` holds every effect.
+The result is {"log": [..], "ticks": [{"messages"|"error", "queue", "files"}],
+"files": {..}, "removed": [..]}; the ordered `log` holds every effect. `files`
+(journal, patch, body, `queue.json`) is snapshotted after every tick and once
+more at the end.
 """
 import builtins
 import copy
@@ -78,9 +84,6 @@ def main():
              'removed': [], 'n': 0}
     cur = {'tick': {}, 'run': None, 'picked': False}
     trees = spec.get('trees', {})
-
-    def rel(text):
-        return str(text).replace(str(root), '<ROOT>')
 
     # --- the in-memory removal overlay over retain's `Path` -------------------
     base_path = type(Path())
@@ -238,6 +241,13 @@ def main():
     ]
     for patch in patches:
         patch.start()
+    def snapshot_files():
+        found = {}
+        for path in sorted(state.rglob('*')):
+            if path.is_file() and path.name in ('publication.json', 'queue.json', 'publication.patch', 'fix-pr.md'):
+                found[str(path.relative_to(state))] = path.read_text()
+        return found
+
     ticks = []
     try:
         q = {'items': [spec['item'], *copy.deepcopy(spec.get('extra', []))]}
@@ -249,7 +259,7 @@ def main():
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(doc if isinstance(doc, str) else json.dumps(doc))
             if tick.get('restart'):
-                q = json.loads(json.dumps(q))  # a fresh process reads queue.json back
+                q = json.loads(json.dumps(q))  # in-memory round trip; queue.json is not re-read
                 repair_tick.reset_fix_pr_backlog()
                 log.append(['restart'])
             item = q['items'][0]
@@ -262,16 +272,13 @@ def main():
             except Exception as exc:  # noqa: BLE001 - the exception family is the result
                 out['error'] = family(exc)
             out['queue'] = copy.deepcopy(q)
+            out['files'] = snapshot_files()
             ticks.append(out)
             log.append(['backlog', dict(repair_tick.TICK_BACKLOG)])
     finally:
         for patch in patches:
             patch.stop()
-    files = {}
-    for path in sorted(state.rglob('*')):
-        if path.is_file() and path.name in ('publication.json', 'queue.json', 'publication.patch', 'fix-pr.md'):
-            files[str(path.relative_to(state))] = path.read_text()
-    json.dump({'log': log, 'ticks': ticks, 'files': files, 'removed': world['removed']}, sys.stdout)
+    json.dump({'log': log, 'ticks': ticks, 'files': snapshot_files(), 'removed': world['removed']}, sys.stdout)
 
 
 main()
