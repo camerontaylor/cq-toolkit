@@ -391,6 +391,73 @@ const SCENARIOS: readonly Scenario[] = [
     reads: [R, RR],
     result: deferred('2099-01-01T00:00:00+0102:03'),
   },
+  // ---- compact bare fractions (digits after hhmmss with no `.`/`,`) -----------
+  // CPython reads them as microseconds, in a clock and in an offset. Offsets here
+  // carry non-zero whole seconds, so every 3.14 patch release agrees on them.
+  stampScenario(
+    'a compact offset with a bare fraction keeps a far-future deferral',
+    '2099-01-01T00:00:00+000003123456',
+    true,
+  ),
+  stampScenario(
+    'a compact offset with a bare fraction re-runs a past deferral',
+    '2000-01-01T00:00:00+000003123456',
+    false,
+  ),
+  stampScenario(
+    'a positive compact offset fraction pulls a now-stamp behind now',
+    '2026-11-23T12:00:00+000003123456',
+    false,
+  ),
+  stampScenario(
+    'a negative compact offset fraction pushes a now-stamp ahead of now',
+    '2026-11-23T12:00:00-000003123456',
+    true,
+  ),
+  stampScenario(
+    'a two-digit bare offset fraction is read (hhmmss plus two digits)',
+    '2026-11-23T12:00:00-00000300',
+    true,
+  ),
+  stampScenario(
+    'a compact clock bare fraction equal to now is re-run',
+    '20261123T12000000+0000',
+    false,
+  ),
+  stampScenario(
+    'a compact clock bare fraction one microsecond ahead is preserved',
+    '20261123T120000000001+0000',
+    true,
+  ),
+  stampScenario(
+    'a compact clock bare fraction one microsecond behind is re-run',
+    '2026-11-23T115959999999Z',
+    false,
+  ),
+  {
+    name: 'a naive compact bare-fraction stamp is a TypeError, not a malformed ValueError',
+    want: error('TypeError', "can't compare offset-naive and offset-aware datetimes"),
+    reads: [R, RR],
+    result: deferred('2099-01-01T12000050'),
+  },
+  {
+    name: 'a single digit after hhmmss is not a bare fraction (naive clock): a ValueError',
+    want: error('ValueError', "Invalid isoformat string: '2099-01-01T1200005'"),
+    reads: [R, RR],
+    result: deferred('2099-01-01T1200005'),
+  },
+  {
+    name: 'a single digit after a compact offset hhmmss is malformed: a ValueError',
+    want: error('ValueError', "Invalid isoformat string: '2099-01-01T00:00:00+0000035'"),
+    reads: [R, RR],
+    result: deferred('2099-01-01T00:00:00+0000035'),
+  },
+  {
+    name: 'a bare fraction does not rescue a colon-style offset (+hh:mm:ssff)',
+    want: error('ValueError', "Invalid isoformat string: '2099-01-01T00:00:00+00:00:0312'"),
+    reads: [R, RR],
+    result: deferred('2099-01-01T00:00:00+00:00:0312'),
+  },
   {
     name: 'a malformed stamp is inert once fallback_models is configured',
     want: selected('result', without()),
