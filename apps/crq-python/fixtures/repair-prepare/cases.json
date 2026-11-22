@@ -2741,6 +2741,361 @@
       }
     },
     {
+      "ok": false,
+      "error": "ValueError",
+      "message": "repair round ceiling reached for current source pin",
+      "git_calls": [
+        [
+          "rev-parse",
+          "origin/main"
+        ],
+        [
+          "rev-parse",
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:src/lock.ts"
+        ]
+      ],
+      "show_calls": [],
+      "scan_calls": [],
+      "scan_results": [],
+      "handoff_calls": 0,
+      "handoff_args": [],
+      "old_job_bytes_unchanged": true,
+      "queue_unchanged": true,
+      "round_count": {
+        "basis": "pr-pin",
+        "count": 1
+      },
+      "round_count_error": null,
+      "inbox_reads": [],
+      "inbox_jobs": {},
+      "name": "legacy-round-foreign-repo-same-pr-ceiling",
+      "input": {
+        "old_job_id": "crq-historical-F1",
+        "old_job_json": "{\n  \"job\": \"crq-historical-F1\",\n  \"item\": \"pr1-merged\",\n  \"kind\": \"merged\",\n  \"pr\": 1,\n  \"run\": \"old-run\",\n  \"cycle\": 1,\n  \"repair_base\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\n  \"branch\": null,\n  \"finding\": {\n    \"path\": \"src/lock.ts\",\n    \"line\": 2,\n    \"severity\": \"major\",\n    \"body\": \"Finding data\",\n    \"id\": \"thread-1\"\n  },\n  \"repair_round\": 1,\n  \"prior\": null,\n  \"recurrence\": false,\n  \"review_diff\": \"diff --git a/src/lock.ts b/src/lock.ts\\n\",\n  \"source\": {\n    \"run\": \"old-run\",\n    \"id\": \"thread-1\",\n    \"thread_id\": \"th-1\"\n  }\n}\n",
+        "queue_json": "{\n  \"items\": [\n    {\n      \"id\": \"pr1-merged\",\n      \"pr\": 1,\n      \"kind\": \"merged\",\n      \"state\": \"done\",\n      \"repair_runs\": {\n        \"old-run\": {\n          \"jobs\": [\n            \"crq-historical-F1\"\n          ],\n          \"base\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\n          \"pin\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\n          \"state\": \"queued\"\n        }\n      }\n    },\n    {\n      \"id\": \"other-repo-pr\",\n      \"repo\": \"other/x\",\n      \"pr\": 1,\n      \"repair_runs\": {\n        \"z\": {\n          \"jobs\": [],\n          \"pin\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n          \"state\": \"done\"\n        }\n      }\n    }\n  ]\n}\n",
+        "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "evidence_json": "{\n  \"source_sha\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n  \"source_blob_sha\": \"cccccccccccccccccccccccccccccccccccccccc\",\n  \"finding_sha256\": \"6b4e7b3f540256eada167cf6980e4dad34cfa6d815983d0c7e3a99d09d9a8096\",\n  \"verdict\": \"still-valid\",\n  \"reviewer\": \"independent-test-reviewer\",\n  \"reason\": \"Pinned source retains the unstable initialization metadata comparison.\"\n}\n",
+        "source_text": "\nfirst\nsecond\n",
+        "show_error": false,
+        "current_tip": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "blob_oid": "cccccccccccccccccccccccccccccccccccccccc",
+        "max_rounds_per_pin": 1,
+        "preserve_worktree": false
+      },
+      "ts_refusal": "round-ceiling"
+    },
+    {
+      "ok": true,
+      "job_id": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "run": "revalidated-cb466c2a4e9f4881d7b6c47c",
+      "job_bytes": "{\n  \"job\": \"crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1\",\n  \"item\": \"pr1-merged\",\n  \"kind\": \"merged\",\n  \"pr\": 1,\n  \"run\": \"revalidated-cb466c2a4e9f4881d7b6c47c\",\n  \"cycle\": null,\n  \"repair_base\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n  \"branch\": null,\n  \"finding\": {\n    \"path\": \"src/lock.ts\",\n    \"line\": 2,\n    \"severity\": \"major\",\n    \"body\": \"Finding data\",\n    \"id\": \"thread-1\"\n  },\n  \"repair_round\": 1,\n  \"prior\": null,\n  \"recurrence\": false,\n  \"review_diff\": \"diff --git a/src/lock.ts b/src/lock.ts\\n\",\n  \"source\": {\n    \"run\": \"old-run\",\n    \"id\": \"thread-1\",\n    \"thread_id\": \"th-1\"\n  },\n  \"origin_job\": \"crq-historical-F1\",\n  \"source_sha\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n  \"finding_sha256\": \"6b4e7b3f540256eada167cf6980e4dad34cfa6d815983d0c7e3a99d09d9a8096\",\n  \"revalidation\": {\n    \"source_sha\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n    \"source_blob_sha\": \"cccccccccccccccccccccccccccccccccccccccc\",\n    \"finding_sha256\": \"6b4e7b3f540256eada167cf6980e4dad34cfa6d815983d0c7e3a99d09d9a8096\",\n    \"verdict\": \"still-valid\",\n    \"reviewer\": \"independent-test-reviewer\",\n    \"reason\": \"Pinned source retains the unstable initialization metadata comparison.\"\n  }\n}\n",
+      "record_bytes": "{\n  \"jobs\": [\n    \"crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1\"\n  ],\n  \"pin\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n  \"base\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n  \"branch\": null,\n  \"open_pr\": false,\n  \"round\": 1,\n  \"state\": \"queued\",\n  \"origin_job\": \"crq-historical-F1\",\n  \"revalidation_sha256\": \"7ebfadbfd4cd164122455f846ddfdea6f43d564287263aaa9fd23dd68d43c85a\"\n}\n",
+      "queue_bytes": "{\n  \"items\": [\n    {\n      \"id\": \"pr1-merged\",\n      \"pr\": 1,\n      \"kind\": \"merged\",\n      \"state\": \"done\",\n      \"repair_runs\": {\n        \"old-run\": {\n          \"jobs\": [\n            \"crq-historical-F1\"\n          ],\n          \"base\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\n          \"pin\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\n          \"state\": \"queued\"\n        },\n        \"revalidated-cb466c2a4e9f4881d7b6c47c\": {\n          \"jobs\": [\n            \"crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1\"\n          ],\n          \"pin\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n          \"base\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n          \"branch\": null,\n          \"open_pr\": false,\n          \"round\": 1,\n          \"state\": \"queued\",\n          \"origin_job\": \"crq-historical-F1\",\n          \"revalidation_sha256\": \"7ebfadbfd4cd164122455f846ddfdea6f43d564287263aaa9fd23dd68d43c85a\"\n        }\n      }\n    },\n    {\n      \"id\": \"other-repo-pr\",\n      \"repo\": \"other/x\",\n      \"pr\": 2,\n      \"repair_runs\": {\n        \"z\": {\n          \"jobs\": [],\n          \"pin\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n          \"state\": \"done\"\n        }\n      }\n    }\n  ]\n}\n",
+      "old_record_error": null,
+      "old_record_state": "queued",
+      "git_calls": [
+        [
+          "rev-parse",
+          "origin/main"
+        ],
+        [
+          "rev-parse",
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:src/lock.ts"
+        ]
+      ],
+      "show_calls": [
+        [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "src/lock.ts"
+        ]
+      ],
+      "scan_calls": [
+        {
+          "patch": "diff --git a/src/lock.ts b/src/lock.ts\n--- /dev/null\n+++ b/src/lock.ts\n@@ -0,0 +1,3 @@\n+\n+first\n+second\n",
+          "path": "revalidated-cb466c2a4e9f4881d7b6c47c-secret-scan.json"
+        }
+      ],
+      "scan_results": [
+        {
+          "kind": "source",
+          "clean": true,
+          "report": {
+            "denylist_rules": 0,
+            "denylist_hits": 0,
+            "gitleaks": "clean",
+            "gitleaks_hits": 0
+          }
+        }
+      ],
+      "scan_evidence": [
+        {
+          "kind": "full-source",
+          "name": "revalidated-cb466c2a4e9f4881d7b6c47c-secret-scan.json",
+          "patch_sha256": "e5957200d3a4e99279333013c63d2b38c4bbbdf8978e3a664aed3eb0bf61e80f",
+          "patch_length": 104,
+          "clean": true,
+          "verdict": "clean",
+          "report": {
+            "denylist_rules": 0,
+            "denylist_hits": 0,
+            "gitleaks": "clean",
+            "gitleaks_hits": 0
+          }
+        }
+      ],
+      "round_count": {
+        "basis": "pr-pin",
+        "count": 0
+      },
+      "round_count_error": null,
+      "inbox_reads": [],
+      "inbox_jobs": {},
+      "handoff_calls": 0,
+      "handoff_args": [],
+      "second_job_id": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "idempotent_handoff_calls": 0,
+      "idempotent_handoff_args": [],
+      "idempotent_job_bytes_unchanged": true,
+      "idempotent_queue_bytes_unchanged": true,
+      "prepared_job_bytes": "{\n  \"job\": \"crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1\",\n  \"item\": \"pr1-merged\",\n  \"kind\": \"merged\",\n  \"pr\": 1,\n  \"run\": \"revalidated-cb466c2a4e9f4881d7b6c47c\",\n  \"cycle\": null,\n  \"repair_base\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n  \"branch\": null,\n  \"finding\": {\n    \"path\": \"src/lock.ts\",\n    \"line\": 2,\n    \"severity\": \"major\",\n    \"body\": \"Finding data\",\n    \"id\": \"thread-1\"\n  },\n  \"repair_round\": 1,\n  \"prior\": null,\n  \"recurrence\": false,\n  \"review_diff\": \"diff --git a/src/lock.ts b/src/lock.ts\\n\",\n  \"source\": {\n    \"run\": \"old-run\",\n    \"id\": \"thread-1\",\n    \"thread_id\": \"th-1\"\n  },\n  \"origin_job\": \"crq-historical-F1\",\n  \"source_sha\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n  \"finding_sha256\": \"6b4e7b3f540256eada167cf6980e4dad34cfa6d815983d0c7e3a99d09d9a8096\",\n  \"revalidation\": {\n    \"source_sha\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n    \"source_blob_sha\": \"cccccccccccccccccccccccccccccccccccccccc\",\n    \"finding_sha256\": \"6b4e7b3f540256eada167cf6980e4dad34cfa6d815983d0c7e3a99d09d9a8096\",\n    \"verdict\": \"still-valid\",\n    \"reviewer\": \"independent-test-reviewer\",\n    \"reason\": \"Pinned source retains the unstable initialization metadata comparison.\"\n  }\n}\n",
+      "name": "legacy-round-foreign-repo-other-pr-below-ceiling",
+      "input": {
+        "old_job_id": "crq-historical-F1",
+        "old_job_json": "{\n  \"job\": \"crq-historical-F1\",\n  \"item\": \"pr1-merged\",\n  \"kind\": \"merged\",\n  \"pr\": 1,\n  \"run\": \"old-run\",\n  \"cycle\": 1,\n  \"repair_base\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\n  \"branch\": null,\n  \"finding\": {\n    \"path\": \"src/lock.ts\",\n    \"line\": 2,\n    \"severity\": \"major\",\n    \"body\": \"Finding data\",\n    \"id\": \"thread-1\"\n  },\n  \"repair_round\": 1,\n  \"prior\": null,\n  \"recurrence\": false,\n  \"review_diff\": \"diff --git a/src/lock.ts b/src/lock.ts\\n\",\n  \"source\": {\n    \"run\": \"old-run\",\n    \"id\": \"thread-1\",\n    \"thread_id\": \"th-1\"\n  }\n}\n",
+        "queue_json": "{\n  \"items\": [\n    {\n      \"id\": \"pr1-merged\",\n      \"pr\": 1,\n      \"kind\": \"merged\",\n      \"state\": \"done\",\n      \"repair_runs\": {\n        \"old-run\": {\n          \"jobs\": [\n            \"crq-historical-F1\"\n          ],\n          \"base\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\n          \"pin\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\n          \"state\": \"queued\"\n        }\n      }\n    },\n    {\n      \"id\": \"other-repo-pr\",\n      \"repo\": \"other/x\",\n      \"pr\": 2,\n      \"repair_runs\": {\n        \"z\": {\n          \"jobs\": [],\n          \"pin\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n          \"state\": \"done\"\n        }\n      }\n    }\n  ]\n}\n",
+        "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "evidence_json": "{\n  \"source_sha\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n  \"source_blob_sha\": \"cccccccccccccccccccccccccccccccccccccccc\",\n  \"finding_sha256\": \"6b4e7b3f540256eada167cf6980e4dad34cfa6d815983d0c7e3a99d09d9a8096\",\n  \"verdict\": \"still-valid\",\n  \"reviewer\": \"independent-test-reviewer\",\n  \"reason\": \"Pinned source retains the unstable initialization metadata comparison.\"\n}\n",
+        "source_text": "\nfirst\nsecond\n",
+        "show_error": false,
+        "current_tip": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "blob_oid": "cccccccccccccccccccccccccccccccccccccccc",
+        "max_rounds_per_pin": 1,
+        "preserve_worktree": false
+      }
+    },
+    {
+      "ok": true,
+      "job_id": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "run": "revalidated-cb466c2a4e9f4881d7b6c47c",
+      "job_bytes": "{\n  \"job\": \"crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1\",\n  \"item\": \"pr1-merged\",\n  \"kind\": \"merged\",\n  \"pr\": 1,\n  \"run\": \"revalidated-cb466c2a4e9f4881d7b6c47c\",\n  \"cycle\": null,\n  \"repair_base\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n  \"branch\": null,\n  \"finding\": {\n    \"path\": \"src/lock.ts\",\n    \"line\": 2,\n    \"severity\": \"major\",\n    \"body\": \"Finding data\",\n    \"id\": \"thread-1\"\n  },\n  \"repair_round\": 1,\n  \"prior\": null,\n  \"recurrence\": false,\n  \"review_diff\": \"diff --git a/src/lock.ts b/src/lock.ts\\n\",\n  \"source\": {\n    \"run\": \"old-run\",\n    \"id\": \"thread-1\",\n    \"thread_id\": \"th-1\"\n  },\n  \"origin_job\": \"crq-historical-F1\",\n  \"source_sha\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n  \"finding_sha256\": \"6b4e7b3f540256eada167cf6980e4dad34cfa6d815983d0c7e3a99d09d9a8096\",\n  \"revalidation\": {\n    \"source_sha\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n    \"source_blob_sha\": \"cccccccccccccccccccccccccccccccccccccccc\",\n    \"finding_sha256\": \"6b4e7b3f540256eada167cf6980e4dad34cfa6d815983d0c7e3a99d09d9a8096\",\n    \"verdict\": \"still-valid\",\n    \"reviewer\": \"independent-test-reviewer\",\n    \"reason\": \"Pinned source retains the unstable initialization metadata comparison.\"\n  }\n}\n",
+      "record_bytes": "{\n  \"jobs\": [\n    \"crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1\"\n  ],\n  \"pin\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n  \"base\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n  \"branch\": null,\n  \"open_pr\": false,\n  \"round\": 1,\n  \"state\": \"queued\",\n  \"origin_job\": \"crq-historical-F1\",\n  \"revalidation_sha256\": \"7ebfadbfd4cd164122455f846ddfdea6f43d564287263aaa9fd23dd68d43c85a\"\n}\n",
+      "queue_bytes": "{\n  \"items\": [\n    {\n      \"id\": \"pr1-merged\",\n      \"pr\": 1,\n      \"kind\": \"merged\",\n      \"state\": \"done\",\n      \"repair_runs\": {\n        \"old-run\": {\n          \"jobs\": [\n            \"crq-historical-F1\"\n          ],\n          \"base\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\n          \"pin\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\n          \"state\": \"queued\"\n        },\n        \"revalidated-cb466c2a4e9f4881d7b6c47c\": {\n          \"jobs\": [\n            \"crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1\"\n          ],\n          \"pin\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n          \"base\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n          \"branch\": null,\n          \"open_pr\": false,\n          \"round\": 1,\n          \"state\": \"queued\",\n          \"origin_job\": \"crq-historical-F1\",\n          \"revalidation_sha256\": \"7ebfadbfd4cd164122455f846ddfdea6f43d564287263aaa9fd23dd68d43c85a\"\n        }\n      }\n    },\n    {\n      \"id\": \"other-repo-pr\",\n      \"repo\": \"other/x\",\n      \"pr\": 1,\n      \"repair_runs\": {\n        \"z\": {\n          \"jobs\": [],\n          \"pin\": \"dddddddddddddddddddddddddddddddddddddddd\",\n          \"state\": \"done\"\n        }\n      }\n    }\n  ]\n}\n",
+      "old_record_error": null,
+      "old_record_state": "queued",
+      "git_calls": [
+        [
+          "rev-parse",
+          "origin/main"
+        ],
+        [
+          "rev-parse",
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:src/lock.ts"
+        ]
+      ],
+      "show_calls": [
+        [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "src/lock.ts"
+        ]
+      ],
+      "scan_calls": [
+        {
+          "patch": "diff --git a/src/lock.ts b/src/lock.ts\n--- /dev/null\n+++ b/src/lock.ts\n@@ -0,0 +1,3 @@\n+\n+first\n+second\n",
+          "path": "revalidated-cb466c2a4e9f4881d7b6c47c-secret-scan.json"
+        }
+      ],
+      "scan_results": [
+        {
+          "kind": "source",
+          "clean": true,
+          "report": {
+            "denylist_rules": 0,
+            "denylist_hits": 0,
+            "gitleaks": "clean",
+            "gitleaks_hits": 0
+          }
+        }
+      ],
+      "scan_evidence": [
+        {
+          "kind": "full-source",
+          "name": "revalidated-cb466c2a4e9f4881d7b6c47c-secret-scan.json",
+          "patch_sha256": "e5957200d3a4e99279333013c63d2b38c4bbbdf8978e3a664aed3eb0bf61e80f",
+          "patch_length": 104,
+          "clean": true,
+          "verdict": "clean",
+          "report": {
+            "denylist_rules": 0,
+            "denylist_hits": 0,
+            "gitleaks": "clean",
+            "gitleaks_hits": 0
+          }
+        }
+      ],
+      "round_count": {
+        "basis": "pr-pin",
+        "count": 0
+      },
+      "round_count_error": null,
+      "inbox_reads": [],
+      "inbox_jobs": {},
+      "handoff_calls": 0,
+      "handoff_args": [],
+      "second_job_id": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "idempotent_handoff_calls": 0,
+      "idempotent_handoff_args": [],
+      "idempotent_job_bytes_unchanged": true,
+      "idempotent_queue_bytes_unchanged": true,
+      "prepared_job_bytes": "{\n  \"job\": \"crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1\",\n  \"item\": \"pr1-merged\",\n  \"kind\": \"merged\",\n  \"pr\": 1,\n  \"run\": \"revalidated-cb466c2a4e9f4881d7b6c47c\",\n  \"cycle\": null,\n  \"repair_base\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n  \"branch\": null,\n  \"finding\": {\n    \"path\": \"src/lock.ts\",\n    \"line\": 2,\n    \"severity\": \"major\",\n    \"body\": \"Finding data\",\n    \"id\": \"thread-1\"\n  },\n  \"repair_round\": 1,\n  \"prior\": null,\n  \"recurrence\": false,\n  \"review_diff\": \"diff --git a/src/lock.ts b/src/lock.ts\\n\",\n  \"source\": {\n    \"run\": \"old-run\",\n    \"id\": \"thread-1\",\n    \"thread_id\": \"th-1\"\n  },\n  \"origin_job\": \"crq-historical-F1\",\n  \"source_sha\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n  \"finding_sha256\": \"6b4e7b3f540256eada167cf6980e4dad34cfa6d815983d0c7e3a99d09d9a8096\",\n  \"revalidation\": {\n    \"source_sha\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n    \"source_blob_sha\": \"cccccccccccccccccccccccccccccccccccccccc\",\n    \"finding_sha256\": \"6b4e7b3f540256eada167cf6980e4dad34cfa6d815983d0c7e3a99d09d9a8096\",\n    \"verdict\": \"still-valid\",\n    \"reviewer\": \"independent-test-reviewer\",\n    \"reason\": \"Pinned source retains the unstable initialization metadata comparison.\"\n  }\n}\n",
+      "name": "legacy-round-foreign-repo-other-pin-below-ceiling",
+      "input": {
+        "old_job_id": "crq-historical-F1",
+        "old_job_json": "{\n  \"job\": \"crq-historical-F1\",\n  \"item\": \"pr1-merged\",\n  \"kind\": \"merged\",\n  \"pr\": 1,\n  \"run\": \"old-run\",\n  \"cycle\": 1,\n  \"repair_base\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\n  \"branch\": null,\n  \"finding\": {\n    \"path\": \"src/lock.ts\",\n    \"line\": 2,\n    \"severity\": \"major\",\n    \"body\": \"Finding data\",\n    \"id\": \"thread-1\"\n  },\n  \"repair_round\": 1,\n  \"prior\": null,\n  \"recurrence\": false,\n  \"review_diff\": \"diff --git a/src/lock.ts b/src/lock.ts\\n\",\n  \"source\": {\n    \"run\": \"old-run\",\n    \"id\": \"thread-1\",\n    \"thread_id\": \"th-1\"\n  }\n}\n",
+        "queue_json": "{\n  \"items\": [\n    {\n      \"id\": \"pr1-merged\",\n      \"pr\": 1,\n      \"kind\": \"merged\",\n      \"state\": \"done\",\n      \"repair_runs\": {\n        \"old-run\": {\n          \"jobs\": [\n            \"crq-historical-F1\"\n          ],\n          \"base\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\n          \"pin\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\n          \"state\": \"queued\"\n        }\n      }\n    },\n    {\n      \"id\": \"other-repo-pr\",\n      \"repo\": \"other/x\",\n      \"pr\": 1,\n      \"repair_runs\": {\n        \"z\": {\n          \"jobs\": [],\n          \"pin\": \"dddddddddddddddddddddddddddddddddddddddd\",\n          \"state\": \"done\"\n        }\n      }\n    }\n  ]\n}\n",
+        "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "evidence_json": "{\n  \"source_sha\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n  \"source_blob_sha\": \"cccccccccccccccccccccccccccccccccccccccc\",\n  \"finding_sha256\": \"6b4e7b3f540256eada167cf6980e4dad34cfa6d815983d0c7e3a99d09d9a8096\",\n  \"verdict\": \"still-valid\",\n  \"reviewer\": \"independent-test-reviewer\",\n  \"reason\": \"Pinned source retains the unstable initialization metadata comparison.\"\n}\n",
+        "source_text": "\nfirst\nsecond\n",
+        "show_error": false,
+        "current_tip": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "blob_oid": "cccccccccccccccccccccccccccccccccccccccc",
+        "max_rounds_per_pin": 1,
+        "preserve_worktree": false
+      }
+    },
+    {
+      "ok": false,
+      "error": "ValueError",
+      "message": "repair round ceiling reached for current source pin",
+      "git_calls": [
+        [
+          "rev-parse",
+          "origin/main"
+        ],
+        [
+          "rev-parse",
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:src/lock.ts"
+        ]
+      ],
+      "show_calls": [],
+      "scan_calls": [],
+      "scan_results": [],
+      "handoff_calls": 0,
+      "handoff_args": [],
+      "old_job_bytes_unchanged": true,
+      "queue_unchanged": true,
+      "round_count": {
+        "basis": "pr-pin",
+        "count": 1
+      },
+      "round_count_error": null,
+      "inbox_reads": [],
+      "inbox_jobs": {},
+      "name": "legacy-round-no-pr-items-share-ceiling",
+      "input": {
+        "old_job_id": "crq-historical-F1",
+        "old_job_json": "{\n  \"job\": \"crq-historical-F1\",\n  \"item\": \"pr1-merged\",\n  \"kind\": \"merged\",\n  \"pr\": 1,\n  \"run\": \"old-run\",\n  \"cycle\": 1,\n  \"repair_base\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\n  \"branch\": null,\n  \"finding\": {\n    \"path\": \"src/lock.ts\",\n    \"line\": 2,\n    \"severity\": \"major\",\n    \"body\": \"Finding data\",\n    \"id\": \"thread-1\"\n  },\n  \"repair_round\": 1,\n  \"prior\": null,\n  \"recurrence\": false,\n  \"review_diff\": \"diff --git a/src/lock.ts b/src/lock.ts\\n\",\n  \"source\": {\n    \"run\": \"old-run\",\n    \"id\": \"thread-1\",\n    \"thread_id\": \"th-1\"\n  }\n}\n",
+        "queue_json": "{\n  \"items\": [\n    {\n      \"id\": \"pr1-merged\",\n      \"pr\": null,\n      \"kind\": \"merged\",\n      \"state\": \"done\",\n      \"repair_runs\": {\n        \"old-run\": {\n          \"jobs\": [\n            \"crq-historical-F1\"\n          ],\n          \"base\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\n          \"pin\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\n          \"state\": \"queued\"\n        }\n      }\n    },\n    {\n      \"id\": \"no-pr\",\n      \"repo\": \"other/x\",\n      \"repair_runs\": {\n        \"z\": {\n          \"jobs\": [],\n          \"pin\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n          \"state\": \"done\"\n        }\n      }\n    }\n  ]\n}\n",
+        "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "evidence_json": "{\n  \"source_sha\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n  \"source_blob_sha\": \"cccccccccccccccccccccccccccccccccccccccc\",\n  \"finding_sha256\": \"6b4e7b3f540256eada167cf6980e4dad34cfa6d815983d0c7e3a99d09d9a8096\",\n  \"verdict\": \"still-valid\",\n  \"reviewer\": \"independent-test-reviewer\",\n  \"reason\": \"Pinned source retains the unstable initialization metadata comparison.\"\n}\n",
+        "source_text": "\nfirst\nsecond\n",
+        "show_error": false,
+        "current_tip": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "blob_oid": "cccccccccccccccccccccccccccccccccccccccc",
+        "max_rounds_per_pin": 1,
+        "preserve_worktree": false
+      },
+      "ts_refusal": "round-ceiling"
+    },
+    {
+      "ok": true,
+      "job_id": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "run": "revalidated-cb466c2a4e9f4881d7b6c47c",
+      "job_bytes": "{\n  \"job\": \"crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1\",\n  \"item\": \"pr1-merged\",\n  \"kind\": \"merged\",\n  \"pr\": 1,\n  \"run\": \"revalidated-cb466c2a4e9f4881d7b6c47c\",\n  \"cycle\": null,\n  \"repair_base\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n  \"branch\": null,\n  \"finding\": {\n    \"path\": \"src/lock.ts\",\n    \"line\": 2,\n    \"severity\": \"major\",\n    \"body\": \"Finding data\",\n    \"id\": \"thread-1\"\n  },\n  \"repair_round\": 1,\n  \"prior\": null,\n  \"recurrence\": false,\n  \"review_diff\": \"diff --git a/src/lock.ts b/src/lock.ts\\n\",\n  \"source\": {\n    \"run\": \"old-run\",\n    \"id\": \"thread-1\",\n    \"thread_id\": \"th-1\"\n  },\n  \"origin_job\": \"crq-historical-F1\",\n  \"source_sha\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n  \"finding_sha256\": \"6b4e7b3f540256eada167cf6980e4dad34cfa6d815983d0c7e3a99d09d9a8096\",\n  \"revalidation\": {\n    \"source_sha\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n    \"source_blob_sha\": \"cccccccccccccccccccccccccccccccccccccccc\",\n    \"finding_sha256\": \"6b4e7b3f540256eada167cf6980e4dad34cfa6d815983d0c7e3a99d09d9a8096\",\n    \"verdict\": \"still-valid\",\n    \"reviewer\": \"independent-test-reviewer\",\n    \"reason\": \"Pinned source retains the unstable initialization metadata comparison.\"\n  }\n}\n",
+      "record_bytes": "{\n  \"jobs\": [\n    \"crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1\"\n  ],\n  \"pin\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n  \"base\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n  \"branch\": null,\n  \"open_pr\": false,\n  \"round\": 1,\n  \"state\": \"queued\",\n  \"origin_job\": \"crq-historical-F1\",\n  \"revalidation_sha256\": \"7ebfadbfd4cd164122455f846ddfdea6f43d564287263aaa9fd23dd68d43c85a\"\n}\n",
+      "queue_bytes": "{\n  \"items\": [\n    {\n      \"id\": \"pr1-merged\",\n      \"pr\": 1,\n      \"kind\": \"merged\",\n      \"state\": \"done\",\n      \"repair_runs\": {\n        \"old-run\": {\n          \"jobs\": [\n            \"crq-historical-F1\"\n          ],\n          \"base\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\n          \"pin\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\n          \"state\": \"queued\"\n        },\n        \"revalidated-cb466c2a4e9f4881d7b6c47c\": {\n          \"jobs\": [\n            \"crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1\"\n          ],\n          \"pin\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n          \"base\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n          \"branch\": null,\n          \"open_pr\": false,\n          \"round\": 1,\n          \"state\": \"queued\",\n          \"origin_job\": \"crq-historical-F1\",\n          \"revalidation_sha256\": \"7ebfadbfd4cd164122455f846ddfdea6f43d564287263aaa9fd23dd68d43c85a\"\n        }\n      }\n    },\n    {\n      \"id\": \"no-pr\",\n      \"repair_runs\": {\n        \"z\": {\n          \"jobs\": [],\n          \"pin\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n          \"state\": \"done\"\n        }\n      }\n    }\n  ]\n}\n",
+      "old_record_error": null,
+      "old_record_state": "queued",
+      "git_calls": [
+        [
+          "rev-parse",
+          "origin/main"
+        ],
+        [
+          "rev-parse",
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:src/lock.ts"
+        ]
+      ],
+      "show_calls": [
+        [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "src/lock.ts"
+        ]
+      ],
+      "scan_calls": [
+        {
+          "patch": "diff --git a/src/lock.ts b/src/lock.ts\n--- /dev/null\n+++ b/src/lock.ts\n@@ -0,0 +1,3 @@\n+\n+first\n+second\n",
+          "path": "revalidated-cb466c2a4e9f4881d7b6c47c-secret-scan.json"
+        }
+      ],
+      "scan_results": [
+        {
+          "kind": "source",
+          "clean": true,
+          "report": {
+            "denylist_rules": 0,
+            "denylist_hits": 0,
+            "gitleaks": "clean",
+            "gitleaks_hits": 0
+          }
+        }
+      ],
+      "scan_evidence": [
+        {
+          "kind": "full-source",
+          "name": "revalidated-cb466c2a4e9f4881d7b6c47c-secret-scan.json",
+          "patch_sha256": "e5957200d3a4e99279333013c63d2b38c4bbbdf8978e3a664aed3eb0bf61e80f",
+          "patch_length": 104,
+          "clean": true,
+          "verdict": "clean",
+          "report": {
+            "denylist_rules": 0,
+            "denylist_hits": 0,
+            "gitleaks": "clean",
+            "gitleaks_hits": 0
+          }
+        }
+      ],
+      "round_count": {
+        "basis": "pr-pin",
+        "count": 0
+      },
+      "round_count_error": null,
+      "inbox_reads": [],
+      "inbox_jobs": {},
+      "handoff_calls": 0,
+      "handoff_args": [],
+      "second_job_id": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "idempotent_handoff_calls": 0,
+      "idempotent_handoff_args": [],
+      "idempotent_job_bytes_unchanged": true,
+      "idempotent_queue_bytes_unchanged": true,
+      "prepared_job_bytes": "{\n  \"job\": \"crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1\",\n  \"item\": \"pr1-merged\",\n  \"kind\": \"merged\",\n  \"pr\": 1,\n  \"run\": \"revalidated-cb466c2a4e9f4881d7b6c47c\",\n  \"cycle\": null,\n  \"repair_base\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n  \"branch\": null,\n  \"finding\": {\n    \"path\": \"src/lock.ts\",\n    \"line\": 2,\n    \"severity\": \"major\",\n    \"body\": \"Finding data\",\n    \"id\": \"thread-1\"\n  },\n  \"repair_round\": 1,\n  \"prior\": null,\n  \"recurrence\": false,\n  \"review_diff\": \"diff --git a/src/lock.ts b/src/lock.ts\\n\",\n  \"source\": {\n    \"run\": \"old-run\",\n    \"id\": \"thread-1\",\n    \"thread_id\": \"th-1\"\n  },\n  \"origin_job\": \"crq-historical-F1\",\n  \"source_sha\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n  \"finding_sha256\": \"6b4e7b3f540256eada167cf6980e4dad34cfa6d815983d0c7e3a99d09d9a8096\",\n  \"revalidation\": {\n    \"source_sha\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n    \"source_blob_sha\": \"cccccccccccccccccccccccccccccccccccccccc\",\n    \"finding_sha256\": \"6b4e7b3f540256eada167cf6980e4dad34cfa6d815983d0c7e3a99d09d9a8096\",\n    \"verdict\": \"still-valid\",\n    \"reviewer\": \"independent-test-reviewer\",\n    \"reason\": \"Pinned source retains the unstable initialization metadata comparison.\"\n  }\n}\n",
+      "name": "legacy-round-no-pr-item-not-counted-for-numbered-pr",
+      "input": {
+        "old_job_id": "crq-historical-F1",
+        "old_job_json": "{\n  \"job\": \"crq-historical-F1\",\n  \"item\": \"pr1-merged\",\n  \"kind\": \"merged\",\n  \"pr\": 1,\n  \"run\": \"old-run\",\n  \"cycle\": 1,\n  \"repair_base\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\n  \"branch\": null,\n  \"finding\": {\n    \"path\": \"src/lock.ts\",\n    \"line\": 2,\n    \"severity\": \"major\",\n    \"body\": \"Finding data\",\n    \"id\": \"thread-1\"\n  },\n  \"repair_round\": 1,\n  \"prior\": null,\n  \"recurrence\": false,\n  \"review_diff\": \"diff --git a/src/lock.ts b/src/lock.ts\\n\",\n  \"source\": {\n    \"run\": \"old-run\",\n    \"id\": \"thread-1\",\n    \"thread_id\": \"th-1\"\n  }\n}\n",
+        "queue_json": "{\n  \"items\": [\n    {\n      \"id\": \"pr1-merged\",\n      \"pr\": 1,\n      \"kind\": \"merged\",\n      \"state\": \"done\",\n      \"repair_runs\": {\n        \"old-run\": {\n          \"jobs\": [\n            \"crq-historical-F1\"\n          ],\n          \"base\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\n          \"pin\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\n          \"state\": \"queued\"\n        }\n      }\n    },\n    {\n      \"id\": \"no-pr\",\n      \"repair_runs\": {\n        \"z\": {\n          \"jobs\": [],\n          \"pin\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n          \"state\": \"done\"\n        }\n      }\n    }\n  ]\n}\n",
+        "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "evidence_json": "{\n  \"source_sha\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n  \"source_blob_sha\": \"cccccccccccccccccccccccccccccccccccccccc\",\n  \"finding_sha256\": \"6b4e7b3f540256eada167cf6980e4dad34cfa6d815983d0c7e3a99d09d9a8096\",\n  \"verdict\": \"still-valid\",\n  \"reviewer\": \"independent-test-reviewer\",\n  \"reason\": \"Pinned source retains the unstable initialization metadata comparison.\"\n}\n",
+        "source_text": "\nfirst\nsecond\n",
+        "show_error": false,
+        "current_tip": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "blob_oid": "cccccccccccccccccccccccccccccccccccccccc",
+        "max_rounds_per_pin": 1,
+        "preserve_worktree": false
+      }
+    },
+    {
       "ok": true,
       "job_id": "crq-revalidated-92b951760dc1bb2281d97849-F1",
       "run": "revalidated-92b951760dc1bb2281d97849",
