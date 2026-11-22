@@ -181,6 +181,8 @@ def validate_checkout(repo, sha, run=run_command):
         package = json.loads(package_path.read_text())
     except (OSError, ValueError) as exc:
         raise BuildError('package.json is unreadable') from exc
+    if not isinstance(package, dict):
+        raise BuildError('package.json must contain a JSON object')
     match = PACKAGE_MANAGER_RE.fullmatch(str(package.get('packageManager', '')))
     if match is None:
         raise BuildError('package.json packageManager must pin pnpm@x.y.z')
