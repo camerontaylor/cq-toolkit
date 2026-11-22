@@ -15,10 +15,15 @@ import { lstat } from 'node:fs/promises';
 import { basename, dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { filePublicationEffects as FilePublicationEffects } from '../../src/adapters/crq/publicationFiles.js';
+import type { fileFixPrBacklogEffects as FileFixPrBacklogEffects } from '../../src/adapters/crq/fixPrBacklogSource.js';
 import type { loadQueueDocument as LoadQueueDocument } from '../../src/adapters/crq/queueEffects.js';
 import type { fileRepairHarvestReads as FileRepairHarvestReads } from '../../src/adapters/crq/repairHarvestReads.js';
 import type { toPlainJson as ToPlainJson } from '../../src/policy/crq/jsonValue.js';
-import type { FixPrBacklog as FixPrBacklogClass } from '../../src/queue-runner/fixPrBacklog.js';
+import type {
+  backfillRepairPresent as BackfillRepairPresent,
+  FixPrBacklog as FixPrBacklogClass,
+  refreshFixPrBacklog as RefreshFixPrBacklog,
+} from '../../src/queue-runner/fixPrBacklog.js';
 import type {
   finalizePublication as FinalizePublication,
   PublicationFinalizeEffects,
@@ -44,6 +49,9 @@ import type {
 export interface Mods {
   PyError: typeof PyErrorClass;
   FixPrBacklog: typeof FixPrBacklogClass;
+  backfillRepairPresent: typeof BackfillRepairPresent;
+  refreshFixPrBacklog: typeof RefreshFixPrBacklog;
+  fileFixPrBacklogEffects: typeof FileFixPrBacklogEffects;
   filePublicationEffects: typeof FilePublicationEffects;
   loadQueueDocument: typeof LoadQueueDocument;
   fileRepairHarvestReads: typeof FileRepairHarvestReads;
@@ -70,6 +78,13 @@ export interface Tick {
   stale?: Record<string, string>;
   /** job -> `kind:message` raise from `mark_finding_outcome`. */
   outcome?: Record<string, string>;
+  /**
+   * Open PR head branches this harness does not own (the mocked `gh pr list` returns them next to
+   * the world's own open PRs). A tick states the whole set; it does not carry over.
+   */
+  external?: string[];
+  /** The tick's one `gh pr list --state open` read raises, leaving the backlog view unread. */
+  gh_open?: 'ok' | 'fail';
   /** `git rev-parse HEAD` in a cleanup tree fails with this message. */
   head_error?: string;
   /**
@@ -251,14 +266,25 @@ export async function runTs(mods: Mods, run: Run): Promise<Outcome> {
   const snapshotFiles = (): Record<string, string> => {
     const found: Record<string, string> = {};
     for (const path of listFiles(stateRoot).sort()) {
+      const name = basename(path);
       if (
-        !['publication.json', 'queue.json', 'publication.patch', 'fix-pr.md'].includes(
-          basename(path),
-        )
+        ![
+          'publication.json',
+          'queue.json',
+          'publication.patch',
+          'fix-pr.md',
+          'fix-pr-backlog.json',
+        ].includes(name)
       ) {
         continue;
       }
-      found[relative(stateRoot, path)] = readFileSync(path, 'utf8');
+      let text = readFileSync(path, 'utf8');
+      if (name === 'fix-pr-backlog.json') {
+        const doc = JSON.parse(text) as Rec;
+        delete doc.at; // the clock is real
+        text = JSON.stringify(doc);
+      }
+      found[relative(stateRoot, path)] = text;
     }
     return found;
   };
@@ -314,6 +340,20 @@ export async function runTs(mods: Mods, run: Run): Promise<Outcome> {
       );
     },
   };
+
+  /** `refresh_fix_pr_backlog`'s inputs: one open-PR listing, `events.jsonl`, the file it writes. */
+  const backlogEffects = mods.fileFixPrBacklogEffects({
+    stateRoot,
+    async listOpenPrs() {
+      log.push(['list-open']);
+      if (cur.tick.gh_open === 'fail') throw new PyError('RuntimeError', 'gh pr list failed');
+      const rows: Rec[] = (cur.tick.external ?? []).map((headRefName) => ({ headRefName }));
+      for (const [branch, prs] of world.prs) {
+        for (const pr of prs) if (pr.state === 'OPEN') rows.push({ headRefName: branch });
+      }
+      return rows;
+    },
+  });
 
   const listBranchPrs = async (branch: string): Promise<PrRow[]> => {
     log.push(['list', branch]);
@@ -538,6 +578,13 @@ export async function runTs(mods: Mods, run: Run): Promise<Outcome> {
     }
     const out: Partial<Outcome['ticks'][number]> = {};
     let caught = '';
+    // `crq.tick`: clear the view, read it once before the first publish (live ticks with a
+    // backfill repair only), harvest, then clear it again.
+    backlog.reset();
+    if (tick.dry !== true && mods.backfillRepairPresent(q)) {
+      const view = await mods.refreshFixPrBacklog(backlog, backlogEffects, q);
+      log.push(['refresh', view === null ? null : { open: view.open, limit: view.limit }]);
+    }
     // `crq.tick(dry=True)` never calls harvest, so a durable dry tick does not either; the
     // in-process scenarios still reach `harvest(dry=True)` directly, a different entry point.
     const skipHarvest = run.durable && tick.dry === true;
@@ -562,6 +609,7 @@ export async function runTs(mods: Mods, run: Run): Promise<Outcome> {
     out.files = snapshotFiles();
     ticks.push(out as Outcome['ticks'][number]);
     log.push(['backlog', { open: backlog.open, limit: backlog.limit }]);
+    backlog.reset();
   }
 
   if (run.durable) {
@@ -585,23 +633,39 @@ export async function runTs(mods: Mods, run: Run): Promise<Outcome> {
 async function loadDist(): Promise<Mods> {
   const load = async (rel: string): Promise<Record<string, unknown>> =>
     (await import(new URL(`../../dist/${rel}`, import.meta.url).href)) as Record<string, unknown>;
-  const [files, queue, reads, json, backlog, finalize, enroll, publish, errors, cleanup, harvest] =
-    await Promise.all([
-      load('adapters/crq/publicationFiles.js'),
-      load('adapters/crq/queueEffects.js'),
-      load('adapters/crq/repairHarvestReads.js'),
-      load('policy/crq/jsonValue.js'),
-      load('queue-runner/fixPrBacklog.js'),
-      load('queue-runner/publicationFinalize.js'),
-      load('queue-runner/publicationEnroll.js'),
-      load('queue-runner/publicationPublish.js'),
-      load('queue-runner/pyErrors.js'),
-      load('queue-runner/repairCleanup.js'),
-      load('queue-runner/repairHarvest.js'),
-    ]);
+  const [
+    files,
+    backlogFiles,
+    queue,
+    reads,
+    json,
+    backlog,
+    finalize,
+    enroll,
+    publish,
+    errors,
+    cleanup,
+    harvest,
+  ] = await Promise.all([
+    load('adapters/crq/publicationFiles.js'),
+    load('adapters/crq/fixPrBacklogSource.js'),
+    load('adapters/crq/queueEffects.js'),
+    load('adapters/crq/repairHarvestReads.js'),
+    load('policy/crq/jsonValue.js'),
+    load('queue-runner/fixPrBacklog.js'),
+    load('queue-runner/publicationFinalize.js'),
+    load('queue-runner/publicationEnroll.js'),
+    load('queue-runner/publicationPublish.js'),
+    load('queue-runner/pyErrors.js'),
+    load('queue-runner/repairCleanup.js'),
+    load('queue-runner/repairHarvest.js'),
+  ]);
   return {
     PyError: errors.PyError,
     FixPrBacklog: backlog.FixPrBacklog,
+    backfillRepairPresent: backlog.backfillRepairPresent,
+    refreshFixPrBacklog: backlog.refreshFixPrBacklog,
+    fileFixPrBacklogEffects: backlogFiles.fileFixPrBacklogEffects,
     filePublicationEffects: files.filePublicationEffects,
     loadQueueDocument: queue.loadQueueDocument,
     fileRepairHarvestReads: reads.fileRepairHarvestReads,
