@@ -149,6 +149,36 @@ def _also_words(value):
     return words
 
 
+# systemd escapes every character that is not allowed in a unit name as
+# ``\xHH``, the byte's two-digit hexadecimal value (``systemd-escape``).
+_UNESCAPE_RE = re.compile(r"\\x([0-9A-Fa-f]{2})")
+
+
+def _unescape_instance(instance):
+    """Undo systemd's unit-name escaping on one instance name.
+
+    The instance of ``ingress@crq\x2dtick.socket`` is the text
+    ``crq\x2dtick``: systemd escaped ``-`` when it named the unit. Specifier
+    ``%I`` receives the unescaped instance (systemd v257 systemd.unit), so
+    ``Service=%I.service`` on that socket activates ``crq-tick.service``.
+    Hex byte pairs are joined before decoding, so one multi-byte UTF-8
+    character escapes as several ``\xHH`` sequences and unescapes back to
+    one character. Text that does not unescape to valid UTF-8 is returned
+    unchanged, keeping the escaped form the scan already recognises.
+    """
+    parts = _UNESCAPE_RE.split(instance)
+    if len(parts) == 1:
+        return instance
+    data = bytearray(parts[0].encode("utf-8"))
+    for index in range(1, len(parts), 2):
+        data.append(int(parts[index], 16))
+        data += parts[index + 1].encode("utf-8")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return instance
+
+
 def _expand_instance(path, value):
     """Substitute ``%i``/``%I`` with the unit's instance name.
 
@@ -166,6 +196,13 @@ def _expand_instance(path, value):
     to the empty string there, so ``Service=crq%i-tick.service`` on
     ``ingress.socket`` names ``crq-tick.service``. Leaving the specifier in
     place would keep that CRQ reference invisible to the scan.
+
+    ``%i`` receives the escaped instance text exactly as the unit file name
+    carries it, while ``%I`` receives the unescaped instance (systemd v257
+    systemd.unit): the instance of ``ingress@crq\x2dtick.socket`` is the
+    text ``crq\x2dtick``, so ``Service=%I.service`` names
+    ``crq-tick.service`` and the escape must be undone before the scan
+    compares the name.
     """
     name = path.name
     if path.parent.name.endswith(".d"):
@@ -174,7 +211,8 @@ def _expand_instance(path, value):
     if found is None:
         return value.replace("%i", "").replace("%I", "")
     instance = found.group("instance")
-    return value.replace("%i", instance).replace("%I", instance)
+    return value.replace("%i", instance).replace(
+        "%I", _unescape_instance(instance))
 
 
 class LiveBindingRefused(RuntimeError):
