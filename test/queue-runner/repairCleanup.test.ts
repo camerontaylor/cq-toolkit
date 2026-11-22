@@ -25,8 +25,9 @@ import { lstat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { fileRepairHarvestReads } from '../../src/adapters/crq/repairHarvestReads.js';
+import { parseJsonValue, toPlainJsonRetainingNumbers } from '../../src/policy/crq/jsonValue.js';
 import { receiptJsonDigest } from '../../src/policy/crq/pythonJson.js';
 import { PyError } from '../../src/queue-runner/pyErrors.js';
 import {
@@ -92,6 +93,12 @@ interface Scenario {
   /** The result `worktree`, relative to WT_ROOT unless a raw override is given. */
   readonly worktree?: string;
   readonly worktreeRaw?: unknown;
+  /**
+   * The result `worktree` as JSON text. Python parses it (so `1.0` is a float);
+   * the TS side gets it through `toPlainJsonRetainingNumbers`, which keeps the
+   * int/float kind a plain JS number would lose.
+   */
+  readonly worktreeJson?: string;
   readonly omitWorktree?: boolean;
   readonly result?: Readonly<Record<string, unknown>>;
   readonly status?: { readonly rc: number; readonly out: string };
@@ -106,6 +113,8 @@ interface Fixture {
   readonly wtRoot: string;
   readonly directory: string;
   readonly request: RepairCleanupRequest;
+  /** `worktree` JSON text the Python oracle parses over the request's value, if any. */
+  readonly worktreeJson?: string;
 }
 
 /** Build a scenario's temporary tree and return what both oracles are fed. */
@@ -135,10 +144,14 @@ function build(scenario: Scenario): Fixture {
   };
   // `undefined` means the key is absent (JSON drops it for the Python side).
   for (const key of Object.keys(result)) if (result[key] === undefined) delete result[key];
+  if (scenario.worktreeJson !== undefined) {
+    result.worktree = toPlainJsonRetainingNumbers(parseJsonValue(scenario.worktreeJson));
+  }
   return {
     root,
     wtRoot,
     directory,
+    ...(scenario.worktreeJson === undefined ? {} : { worktreeJson: scenario.worktreeJson }),
     request: {
       worktreeRoot: wtRoot,
       directory,
@@ -250,6 +263,8 @@ for s in json.loads(sys.argv[2]):
     retain.command = fake_command
     retain.git = fake_git
     entry = dict(seen)
+    if s.get('worktreeJson') is not None:
+        s['result']['worktree'] = json.loads(s['worktreeJson'])
     try:
         entry['returned'] = retain.cleanup_harvested(
             s['wtRoot'], s['wtRoot'], s['directory'], s['item'], s['job'], s['result'],
@@ -276,12 +291,17 @@ function runPython(items: readonly { scenario: Scenario; fixture: Fixture }[]): 
     directory: fixture.directory,
     item: fixture.request.itemId,
     job: fixture.request.jobId,
-    result: fixture.request.result,
+    // A JsonNumber would not serialise; the oracle parses `worktreeJson` instead.
+    result:
+      fixture.worktreeJson === undefined
+        ? fixture.request.result
+        : { ...fixture.request.result, worktree: null },
     alternate: fixture.request.alternate,
     rc: scenario.status?.rc ?? 0,
     out: scenario.status?.out ?? '',
     head: HEAD,
     headError: scenario.headError ?? null,
+    worktreeJson: fixture.worktreeJson ?? null,
   }));
   const stdout = execFileSync('python3', ['-I', '-c', PY, PYTHON_DIR, JSON.stringify(specs)], {
     encoding: 'utf8',
@@ -291,6 +311,8 @@ function runPython(items: readonly { scenario: Scenario; fixture: Fixture }[]): 
 }
 
 interface Trace {
+  /** Every path handed to `resolve`: a symlinked worktree must never reach it. */
+  readonly resolved: string[];
   readonly statusCwd: string[];
   readonly headCwd: string[];
   readonly archiveReads: string[];
@@ -330,7 +352,10 @@ function probesFor(scenario: Scenario, fixture: Fixture, trace: Trace): RepairCl
     }
   };
   return {
-    resolve: (path) => reads.resolvePath(path),
+    resolve: (path) => {
+      trace.resolved.push(path);
+      return reads.resolvePath(path);
+    },
     isSymlink: async (path) => {
       try {
         return (await lstat(path)).isSymbolicLink();
@@ -394,7 +419,7 @@ async function runTs(
   scenario: Scenario,
   fixture: Fixture,
 ): Promise<{ decision?: RepairCleanupDecision; error?: PyError; trace: Trace }> {
-  const trace: Trace = { statusCwd: [], headCwd: [], archiveReads: [] };
+  const trace: Trace = { resolved: [], statusCwd: [], headCwd: [], archiveReads: [] };
   try {
     const decision = await decideRepairCleanup(
       fixture.request,
@@ -521,6 +546,40 @@ const SCENARIOS: readonly Scenario[] = [
     expectRemove: false,
     trees: [],
     links: { [OWNED]: 'elsewhere/real' },
+    retained: [OK],
+  },
+  {
+    // The link's target is the sibling `-A2` tree: owned, directly under the
+    // root, a clean directory with a matching archive. Resolving the link
+    // would make it removable, so only the raw-symlink refusal keeps it.
+    name: 'a symlink to an otherwise eligible in-root tree is refused',
+    expectRemove: false,
+    trees: [`${OWNED}-A2`],
+    links: { [OWNED]: `wt/${OWNED}-A2` },
+    retained: [OK],
+  },
+  {
+    name: 'a -A2 symlink to an otherwise eligible in-root tree is refused',
+    expectRemove: false,
+    worktree: `${OWNED}-A2`,
+    trees: [OWNED],
+    links: { [`${OWNED}-A2`]: `wt/${OWNED}` },
+    retained: [OK],
+  },
+  {
+    name: 'a symlink to an eligible in-root tree is refused under alternate too',
+    expectRemove: false,
+    alternate: true,
+    trees: [`${OWNED}-A2`],
+    links: { [OWNED]: `wt/${OWNED}-A2` },
+    retained: [OK],
+  },
+  {
+    name: 'a trailing slash does not hide a symlink to an eligible in-root tree',
+    expectRemove: false,
+    worktree: `${OWNED}/`,
+    trees: [`${OWNED}-A2`],
+    links: { [OWNED]: `wt/${OWNED}-A2` },
     retained: [OK],
   },
   {
@@ -815,6 +874,24 @@ const SCENARIOS: readonly Scenario[] = [
     retained: [OK],
   },
   {
+    name: 'an integral float worktree (1.0) raises TypeError naming float',
+    expectRemove: false,
+    worktreeJson: '1.0',
+    retained: [OK],
+  },
+  {
+    name: 'an exponent float worktree (1e21) raises TypeError naming float',
+    expectRemove: false,
+    worktreeJson: '1e21',
+    retained: [OK],
+  },
+  {
+    name: 'an integer worktree from JSON text raises TypeError naming int',
+    expectRemove: false,
+    worktreeJson: '12345678901234567890',
+    retained: [OK],
+  },
+  {
     name: 'a boolean worktree raises TypeError',
     expectRemove: false,
     worktreeRaw: true,
@@ -835,10 +912,15 @@ describe('repair cleanup eligibility (Python cleanup_harvested vs the TS decisio
   });
 
   // One Python process for the whole table; each scenario is then compared on its own.
+  // `beforeAll` runs whenever any test of the suite does, so `-t 'parity: ...'`
+  // still has its oracle answers; the stub records a removal and never runs one.
   const fixtures = SCENARIOS.map((scenario) => ({ scenario, fixture: build(scenario) }));
   let python: Seen[] = [];
-  it('runs the Python oracle once with command/git stubbed (no removal can happen)', () => {
+  beforeAll(() => {
     python = runPython(fixtures);
+  });
+
+  it('ran the Python oracle once with command/git stubbed (no removal can happen)', () => {
     expect(python).toHaveLength(SCENARIOS.length);
     for (const seen of python) {
       // The recorded "remove" is the only trace of the mutation, and it is a stub.
@@ -893,6 +975,22 @@ describe('repair cleanup eligibility: ordering and laziness', () => {
       expect(ts.trace.statusCwd).toEqual([]);
       expect(ts.trace.headCwd).toEqual([]);
     }
+  });
+
+  it('refuses a symlinked worktree without ever resolving it', async () => {
+    const scenario: Scenario = {
+      name: 'link',
+      expectRemove: false,
+      trees: [`${OWNED}-A2`],
+      links: { [OWNED]: `wt/${OWNED}-A2` },
+      retained: [OK],
+    };
+    const fixture = build(scenario);
+    const ts = await runTs(scenario, fixture);
+    expect(ts.decision).toEqual({ remove: false, reason: 'worktree-symlink' });
+    // Only WT_ROOT was resolved; the link itself never was.
+    expect(ts.trace.resolved).toEqual([fixture.wtRoot]);
+    expect(ts.trace.statusCwd).toEqual([]);
   });
 
   it('reads HEAD only after a clean status, and archives only after head/base match', async () => {
@@ -953,7 +1051,12 @@ describe('repair cleanup eligibility: ordering and laziness', () => {
   it('propagates a non-skippable probe failure from an archive read', async () => {
     const scenario: Scenario = { name: 'boom', expectRemove: false, retained: [OK] };
     const fixture = build(scenario);
-    const probes = probesFor(scenario, fixture, { statusCwd: [], headCwd: [], archiveReads: [] });
+    const probes = probesFor(scenario, fixture, {
+      resolved: [],
+      statusCwd: [],
+      headCwd: [],
+      archiveReads: [],
+    });
     const boom = new PyError('RuntimeError', 'archive probe exploded');
     const failing: RepairCleanupProbes = {
       ...probes,

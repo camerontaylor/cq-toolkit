@@ -34,6 +34,10 @@
  *   single valid snapshot is enough, so discovery order cannot change the
  *   answer.
  *
+ * Numeric kind: `request.result.worktree` may be a `JsonNumber` (from
+ * `toPlainJsonRetainingNumbers`) so an integral float such as `1.0` reports
+ * `'float'` as Python does; a plain JS number reports `int` when integral.
+ *
  * Failures Python lets escape `cleanup_harvested` (a non-string `worktree`, an
  * embedded NUL, a failed `git rev-parse`) propagate from here as `PyError`s so
  * the harvest's `except (OSError, ValueError, KeyError, TypeError,
@@ -42,6 +46,7 @@
 import { posix } from 'node:path';
 
 import {
+  JsonNumber,
   JsonObject,
   type JsonValue,
   parseJsonValue,
@@ -125,10 +130,18 @@ export type RepairCleanupDecision =
 
 const refuse = (reason: RepairCleanupRefusal): RepairCleanupDecision => ({ remove: false, reason });
 
-/** Python's name for the value's type, as used in `Path()`'s `TypeError`. */
+/**
+ * Python's name for the value's type, as used in `Path()`'s `TypeError`.
+ *
+ * A plain JS `number` cannot say whether it was `1` or `1.0` in the JSON, so an
+ * integral one is reported as `int`. A caller that must distinguish them
+ * (`1.0`, `1e21` are Python `float`) supplies the value as a `JsonNumber`, e.g.
+ * via `toPlainJsonRetainingNumbers`, and its `kind` is used exactly.
+ */
 function pyTypeName(value: unknown): string {
   if (value === null || value === undefined) return 'NoneType';
   if (typeof value === 'boolean') return 'bool';
+  if (value instanceof JsonNumber) return value.kind;
   if (typeof value === 'number') return Number.isInteger(value) ? 'int' : 'float';
   if (typeof value === 'bigint') return 'int';
   if (Array.isArray(value)) return 'list';
