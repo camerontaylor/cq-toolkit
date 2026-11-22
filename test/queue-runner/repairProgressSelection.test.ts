@@ -374,6 +374,24 @@ const SCENARIOS: readonly Scenario[] = [
     result: deferred('2026-13-01T00:00:00Z'),
   },
   {
+    name: 'a 24:00 rollover past 9999-12-31 is a ValueError naming year 10000',
+    want: error('ValueError', 'year must be in 1..9999, not 10000'),
+    reads: [R, RR],
+    result: deferred('9999-12-31T24:00:00+00:00'),
+  },
+  {
+    name: 'a mixed-separator offset is a malformed-stamp ValueError (colon then compact)',
+    want: error('ValueError', "Invalid isoformat string: '2099-01-01T00:00:00+01:0203'"),
+    reads: [R, RR],
+    result: deferred('2099-01-01T00:00:00+01:0203'),
+  },
+  {
+    name: 'a mixed-separator offset is a malformed-stamp ValueError (compact then colon)',
+    want: error('ValueError', "Invalid isoformat string: '2099-01-01T00:00:00+0102:03'"),
+    reads: [R, RR],
+    result: deferred('2099-01-01T00:00:00+0102:03'),
+  },
+  {
     name: 'a malformed stamp is inert once fallback_models is configured',
     want: selected('result', without()),
     reads: [R, RR, R, RR, P],
