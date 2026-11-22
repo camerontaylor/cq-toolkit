@@ -1286,3 +1286,106 @@ describe('selection reads: laziness, purity and failure transparency (TS side)',
     expect(log).toEqual([R, RR]);
   });
 });
+
+describe('malformed retry_after message parity with Python (repr of the stamp)', () => {
+  /** CPython 3.14 is the production minor; the default python3 is the fallback where it is absent. */
+  const python = ((): string => {
+    try {
+      execFileSync('python3.14', ['-I', '-B', '-c', 'pass']);
+      return 'python3.14';
+    } catch {
+      return 'python3';
+    }
+  })();
+
+  const SCRIPT = String.raw`
+import datetime, json, sys, unicodedata
+printable = [chr(c).isprintable() for c in range(0x110000)]
+sample = set(range(0x300))
+for c in range(1, 0x110000):
+    if printable[c] != printable[c - 1]:
+        sample.update(x for x in (c - 1, c, c + 1) if 0 <= x < 0x110000)
+sample.update(range(0x1F600, 0x1F610))
+out = []
+for c in sorted(sample):
+    stamp = 'x' + chr(c) + 'y'
+    try:
+        datetime.datetime.fromisoformat(stamp.replace('Z', '+00:00'))
+        message = None
+    except ValueError as e:
+        message = str(e)
+    out.append([c, unicodedata.category(chr(c)) == 'Cn', message])
+for stamp in json.loads(sys.argv[1]):
+    try:
+        datetime.datetime.fromisoformat(stamp.replace('Z', '+00:00'))
+        message = None
+    except ValueError as e:
+        message = str(e)
+    out.append([stamp, False, message])
+print(json.dumps(out))
+`;
+
+  const TEXTS = [
+    "it's",
+    'say "hi"',
+    `both ' and "`,
+    'back\\slash',
+    'tab\there',
+    'new\nline',
+    'cr\rhere',
+    'x\u00a0y',
+    'x\u200by',
+    'x\u2028y',
+    'x\ufeffy',
+    'x\u00ady',
+    'caf\u00e9 \u65e5\u672c \u{1F600}',
+    'x\u{e0001}y',
+    'x\ud800y',
+    'xZy',
+  ];
+
+  const askStamp = async (stamp: string): Promise<string> => {
+    const reads: RepairProgressSelectionReads = {
+      resultExists: () => Promise.resolve(true),
+      readResult: () => Promise.resolve({ retry_after: stamp }),
+      progressExists: () => Promise.resolve(false),
+      resultMtimeNs: () => Promise.reject(new Error('unexpected')),
+      progressMtimeNs: () => Promise.reject(new Error('unexpected')),
+      readProgress: () => Promise.reject(new Error('unexpected')),
+      nowMicros: () => NOW_MICROS,
+      utc: () => NOW_STAMP,
+    };
+    try {
+      await selectRepairProgress({ config: CONFIG, job: JOB_DICT, worktree: WORKTREE }, reads);
+    } catch (e) {
+      if (e instanceof PyError) return `${e.kind}: ${e.message}`;
+      throw e;
+    }
+    return 'none';
+  };
+
+  it('escapes every non-printable code point and keeps printable text, like Python repr', async () => {
+    const stdout = execFileSync(python, ['-I', '-B', '-c', SCRIPT, JSON.stringify(TEXTS)], {
+      encoding: 'utf8',
+      maxBuffer: 16 * 1024 * 1024,
+    });
+    const rows = JSON.parse(stdout) as Array<[number | string, boolean, string | null]>;
+    expect(rows.length).toBeGreaterThan(1000);
+    let compared = 0;
+    let skewed = 0;
+    for (const [what, unassigned, message] of rows) {
+      const stamp = typeof what === 'number' ? `x${String.fromCodePoint(what)}y` : what;
+      // A code point still unassigned in this Python's tables (3.14: Unicode 16) is
+      // version skew against the runtime's tables, not a repr difference.
+      if (unassigned) {
+        skewed += 1;
+        continue;
+      }
+      expect(message, JSON.stringify(stamp)).not.toBeNull();
+      expect(await askStamp(stamp), JSON.stringify(stamp)).toBe(`ValueError: ${message}`);
+      compared += 1;
+    }
+    expect(compared).toBeGreaterThan(1000);
+    expect(skewed).toBeLessThan(compared);
+  });
+});

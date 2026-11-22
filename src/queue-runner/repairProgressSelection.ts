@@ -161,7 +161,19 @@ function subscript(value: unknown, key: string): unknown {
   throw new PyError('TypeError', `'${pyTypeName(value)}' object is not subscriptable`);
 }
 
-/** Python `repr(str)`: single quotes unless the text holds one and no double quote. */
+/**
+ * What Python's `str.isprintable` rejects: the "Other" and "Separator" categories
+ * except ASCII space (CPython `Py_UNICODE_ISPRINTABLE`). Category `Cn` follows the
+ * runtime's Unicode tables, so a code point assigned after the Python minor's tables
+ * (3.14 ships Unicode 16) can differ; every assigned code point agrees.
+ */
+const NOT_PRINTABLE = /^[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}\p{Zs}]$/u;
+
+/**
+ * Python `repr(str)`: single quotes unless the text holds one and no double quote;
+ * `\\`, the quote, `\n`, `\r`, `\t` escaped; other non-printable code points as
+ * `\xNN`, `\uNNNN` or `\UNNNNNNNN`; printable Unicode kept as is.
+ */
 function pyStrRepr(text: string): string {
   const quote = text.includes("'") && !text.includes('"') ? '"' : "'";
   let out = quote;
@@ -171,8 +183,12 @@ function pyStrRepr(text: string): string {
     else if (char === '\n') out += '\\n';
     else if (char === '\r') out += '\\r';
     else if (char === '\t') out += '\\t';
-    else if (code < 0x20 || code === 0x7f) out += `\\x${code.toString(16).padStart(2, '0')}`;
-    else out += char;
+    else if (char !== ' ' && NOT_PRINTABLE.test(char)) {
+      const hex = code.toString(16);
+      if (code < 0x100) out += `\\x${hex.padStart(2, '0')}`;
+      else if (code < 0x10000) out += `\\u${hex.padStart(4, '0')}`;
+      else out += `\\U${hex.padStart(8, '0')}`;
+    } else out += char;
   }
   return out + quote;
 }
