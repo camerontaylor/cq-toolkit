@@ -369,12 +369,25 @@ class FetchImageTests(unittest.TestCase):
     def test_fetch_holds_an_exclusive_lock_on_the_images_directory(self):
         with tempfile.TemporaryDirectory() as temporary:
             state = pathlib.Path(temporary)
+
+            def check_lock(images, recorder):
+                # Assert from inside the fetch: the lock must already be held
+                # exclusively on the images-directory lock file and must not
+                # have been released while the fetch runs.
+                self.assertEqual(flock.call_count, 1)
+                fd, mode = flock.call_args.args
+                self.assertEqual(mode, vm.fcntl.LOCK_EX)
+                locked = os.fstat(fd)
+                expected = (images / ".fetch.lock").stat()
+                self.assertEqual((locked.st_dev, locked.st_ino),
+                                 (expected.st_dev, expected.st_ino))
+                return {"ok": 1}
+
             with mock.patch.object(vm.fcntl, "flock") as flock, \
                     mock.patch.object(vm, "_fetch_image_locked",
-                                      return_value={"ok": 1}):
+                                      side_effect=check_lock):
                 self.assertEqual(vm.fetch_image(state, vm.Recorder(state)),
                                  {"ok": 1})
-            self.assertEqual(flock.call_args.args[1], vm.fcntl.LOCK_EX)
 
     def test_digest_mismatch_removes_the_unverified_partial_file(self):
         with tempfile.TemporaryDirectory() as temporary:
