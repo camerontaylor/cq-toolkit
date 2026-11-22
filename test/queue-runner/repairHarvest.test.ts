@@ -1547,6 +1547,149 @@ describe('repairHarvest rejected-inbox replay across ticks (Python vs port)', ()
   });
 });
 
+// Sibling retry timing. A `retry_after` result is a wait only while its run is open
+// (harvest `break`s before any decision); once the run is terminal, the sibling
+// replay (`record_unpublished_siblings`) ignores `retry_after` and records the
+// sibling's FAILED verdict like any other. Both sides run every tick below, so
+// the shared policy is pinned by `same`, and the tests assert that no tick writes
+// a second, different decision for a job whose result did not change.
+describe('repairHarvest sibling retry timing across ticks (Python vs port)', () => {
+  const calls = (o: Outcome): string[][] => JSON.parse(o.calls) as string[][];
+  const names = (o: Outcome): string[] => calls(o).map((c) => c[0] as string);
+  const carry = (o: Outcome): Record<string, unknown> =>
+    JSON.parse(o.queue) as Record<string, unknown>;
+  const marksOf = (o: Outcome, id: string): string[][] =>
+    calls(o).filter((c) => c[0] === 'mark' && c[1] === id);
+  const both = item({}, { jobs: [J1, J2] });
+  const inbox1 = job(J1, { canonical_finding_id: 'F1' });
+  const inbox2 = job(J2, { canonical_finding_id: 'F2' });
+  const waiting = verdict(J2, 'FAILED', { retry_after: '2026-11-21T00:00:00Z' });
+
+  it('active run: a retry_after sibling is waited on, recording nothing for it', async () => {
+    const out = await same({
+      item: both,
+      files: files([J1, inbox1, verdict(J1, 'NOT-FIXED')], [J2, inbox2, waiting]),
+    });
+    expect(out.error).toBeUndefined();
+    expect(out.queue).toContain('"state":"queued"');
+    // The waiting job's delivery is checked (as Python does) before its retry_after stops the loop.
+    expect(names(out)).toEqual(['canonical', 'mark', 'canonical']);
+    expect(marksOf(out, J1)).toHaveLength(1);
+    expect(marksOf(out, J2)).toHaveLength(0);
+    expect(out.calls).not.toContain('"sibling"');
+  });
+
+  it('active run: the earlier outcome is replayed each tick, the waiting sibling is recorded once its retry clears', async () => {
+    const first = await same({
+      item: both,
+      files: files([J1, inbox1, verdict(J1, 'NOT-FIXED')], [J2, inbox2, waiting]),
+    });
+    // Still waiting on the next tick: an identical replay of J1 only, queue unchanged.
+    const stillWaiting = await same({
+      item: carry(first),
+      files: files([J1, inbox1, verdict(J1, 'NOT-FIXED')], [J2, inbox2, waiting]),
+    });
+    expect(stillWaiting.queue).toBe(first.queue);
+    expect(stillWaiting.calls).toBe(first.calls);
+    // The retry finished: J2's result no longer carries retry_after.
+    const cleared = [J2, inbox2, verdict(J2, 'FAILED', { reason: 'retry exhausted' })] as [
+      string,
+      unknown,
+      unknown,
+    ];
+    const recovered = await same({
+      item: carry(stillWaiting),
+      files: files([J1, inbox1, verdict(J1, 'NOT-FIXED')], cleared),
+    });
+    expect(recovered.error).toBeUndefined();
+    expect(marksOf(recovered, J1)[0]).toEqual(marksOf(first, J1)[0]);
+    expect(marksOf(recovered, J2)).toHaveLength(1);
+    expect(marksOf(recovered, J2)[0]?.[2]).not.toContain('retry_after');
+    expect(recovered.calls).not.toContain('"sibling"');
+  });
+
+  it('active run: a falsy retry_after is not a wait, so the sibling FAILED is recorded', async () => {
+    for (const falsy of [0, '', null, false, [], {}]) {
+      const out = await same({
+        item: both,
+        files: files(
+          [J1, inbox1, verdict(J1, 'NOT-FIXED')],
+          [J2, inbox2, verdict(J2, 'FAILED', { retry_after: falsy })],
+        ),
+      });
+      expect(marksOf(out, J2)).toHaveLength(1);
+    }
+  });
+
+  // The owning run died on J1, so J2's retry can no longer publish: the terminal
+  // path records J2's FAILED verdict (retry_after and all) once, and every later
+  // replay writes the identical payload with no second kind of decision.
+  describe('terminal run', () => {
+    const dead = [J1, inbox1, fixed(J1, { repair_base: 'wrong' })] as [string, unknown, unknown];
+
+    it('first tick: the sibling FAILED is recorded with its retry_after payload', async () => {
+      const out = await same({ item: both, files: files(dead, [J2, inbox2, waiting]) });
+      expect(out.error).toBeUndefined();
+      expect(out.queue).toContain('"state":"failed"');
+      expect(names(out)).toEqual(['canonical', 'save_queue', 'mark', 'mark']);
+      expect(marksOf(out, J1)).toHaveLength(1);
+      expect(marksOf(out, J2)).toHaveLength(1);
+      expect(marksOf(out, J2)[0]?.[2]).toContain('retry_after');
+      expect(out.calls).not.toContain('"sibling"');
+    });
+
+    it('replays on later ticks write the same two payloads, never a duplicate kind', async () => {
+      const f = files(dead, [J2, inbox2, waiting]);
+      const first = await same({ item: both, files: f });
+      const replay = await same({ item: carry(first), files: f });
+      expect(replay.error).toBeUndefined();
+      expect(replay.queue).toBe(first.queue);
+      // Replay order: the terminal save, the retained invalid-result outcome, then the sibling.
+      expect(names(replay)).toEqual(['save_queue', 'mark', 'mark']);
+      expect(marksOf(replay, J1)).toEqual(marksOf(first, J1));
+      expect(marksOf(replay, J2)).toEqual(marksOf(first, J2));
+      const third = await same({ item: carry(replay), files: f });
+      expect(third.queue).toBe(replay.queue);
+      expect(third.calls).toBe(replay.calls);
+    });
+
+    it('a dry replay records nothing for the sibling', async () => {
+      const f = files(dead, [J2, inbox2, waiting]);
+      const first = await same({ item: both, files: f });
+      const dry = await same({ item: carry(first), files: f, dry: true });
+      expect(dry.calls).toBe('[]');
+    });
+
+    // Shared policy: when the retry result is replaced after the run died, the next
+    // replay records the sibling's new verdict, as Python's replay does. Pinned, not
+    // changed here: it is the "late ledger write" boundary, owned elsewhere.
+    it('a retry that finishes after the run died is replayed as the new verdict', async () => {
+      const first = await same({ item: both, files: files(dead, [J2, inbox2, waiting]) });
+      const later = verdict(J2, 'NOT-FIXED', { reason: 'retry settled' });
+      const replay = await same({
+        item: carry(first),
+        files: files(dead, [J2, inbox2, later]),
+      });
+      expect(replay.error).toBeUndefined();
+      expect(replay.queue).toBe(first.queue);
+      expect(marksOf(replay, J1)).toEqual(marksOf(first, J1));
+      expect(marksOf(replay, J2)).toHaveLength(1);
+      expect(marksOf(replay, J2)[0]?.[2]).toContain('NOT-FIXED');
+      expect(marksOf(replay, J2)[0]?.[2]).not.toContain('retry_after');
+    });
+
+    it('a retry_after FIXED sibling is the unpublished-FIXED decision, not a wait', async () => {
+      const out = await same({
+        item: both,
+        files: files(dead, [J2, inbox2, fixed(J2, { retry_after: 60 })]),
+      });
+      expect(out.error).toBeUndefined();
+      expect(out.calls).toContain('"sibling","F2","crq-R-F2","needs-human"');
+      expect(marksOf(out, J2)).toHaveLength(0);
+    });
+  });
+});
+
 describe('repairHarvest with the file reads', () => {
   it('resolves paths like Path.resolve (symlinks and missing tails)', async () => {
     const root = mkdtempSync(join(tmpdir(), 'repair-hv-res-'));
