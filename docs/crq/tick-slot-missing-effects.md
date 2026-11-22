@@ -426,6 +426,21 @@ in the composed scenarios. Not composed: the backlog refresh (pinned by
 `repairHarvest.test.ts`), and the text of a timed-out `gh pr create`, which the fixture
 renders as CPython does because the real `createPr` binding does not exist yet.
 
+S5b resume candidate (inactive, decision only): `src/queue-runner/repairResume.ts`
+models `resume_worktree` and the missing-candidate refusal at the top of
+`crq_repair.process` (`crq_repair.py:472-483,508-521`) over injected read-only probes
+(`resolve`, `is_dir`, `exists`). It answers with the tree to carry on with (the
+recorded `-A2` checkout is adopted only when it resolves differently, is a directory and
+has a `.git` entry; there is no ownership check) or a typed
+`refuse-missing-candidate` naming the pending `judge` (reported first) or `mechanical`
+stage. It saves nothing, runs no judge or mechanical gate and mutates no worktree or
+queue; the caller still owns Python's `atomic(result.json)`.
+`test/queue-runner/repairResume.test.ts` replays 70 named fake-fixture scenarios against
+the real `resume_worktree` and `process` (with `atomic` and `retain` stubbed to record
+the first effect and stop), comparing the chosen tree, the refusal, the Python
+`TypeError`/`ValueError` text and the ordered `resolve`/`is_dir`/`exists` probe trace.
+Relative recorded paths are not modelled (resolution is the probe's cwd).
+
 Still unwired after S6-l through S6-t: `push` (the leased remote write),
 `createPr` (forge write) and `hackDetector`, plus the binding of any of these, or
 of the shared `FixPrBacklog`, into `tick`.
