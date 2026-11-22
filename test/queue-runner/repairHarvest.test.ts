@@ -1303,6 +1303,250 @@ describe('repairHarvest terminal runs (differential)', () => {
   });
 });
 
+// Repeated harvest/terminal replay around a rejected inbox. The port terminalizes a
+// malformed or swapped inbox (Python raises, or - for a swapped one - writes from
+// it), so only the ticks where both sides can run are compared with `same`; the
+// ticks where the difference is deliberate run each side and pin the boundary.
+describe('repairHarvest rejected-inbox replay across ticks (Python vs port)', () => {
+  const calls = (o: Outcome): string[][] => JSON.parse(o.calls) as string[][];
+  const names = (o: Outcome): string[] => calls(o).map((c) => c[0] as string);
+  const carry = (o: Outcome): Record<string, unknown> =>
+    JSON.parse(o.queue) as Record<string, unknown>;
+  const marksOf = (o: Outcome): string[][] => calls(o).filter((c) => c[0] === 'mark');
+  const both = item({}, { jobs: [J1, J2] });
+  const valid1 = [J1, job(J1, { canonical_finding_id: 'F1' }), verdict(J1, 'NOT-FIXED')] as [
+    string,
+    unknown,
+    unknown,
+  ];
+  const swapped2 = (result: unknown): [string, unknown, unknown] => [
+    J2,
+    job(J2, { job: 'crq-other', canonical_finding_id: 'FSWAP' }),
+    result,
+  ];
+  const malformed2: [string, unknown, unknown] = [J2, '{not json', verdict(J2, 'NOT-FIXED')];
+
+  it('first tick: Python writes from a swapped inbox, the port rejects it after the earlier sibling', async () => {
+    const spec: Spec = {
+      item: both,
+      files: files(valid1, swapped2(verdict(J2, 'NOT-FIXED'))),
+    };
+    const py = runPython(spec);
+    // Python trusts the swapped file: it writes an outcome under the foreign job id.
+    expect(py.calls).toContain('"mark","crq-other"');
+    const ts = await runTs(spec);
+    expect(ts.error).toBeUndefined();
+    // J1's own outcome, the terminal save, then the idempotent sibling replay of J1.
+    expect(names(ts)).toEqual(['canonical', 'mark', 'save_queue', 'mark']);
+    expect(ts.calls).not.toContain('crq-other');
+    expect(ts.calls).not.toContain('FSWAP');
+    expect(JSON.stringify(calls(ts)).includes(`"mark","${J2}"`)).toBe(false);
+    // The earlier valid outcome is written twice with the same payload (idempotent).
+    expect(marksOf(ts)).toHaveLength(2);
+    expect(marksOf(ts)[1]).toEqual(marksOf(ts)[0]);
+    expect(carry(ts)).toMatchObject({ state: 'repair_failed' });
+  });
+
+  it('keeps a FIXED earlier sibling on one needs-human decision across repeated replays', async () => {
+    const files1 = files(
+      [J1, job(J1, { canonical_finding_id: 'F1' }), fixed(J1)],
+      swapped2(fixed(J2)),
+    );
+    const first = await runTs({ item: both, files: files1 });
+    expect(first.error).toBeUndefined();
+    expect(names(first)).toEqual([
+      'canonical',
+      'make_worktree',
+      'verify',
+      'mechanical',
+      'remove_worktree',
+      'mark',
+      'save_queue',
+      'sibling',
+    ]);
+    const replay = await runTs({ item: carry(first), files: files1 });
+    expect(replay.error).toBeUndefined();
+    expect(replay.queue).toBe(first.queue);
+    expect(names(replay)).toEqual(['sibling']);
+    expect(replay.calls).toContain('"sibling","F1","crq-R-F1"');
+    expect(replay.calls).not.toContain('FSWAP');
+    expect(calls(replay)[0]).toEqual(calls(first)[7]);
+    const third = await runTs({ item: carry(replay), files: files1 });
+    expect(third.queue).toBe(first.queue);
+    expect(third.calls).toBe(replay.calls);
+  });
+
+  it('replays a malformed rejected inbox identically in Python and the port, tick after tick', async () => {
+    const files1 = files(valid1, malformed2);
+    const first = await runTs({ item: both, files: files1 });
+    expect(first.error).toBeUndefined();
+    expect(names(first)).toEqual(['canonical', 'mark', 'save_queue', 'mark']);
+    // From here Python can run: its replay skips the rejected verdict (reason is not
+    // "invalid repair result: ") and its sibling replay skips the unreadable inbox.
+    const second = await same({ item: carry(first), files: files1, cleanup: true });
+    expect(second.error).toBeUndefined();
+    expect(second.queue).toBe(first.queue);
+    expect(marksOf(second)).toHaveLength(1);
+    expect(marksOf(second)[0]).toEqual(marksOf(first)[0]);
+    // Cleanup runs for both retained verdicts; the real cleanup refuses the rejected one.
+    expect(names(second)).toEqual(['mark', 'cleanup', 'cleanup', 'cleanup', 'cleanup']);
+    const third = await same({ item: carry(second), files: files1, cleanup: true });
+    expect(third.queue).toBe(first.queue);
+    expect(third.calls).toBe(second.calls);
+  });
+
+  it('earns no cleanup credit: the real cleanup_harvested leaves a rejected verdict alone', async () => {
+    const first = await runTs({ item: both, files: files(valid1, malformed2) });
+    const verdicts = (carry(first) as { repair_runs: { R: { verdicts: unknown[] } } }).repair_runs.R
+      .verdicts;
+    const rejected = verdicts[1];
+    expect(rejected).toMatchObject({ verdict: 'FAILED', finding: null });
+    const out = execFileSync(
+      'python3',
+      [
+        '-I',
+        '-c',
+        [
+          'import sys, json',
+          'sys.path.insert(0, sys.argv[1])',
+          'import crq_repair.retain as r',
+          "print(json.dumps(r.cleanup_harvested(sys.argv[3], sys.argv[3], sys.argv[3], 'i1', 'crq-R-F2', json.loads(sys.argv[2]))))",
+        ].join('\n'),
+        PYTHON_DIR,
+        JSON.stringify(rejected),
+        tmpdir(),
+      ],
+      { encoding: 'utf8' },
+    );
+    expect(JSON.parse(out)).toBe(false); // only FIXED and NOT-FIXED results can be cleaned
+  });
+
+  // Python's terminal replay does not recognise the port's "invalid repair inbox:"
+  // reason, so it falls through to the sibling replay and trusts the swapped file.
+  it('replay: Python derives a decision from a swapped inbox, the port never does (deliberate)', async () => {
+    const first = await runTs({
+      item: both,
+      files: files(valid1, swapped2(verdict(J2, 'NOT-FIXED'))),
+    });
+    const spec: Spec = {
+      item: carry(first),
+      files: files(valid1, swapped2(fixed(J2))),
+    };
+    const py = runPython(spec);
+    expect(py.error).toBeUndefined();
+    expect(py.queue).toBe(first.queue);
+    expect(py.calls).toContain('"sibling","FSWAP","crq-R-F2"');
+    const ts = await runTs(spec);
+    expect(ts.error).toBeUndefined();
+    expect(ts.queue).toBe(first.queue);
+    expect(names(ts)).toEqual(['mark']);
+    expect(marksOf(ts)[0]).toEqual(marksOf(first)[0]);
+    expect(ts.calls).not.toContain('FSWAP');
+    expect(ts.calls).not.toContain('"sibling"');
+    // And a dry replay does nothing on either side.
+    const dry: Spec = { ...spec, dry: true };
+    expect(runPython(dry).calls).toBe('[]');
+    expect((await runTs(dry)).calls).toBe('[]');
+  });
+
+  // A later repair of the inbox does not revive the rejected run: the failure is
+  // terminal. Python would, on its sibling replay, record the decision it was never
+  // able to before; the port keeps a rejected job out of every later replay.
+  it('later repair: a corrected inbox neither revives the run nor earns a late finding write', async () => {
+    const first = await runTs({ item: both, files: files(valid1, malformed2) });
+    const repaired = files(valid1, [
+      J2,
+      job(J2, { canonical_finding_id: 'F2' }),
+      verdict(J2, 'NOT-FIXED'),
+    ]);
+    const spec: Spec = { item: carry(first), files: repaired };
+    const py = runPython(spec);
+    expect(py.error).toBeUndefined();
+    expect(py.queue).toBe(first.queue);
+    expect(py.calls).toContain('"mark","crq-R-F2"'); // Python's late sibling write
+    const ts = await runTs(spec);
+    expect(ts.error).toBeUndefined();
+    expect(ts.queue).toBe(first.queue);
+    expect(names(ts)).toEqual(['mark']);
+    expect(ts.calls).not.toContain('crq-R-F2');
+    expect(ts.calls).not.toContain('"canonical"');
+  });
+
+  it('transient recovery: a missing inbox retries, then harvests with the earlier outcome replayed once per tick', async () => {
+    const first = await same({
+      item: both,
+      files: { ...files(valid1), [`repair/${J2}/result.json`]: verdict(J2, 'NOT-FIXED') },
+    });
+    expect(first.error).toBe('other');
+    expect(first.queue).toContain('"state":"queued"');
+    expect(names(first)).toEqual(['canonical', 'mark']);
+    const valid2 = [J2, job(J2, { canonical_finding_id: 'F2' }), verdict(J2, 'NOT-FIXED')] as [
+      string,
+      unknown,
+      unknown,
+    ];
+    const recovered = await same({ item: carry(first), files: files(valid1, valid2) });
+    expect(recovered.error).toBeUndefined();
+    expect(recovered.queue).toContain('"state":"done"');
+    expect(names(recovered)).toEqual(['canonical', 'mark', 'canonical', 'mark']);
+    expect(marksOf(recovered)[0]).toEqual(marksOf(first)[0]);
+    const settled = await same({ item: carry(recovered), files: files(valid1, valid2) });
+    expect(settled.queue).toBe(recovered.queue);
+    expect(settled.calls).toBe('[]');
+  });
+
+  it('transient then malformed: the port terminalizes once, replays the earlier outcome, and stays rejected', async () => {
+    const transient = await same({
+      item: both,
+      files: {
+        [`repair/inbox/${J2}.json/x`]: '{}',
+        ...files(valid1),
+        [`repair/${J2}/result.json`]: verdict(J2, 'NOT-FIXED'),
+      },
+    });
+    expect(transient.error).toBe('other');
+    const spec: Spec = { item: carry(transient), files: files(valid1, malformed2) };
+    expect(runPython(spec).error).toBeDefined(); // Python raises on every tick
+    const rejected = await runTs(spec);
+    expect(rejected.error).toBeUndefined();
+    expect(names(rejected)).toEqual(['canonical', 'mark', 'save_queue', 'mark']);
+    for (const m of marksOf(rejected)) expect(m).toEqual(marksOf(transient)[0]);
+    expect(rejected.calls).not.toContain(J2 + '","');
+    // The inbox is then repaired: the failed run is not re-harvested.
+    const healed = await runTs({
+      item: carry(rejected),
+      files: files(valid1, [J2, job(J2, { canonical_finding_id: 'F2' }), verdict(J2, 'NOT-FIXED')]),
+    });
+    expect(healed.queue).toBe(rejected.queue);
+    expect(names(healed)).toEqual(['mark']);
+    expect(healed.calls).not.toContain('F2');
+  });
+
+  it('later run: a rejected run stays inert while the next run harvests, and replays settle', async () => {
+    const twoRuns = item({}, { jobs: [J1] }) as { repair_runs: Record<string, unknown> };
+    twoRuns.repair_runs.R2 = { state: 'queued', base: 'b0', jobs: [J2] };
+    const rejectedFiles = files(
+      [J1, '{not json', verdict(J1, 'NOT-FIXED')],
+      [J2, job(J2, { canonical_finding_id: 'F2' })],
+    );
+    const first = await runTs({ item: twoRuns, files: rejectedFiles }); // R2 has no result yet
+    expect(first.error).toBeUndefined();
+    expect(names(first)).toEqual(['save_queue']);
+    const harvestFiles = {
+      ...rejectedFiles,
+      [`repair/${J2}/result.json`]: verdict(J2, 'NOT-FIXED'),
+    };
+    const second = await same({ item: carry(first), files: harvestFiles });
+    expect(second.error).toBeUndefined();
+    expect(names(second)).toEqual(['canonical', 'mark']);
+    expect(second.calls).toContain('"mark","crq-R-F2"');
+    expect(second.calls).not.toContain('crq-R-F1');
+    const third = await same({ item: carry(second), files: harvestFiles });
+    expect(third.queue).toBe(second.queue);
+    expect(third.calls).toBe('[]');
+  });
+});
+
 describe('repairHarvest with the file reads', () => {
   it('resolves paths like Path.resolve (symlinks and missing tails)', async () => {
     const root = mkdtempSync(join(tmpdir(), 'repair-hv-res-'));

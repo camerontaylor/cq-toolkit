@@ -903,6 +903,24 @@ describe('repairArchiveLegacy vs the real repair_tick.archive_legacy', () => {
     expect(out.queue).toContain('legacy_ledger_archived');
   });
 
+  it('gives a rejected-inbox failure the same archive credit as any failed run: state decides, not the verdict', async () => {
+    const rejected = {
+      job: 'crq-r-F1',
+      item: 'x',
+      verdict: 'FAILED',
+      reason: 'invalid repair inbox: repair job identity mismatch',
+      finding: null,
+    };
+    const out = await same(
+      archive({
+        legacy_repair_backfilled: 'T',
+        items: [openItem({ repair_runs: { r: { state: 'failed', verdicts: [rejected] } } })],
+      }),
+    );
+    expect(out.queue).toContain('legacy_ledger_archived');
+    expect(Object.keys(out.files)).toContain('ledger/archive/a-findings.md');
+  });
+
   it('raises on a repair record without a state', async () => {
     await same(
       archive({ legacy_repair_backfilled: 'T', items: [openItem({ repair_runs: { r: {} } })] }),
