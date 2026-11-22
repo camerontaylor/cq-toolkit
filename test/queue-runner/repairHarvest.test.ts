@@ -1904,3 +1904,144 @@ describe('repairHarvest with the file reads', () => {
     }
   });
 });
+
+// CPython caps `int(str)` at `sys.get_int_max_str_digits()` (default 4300, 3.11+), and
+// `json.loads` converts every bare integer literal with `int()`. `repairStateSource`
+// already refuses an oversized literal; `readJson` in `repairHarvestReads` parses
+// integers losslessly and has no such guard (#2312 residual). The first block pins
+// that gap as it stands; the controls are the same documents Python accepts.
+describe('repairHarvest JSON integer digit limit (Python vs port)', () => {
+  const DIGITS = '1'.repeat(4300);
+  const OVER = '1'.repeat(4301);
+
+  /** `json.loads(path.read_text())` outcome, plus the interpreter's own limit. */
+  function pyLoads(path: string): { limit: number; outcome: string } {
+    const script = [
+      'import sys, json, pathlib',
+      'try:',
+      '    json.loads(pathlib.Path(sys.argv[1]).read_text()); outcome = "ok"',
+      'except Exception as e:',
+      '    outcome = type(e).__name__',
+      'print(json.dumps({"limit": sys.get_int_max_str_digits(), "outcome": outcome}))',
+    ].join('\n');
+    return JSON.parse(
+      execFileSync('python3', ['-I', '-c', script, path], { encoding: 'utf8' }),
+    ) as { limit: number; outcome: string };
+  }
+
+  /** The same bytes through Python's `json.loads` and the port's inbox and result reads. */
+  async function readBoth(literal: string): Promise<{
+    py: { limit: number; outcome: string };
+    job: PyError | 'ok';
+    result: PyError | 'ok';
+  }> {
+    const root = mkdtempSync(join(tmpdir(), 'repair-hv-digits-'));
+    dirs.push(root);
+    mkdirSync(join(root, 'repair', 'inbox'), { recursive: true });
+    mkdirSync(join(root, 'repair', J1), { recursive: true });
+    const body = `{"job":"${J1}","weight":${literal}}`;
+    const inbox = join(root, 'repair', 'inbox', `${J1}.json`);
+    writeFileSync(inbox, body);
+    writeFileSync(join(root, 'repair', J1, 'result.json'), body);
+    const reads = fileRepairHarvestReads({ stateRoot: root, worktreeRoot: root });
+    const settle = (read: Promise<unknown>): Promise<PyError | 'ok'> =>
+      read.then(
+        () => 'ok' as const,
+        (e: unknown) => {
+          if (e instanceof PyError) return e;
+          throw e;
+        },
+      );
+    return {
+      py: pyLoads(inbox),
+      job: await settle(reads.readJob(J1)),
+      result: await settle(reads.readResult(J1)),
+    };
+  }
+
+  describe('Python and the port agree', () => {
+    const CONTROLS: Array<[string, string]> = [
+      ['4300 digits (the limit itself)', DIGITS],
+      ['4300 digits with a minus sign (the sign is not counted)', `-${DIGITS}`],
+      ['4301 digits written as a float with a fraction', `${OVER}.0`],
+      ['4301 digits written with an exponent', `${OVER}e0`],
+      ['a negative float over the limit', `-${OVER}.5`],
+    ];
+    for (const [name, literal] of CONTROLS) {
+      it(`reads ${name}`, async () => {
+        const out = await readBoth(literal);
+        expect(out.py).toEqual({ limit: 4300, outcome: 'ok' });
+        expect(out.job).toBe('ok');
+        expect(out.result).toBe('ok');
+      });
+    }
+
+    it('reads a 4301-digit run inside a string', async () => {
+      const out = await readBoth(`"${OVER}"`);
+      expect(out.py).toEqual({ limit: 4300, outcome: 'ok' });
+      expect(out.job).toBe('ok');
+      expect(out.result).toBe('ok');
+    });
+
+    it('still refuses a malformed document at the same boundary', async () => {
+      // The oracle is not simply accepting everything: a bare sign is an error on both sides.
+      const out = await readBoth('-');
+      expect(out.py.outcome).toBe('JSONDecodeError');
+      expect(out.job).toMatchObject({ kind: 'ValueError' });
+      expect(out.result).toMatchObject({ kind: 'ValueError' });
+    });
+  });
+
+  // RESIDUAL (#2312): Python raises ValueError ("Exceeds the limit (4300 digits) for
+  // integer string conversion"); the port parses the literal as a bigint and returns it.
+  // When `readJson` gains the guard, flip these to `toMatchObject({ kind: 'ValueError' })`
+  // and move the 4301 cases into the agreement block above.
+  describe('Python refuses, the port still reads (residual)', () => {
+    for (const [name, literal] of [
+      ['4301 digits', OVER],
+      ['4301 digits with a minus sign', `-${OVER}`],
+    ] as const) {
+      it(`${name}: ValueError in Python, accepted by readJob and readResult`, async () => {
+        const out = await readBoth(literal);
+        expect(out.py).toEqual({ limit: 4300, outcome: 'ValueError' });
+        expect(out.job).toBe('ok');
+        expect(out.result).toBe('ok');
+      });
+    }
+  });
+
+  describe('through the harvest inbox', () => {
+    const inboxWith = (literal: string): string =>
+      `{"job":"${J1}","item":"i1","finding":{"id":"f-${J1}"},"canonical_finding_id":"F1","weight":${literal}}`;
+    const specWith = (literal: string): Spec => ({
+      item: item({}, { jobs: [J1] }),
+      files: files([J1, inboxWith(literal), verdict(J1, 'NOT-FIXED')]),
+    });
+
+    it('harvests identically at 4300 digits', async () => {
+      const out = await same(specWith(DIGITS));
+      expect(out.error).toBeUndefined();
+      expect(out.queue).toContain('"state":"done"');
+      expect(out.calls).toContain('"mark","crq-R-F1"');
+    });
+
+    it('harvests identically for a 4301-digit float', async () => {
+      const out = await same(specWith(`${OVER}.0`));
+      expect(out.error).toBeUndefined();
+      expect(out.queue).toContain('"state":"done"');
+    });
+
+    it('RESIDUAL: 4301 digits raise ValueError in Python but harvest in the port', async () => {
+      const spec = specWith(OVER);
+      const py = runPython(spec);
+      // Uncaught: the run stays open, nothing is terminalized and no outcome is written.
+      expect(py.error).toBe('ValueError');
+      expect(py.queue).toContain('"state":"queued"');
+      expect(py.calls).not.toContain('"mark"');
+      const ts = await runTs(spec);
+      expect(ts.error).toBeUndefined();
+      expect(ts.queue).toContain('"state":"done"');
+      expect(ts.calls).toContain('"mark","crq-R-F1"');
+    });
+  });
+});
