@@ -435,10 +435,12 @@ has a `.git` entry; there is no ownership check) or a typed
 `refuse-missing-candidate` naming the pending `judge` (reported first) or `mechanical`
 stage. It saves nothing, runs no judge or mechanical gate and mutates no worktree or
 queue; the caller still owns Python's `atomic(result.json)`.
-`test/queue-runner/repairResume.test.ts` replays 70 named fake-fixture scenarios against
-the real `resume_worktree` and `process` (with `atomic` and `retain` stubbed to record
-the first effect and stop), comparing the chosen tree, the refusal, the Python
+`test/queue-runner/repairResume.test.ts` replays 63 named fake-fixture differential
+scenarios against the real `resume_worktree` and `process` (with `atomic` and `retain`
+stubbed to record the first effect and stop), comparing the chosen tree, the refusal, the Python
 `TypeError`/`ValueError` text and the ordered `resolve`/`is_dir`/`exists` probe trace.
+The file holds 70 tests: those 63 scenarios plus 7 that never run Python (the
+scenario-uniqueness guard, the path-coverage guard and 5 synthetic-probe tests).
 Relative recorded paths are not modelled (resolution is the probe's cwd).
 
 Still unwired after S6-l through S6-t: `push` (the leased remote write),
