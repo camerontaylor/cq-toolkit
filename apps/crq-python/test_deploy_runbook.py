@@ -1204,11 +1204,14 @@ class HoldPersistenceTest(unittest.TestCase):
 
     def test_proven_ownership_removes_an_unsyncable_marker(self):
         # The token bytes landed but the fsync failed. The marker's bytes
-        # still prove this run's ownership, so the run removes it and
-        # refuses with the host genuinely unchanged.
+        # still prove this run's ownership, so the run removes it; the
+        # removal's directory sync fails too, so the transition is reported
+        # as unverifiable -- the marker may reappear after a reboot and
+        # hold admission -- rather than a refusal that claims the host is
+        # unchanged.
         full = OSError(28, "No space left on device")
         with mock.patch.object(rb.os, "fsync", side_effect=full):
-            with self.assertRaisesRegex(rb.Refused, "ownership was proven"):
+            with self.assertRaises(rb.RecoveryRequired):
                 self.hold.acquire()
         self.assertFalse(self.hold.path.exists())
         self.assertTrue(self.hold.created)

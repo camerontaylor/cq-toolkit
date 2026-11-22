@@ -390,7 +390,8 @@ class Hold:
         self.path = Path(root) / MARKER_RELPATH
         self.token = (uuid.uuid4().hex + "-" + str(os.getpid()) + "\n").encode()
         # ``created`` tracks a marker that exists on disk; ``acquired``
-        # additionally requires this run's token to be persisted.
+        # additionally requires this run's token to be persisted and the
+        # marker's directory entry synced.
         self.created = False
         self.acquired = False
 
@@ -425,25 +426,58 @@ class Hold:
                     "verifying its contents are "
                     + self.token.decode().strip()) from exc
             # The persisted bytes match this run's token, so ownership is
-            # proven: remove the marker as release() would and refuse with
-            # the host genuinely unchanged.
+            # proven: remove the marker durably, as release() does, and
+            # refuse with the host genuinely unchanged.
             try:
-                self.path.unlink()
+                self._remove_durably()
             except OSError as removal:
                 raise RecoveryRequired(
                     "the admission marker " + str(self.path)
                     + " could not be persisted (" + repr(exc)[:200]
-                    + ") and could not be removed (" + repr(removal)[:200]
-                    + "); the marker is retained with this run's token "
-                    + self.token.decode().strip() + " and admission stays "
-                    "disabled") from removal
+                    + ") and could not be verifiably removed ("
+                    + repr(removal)[:200] + "); the marker is retained or "
+                    "its removal may not survive a reboot, and admission "
+                    "stays held by this run's token "
+                    + self.token.decode().strip()) from removal
             raise Refused(
                 "the admission marker " + str(self.path)
                 + " could not be persisted (" + repr(exc)[:200]
                 + "); its bytes matched this run's token, so ownership was "
-                "proven and the marker was removed; the host is unchanged"
+                "proven and the marker was removed with a synced directory "
+                "entry; the host is unchanged"
             ) from exc
+        # The token bytes are durable, but a created file's directory entry
+        # is not until the directory itself is synced: without it a power
+        # loss can reboot the host without the admission hold. A failed
+        # sync leaves the transition unverifiable, so the marker stays and
+        # the run reports recovery instead of proceeding.
+        try:
+            self.sync_directory()
+        except OSError as exc:
+            raise RecoveryRequired(
+                "the admission marker " + str(self.path)
+                + " was created but its directory entry could not be "
+                "synced (" + repr(exc)[:200] + "); the admission transition "
+                "could not be verified: the marker is retained with this "
+                "run's token " + self.token.decode().strip() + " and "
+                "admission stays disabled") from exc
         self.acquired = True
+
+    def sync_directory(self):
+        """fsync the marker's directory so its entry — the creation or the
+        removal — survives a power loss; raises OSError when it cannot."""
+        directory = os.open(self.path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+    def _remove_durably(self):
+        """Remove the marker and sync its directory entry so the removal
+        cannot resurrect as a stale hold after a reboot; raises OSError
+        when either step fails."""
+        self.path.unlink()
+        self.sync_directory()
 
     def owns(self):
         return self.ownership() is True
@@ -461,7 +495,15 @@ class Hold:
     def release(self):
         require(self.owns(),
                 "cannot release the admission marker: it is not this run's")
-        self.path.unlink()
+        try:
+            self._remove_durably()
+        except OSError as exc:
+            raise RecoveryRequired(
+                "the admission marker " + str(self.path)
+                + " could not be verifiably removed (" + repr(exc)[:200]
+                + "); the admission release could not be verified: after a "
+                "power loss the marker may reappear and hold admission"
+            ) from exc
         self.acquired = False
 
 
