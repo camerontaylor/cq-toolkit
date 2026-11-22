@@ -72,7 +72,10 @@ export interface Tick {
   outcome?: Record<string, string>;
   /** `git rev-parse HEAD` in a cleanup tree fails with this message. */
   head_error?: string;
-  /** The N-th (1-based) queue save of this tick raises OSError before writing. */
+  /**
+   * The N-th (1-based) queue save made through the harvest effect seam raises OSError before
+   * writing. The durable tick-end write is not counted.
+   */
   save_fail?: number;
   /** Durable runs: the process dies right after harvest, so no `last_error` and no tick-end save. */
   crash?: boolean;
@@ -542,7 +545,7 @@ export async function runTs(mods: Mods, run: Run): Promise<Outcome> {
       caught = e instanceof Error ? e.message : String(e);
     }
     // Key order matters to the JSON-text comparison: messages|error, queue, files.
-    if (run.durable && !tick.crash) {
+    if (run.durable && !tick.crash && !tick.dry) {
       if (out.error !== undefined) {
         // `crq.tick` catches a harvest failure into the item.
         q.items[0]!.last_error = `repair harvest failed: ${caught.slice(0, 300)}`;

@@ -36,7 +36,8 @@
 // backlog and reads built only from disk: the queue comes back through
 // `loadQueueDocument` and the world from `world.json`. The in-process scenarios
 // run the same helper against `src/`. A tick's
-// `save_fail` makes its N-th queue save fail before writing. A durable tick
+// `save_fail` makes the N-th queue save made through the harvest effect seam fail
+// before writing (the tick-end write is not counted). A durable live tick
 // also does what `crq.tick` does around `harvest`: an exception becomes
 // `last_error` and the queue is saved at the end of the tick; a tick's `crash`
 // is the process dying right after harvest, so neither happens.
@@ -198,8 +199,6 @@ function joinSegments(parts: Outcome[]): Outcome {
     removed: last.removed,
   };
 }
-
-// --- the TypeScript side ----------------------------------------------------
 
 // --- the TypeScript side ----------------------------------------------------
 
@@ -609,6 +608,17 @@ describe('S6 repair-harvest shadow: durable restarts reload state/queue.json', (
     expect(Object.keys(o.files).sort()).toEqual(
       [JOURNAL, `repair/${J1}/publication.patch`, `repair/${J1}/fix-pr.md`, 'queue.json'].sort(),
     );
+  });
+
+  it('a dry tick harvests nothing durable: no last_error and no tick-end save, and the next process publishes once', async () => {
+    const o = await durable(base({ ticks: [{ dry: true }, { restart: true }, { restart: true }] }));
+    // `crq.tick` saves only when it is live, so the dry tick leaves queue.json as seeded.
+    expect(count(o, 'tick-save')).toBe(2);
+    expect(diskState(o, 0)).toBe('queued');
+    expect(states(o)).toEqual(['queued', 'published', 'published']);
+    expect(count(o, 'push')).toBe(1);
+    expect(count(o, 'create')).toBe(1);
+    expect(removals(o)).toEqual([tree(J1)]);
   });
 
   it('a crash before the first queue save leaves queue.json untouched and the next process starts over', async () => {
