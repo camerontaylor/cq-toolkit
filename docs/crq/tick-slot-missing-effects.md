@@ -444,6 +444,20 @@ scenario-uniqueness guard, the path-coverage guard, a snapshot-discrimination te
 5 synthetic-probe tests).
 Relative recorded paths are not modelled (resolution is the probe's cwd).
 
+S5b resume ownership gap (evidence only, no behavior change):
+`test/queue-runner/repairResumeOwnership.test.ts` (17 synthetic tests, no filesystem,
+Git, Python, judge or network) feeds the same recorded worktrees to
+`decideRepairCleanup`, used as the ownership oracle, and to `decideResumeCandidate`.
+The established contract (`recovery.py:70-72`, `retain.py:29`) owns only
+`crq-repair-<item>-<job>` and `...-A2` directly under the resolved `WT_ROOT`; the harvest
+validator also accepts the legacy `crq-repair-<item>`. The owned base and `-A2` controls
+agree, but the selector adopts every foreign job or item, legacy, unrelated, `-A2-A2`,
+outside-root, nested and `WT_ROOT` record that has a `.git` entry (9 pinned divergences),
+and refuses only a missing candidate. Open gate before any wiring: the policy for a
+resumed tree is undecided (adopt as Python does, or require the owned name), and no
+Python contract for Git registration exists (nothing runs `git worktree list`), so a
+registration flag in the fixtures is synthetic and provably inert.
+
 Still unwired after S6-l through S6-t: `push` (the leased remote write),
 `createPr` (forge write) and `hackDetector`, plus the binding of any of these, or
 of the shared `FixPrBacklog`, into `tick`.
