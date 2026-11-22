@@ -439,8 +439,9 @@ queue; the caller still owns Python's `atomic(result.json)`.
 scenarios against the real `resume_worktree` and `process` (with `atomic` and `retain`
 stubbed to record the first effect and stop), comparing the chosen tree, the refusal, the Python
 `TypeError`/`ValueError` text and the ordered `resolve`/`is_dir`/`exists` probe trace.
-The file holds 70 tests: those 63 scenarios plus 7 that never run Python (the
-scenario-uniqueness guard, the path-coverage guard and 5 synthetic-probe tests).
+The file holds 71 tests: those 63 scenarios plus 8 that never run Python (the
+scenario-uniqueness guard, the path-coverage guard, a snapshot-discrimination test and
+5 synthetic-probe tests).
 Relative recorded paths are not modelled (resolution is the probe's cwd).
 
 Still unwired after S6-l through S6-t: `push` (the leased remote write),

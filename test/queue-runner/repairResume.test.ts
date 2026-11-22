@@ -14,12 +14,14 @@
  */
 import { execFileSync } from 'node:child_process';
 import {
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  readlinkSync,
   rmSync,
-  statSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { stat } from 'node:fs/promises';
@@ -318,23 +320,24 @@ interface Laid {
   readonly listing: string;
 }
 
-/** Recursive, non-following listing of names and kinds under `dir`. */
+/**
+ * Recursive, non-following snapshot of names and kinds under `dir`. A symlink is
+ * recorded as itself with its stored target (`lstat` + `readlink`), never as the
+ * thing it points at, and is not descended into: retargeting a link, or turning a
+ * link into a copy of its target, changes the snapshot.
+ */
 function listing(dir: string, prefix = ''): string[] {
   const out: string[] = [];
   for (const name of readdirSync(dir).sort()) {
     const full = join(dir, name);
-    const info = (() => {
-      try {
-        return statSync(full, { throwIfNoEntry: false });
-      } catch {
-        return undefined;
-      }
-    })();
-    out.push(
-      `${prefix}${name}:${info === undefined ? 'dangling' : info.isDirectory() ? 'd' : 'f'}`,
-    );
-    if (info?.isDirectory() === true) {
+    const info = lstatSync(full);
+    if (info.isSymbolicLink()) {
+      out.push(`${prefix}${name}:l->${readlinkSync(full)}`);
+    } else if (info.isDirectory()) {
+      out.push(`${prefix}${name}:d`);
       out.push(...listing(full, `${prefix}${name}/`));
+    } else {
+      out.push(`${prefix}${name}:f`);
     }
   }
   return out;
@@ -581,6 +584,28 @@ describe('repairResume differential (resume_worktree + missing-candidate refusal
     expect(outcomes.some((o, i) => 'proceed' in o && o.proceed === laid[i]?.ctx.w(A2))).toBe(true);
     expect(outcomes.some((o) => 'error' in o && o.error === 'TypeError')).toBe(true);
     expect(outcomes.some((o) => 'error' in o && o.error === 'ValueError')).toBe(true);
+  });
+});
+
+describe('the WT_ROOT snapshot', () => {
+  it('sees a symlink retargeted to a look-alike directory and a link swapped for a directory', () => {
+    const root = mkdtempSync(join(tmpdir(), 'repair-resume-snap-'));
+    dirs.push(root);
+    for (const twin of ['real-a', 'real-b']) {
+      mkdirSync(join(root, twin));
+      writeFileSync(join(root, twin, '.git'), 'gitdir: x\n');
+    }
+    symlinkSync(join(root, 'real-a'), join(root, 'link'));
+    const before = listing(root).join('\n');
+    expect(listing(root).join('\n')).toBe(before);
+    unlinkSync(join(root, 'link'));
+    symlinkSync(join(root, 'real-b'), join(root, 'link'));
+    const retargeted = listing(root).join('\n');
+    expect(retargeted).not.toBe(before);
+    unlinkSync(join(root, 'link'));
+    mkdirSync(join(root, 'link'));
+    writeFileSync(join(root, 'link', '.git'), 'gitdir: x\n');
+    expect(listing(root).join('\n')).not.toBe(retargeted);
   });
 });
 
