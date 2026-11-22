@@ -2887,6 +2887,12 @@ def main(argv=None):
     if case is not None and args.boundary not in (None, case):
         parser.error(args.phase + " proves the " + case + " case derived"
                      " from its name, not --boundary " + args.boundary)
+    drain_seed = (args.phase[len("drain-"):]
+                  if args.phase.startswith("drain-") else None)
+    if drain_seed is not None and args.seed not in (None, drain_seed):
+        parser.error(args.phase + " probes the " + drain_seed
+                     + " seed derived from its name, not --seed "
+                     + args.seed)
     try:
         require(os.uname().nodename == "crq-probe",
                 "proof driver only runs on the disposable crq-probe guest")
