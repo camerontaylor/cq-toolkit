@@ -48,8 +48,18 @@ does neither); non-durable ticks still call `harvest(dry=True)` directly. A tick
 is the process dying right after `harvest`, so neither happens (it must be the
 last tick of its segment).
 
+A live tick also does what `crq.tick` does around `harvest` for the fix-PR backlog (the
+view that holds a backfill fix PR's creation): `reset_fix_pr_backlog()`, then, when
+`backfill_repair_present(q)`, `refresh_fix_pr_backlog` (the one `gh pr list --state open`
+read, `events.jsonl` for the limit, and `state/repair/fix-pr-backlog.json`), then
+`harvest`, then the reset again. The mocked listing is the open rows of the world's PRs
+plus the tick's "external" branches (open PRs this harness does not own); a tick's
+"gh_open": "fail" makes that one read raise, which leaves the view unread. A dry tick
+never refreshes. A queue with no backfill item makes no listing call at all.
+
 Spec: {"item": {..}, "extra": [{..}], "ticks": [{"restart": bool, "files": {rel: json|str},
  "create": "ok"|"runtime"|"timeout-landed"|"timeout-lost", "push_fail": bool,
+ "external": [headRefName], "gh_open": "ok"|"fail",
  "outcome": {job: "<directive>"}, "stale": {job: "<directive>"},
  "head_error": str|null, "dry": bool, "save_fail": int, "crash": bool}],
  "remote": {branch: sha}, "prs": {branch: [row]}, "pr_info": row|null,
@@ -57,7 +67,7 @@ Spec: {"item": {..}, "extra": [{..}], "ticks": [{"restart": bool, "files": {rel:
 
 The result is {"log": [..], "ticks": [{"messages"|"error", "queue", "files"}],
 "files": {..}, "removed": [..]}; the ordered `log` holds every effect. `files`
-(journal, patch, body, `queue.json`) is snapshotted after every tick and once
+(journal, patch, body, `queue.json`, and `fix-pr-backlog.json` without its clock `at`) is snapshotted after every tick and once
 more at the end.
 """
 import builtins
@@ -139,6 +149,15 @@ def main():
 
     # --- the in-memory git / forge world -------------------------------------
     def gh_json(args):
+        if '--head' not in args:
+            # `refresh_fix_pr_backlog`: every open PR's head branch, ours and external.
+            log.append(['list-open'])
+            if cur['tick'].get('gh_open') == 'fail':
+                raise RuntimeError('gh pr list failed')
+            rows = [{'headRefName': b} for b in cur['tick'].get('external', [])]
+            for branch, prs in world['prs'].items():
+                rows.extend({'headRefName': branch} for pr in prs if pr['state'] == 'OPEN')
+            return rows
         branch = args[args.index('--head') + 1]
         log.append(['list', branch])
         return copy.deepcopy(world['prs'].get(branch, []))
@@ -216,7 +235,7 @@ def main():
         crq_repair.atomic(state / 'queue.json', q)
 
     c = SimpleNamespace(
-        STATE=state, ROOT=root, WT_ROOT=wt_root, CLONE=root / 'clone', REPO='o/r',
+        STATE=state, EVENTS=state / 'events.jsonl', ROOT=root, WT_ROOT=wt_root, CLONE=root / 'clone', REPO='o/r',
         CONFIG={'repair': {'cq_bin': 'cq'}}, iso=lambda: 'now', gh_json=gh_json, git=git, run=run,
         pr_info=pr_info, is_ancestor=is_ancestor, secret_scan=secret_scan,
         make_worktree=make_worktree,
@@ -274,8 +293,14 @@ def main():
     def snapshot_files():
         found = {}
         for path in sorted(state.rglob('*')):
-            if path.is_file() and path.name in ('publication.json', 'queue.json', 'publication.patch', 'fix-pr.md'):
-                found[str(path.relative_to(state))] = path.read_text()
+            if path.is_file() and path.name in ('publication.json', 'queue.json', 'publication.patch',
+                                                'fix-pr.md', 'fix-pr-backlog.json'):
+                text = path.read_text()
+                if path.name == 'fix-pr-backlog.json':
+                    doc = json.loads(text)
+                    doc.pop('at')  # the clock is real
+                    text = json.dumps(doc, separators=(',', ':'))
+                found[str(path.relative_to(state))] = text
         return found
 
     ticks = []
@@ -303,6 +328,12 @@ def main():
             out = {}
             # crq.tick(dry=True) never calls harvest: a durable dry tick does not either.
             skip_harvest = bool(segment) and bool(tick.get('dry'))
+            # crq.tick: clear the view, read it once before the first publish (live ticks with a
+            # backfill repair only), harvest, then clear it again.
+            repair_tick.reset_fix_pr_backlog()
+            if not tick.get('dry') and repair_tick.backfill_repair_present(q):
+                view = repair_tick.refresh_fix_pr_backlog(c, q)
+                log.append(['refresh', None if view is None else dict(view)])
             if not skip_harvest:
                 try:
                     out['messages'] = repair_tick.harvest(c, q, item, dry=bool(tick.get('dry')))
@@ -317,6 +348,7 @@ def main():
             out['files'] = snapshot_files()
             ticks.append(out)
             log.append(['backlog', dict(repair_tick.TICK_BACKLOG)])
+            repair_tick.reset_fix_pr_backlog()
     finally:
         for patch in patches:
             patch.stop()

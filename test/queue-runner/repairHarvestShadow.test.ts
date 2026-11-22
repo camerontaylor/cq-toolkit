@@ -42,7 +42,13 @@
 // `last_error` and the queue is saved at the end of the tick; a tick's `crash`
 // is the process dying right after harvest, so neither happens.
 //
-// Out of scope here, pinned elsewhere: the fix-PR backlog accounting
+// The last family composes #2307's backlog refresh into the same run: a backfill
+// item whose creation the shared fix-PR backlog view holds, then releases. Each
+// live tick does what `crq.tick` does around `harvest` (reset the view, read it
+// once through the mocked open-PR listing and `events.jsonl` when a backfill repair
+// is present, harvest, reset), on both sides.
+//
+// Out of scope here, pinned elsewhere: the fix-PR backlog accounting on its own
 // (publicationBacklog.test.ts), the individual policy edges of harvest
 // (repairHarvest.test.ts), of cleanup (repairCleanup.test.ts) and of enrollment
 // (publicationEnroll.test.ts). The scenarios here are the cross-component ones.
@@ -52,12 +58,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
+import { fileFixPrBacklogEffects } from '../../src/adapters/crq/fixPrBacklogSource.js';
 import { filePublicationEffects } from '../../src/adapters/crq/publicationFiles.js';
 import { loadQueueDocument } from '../../src/adapters/crq/queueEffects.js';
 import { fileRepairHarvestReads } from '../../src/adapters/crq/repairHarvestReads.js';
 import { toPlainJson } from '../../src/policy/crq/jsonValue.js';
 import { receiptJsonDigest } from '../../src/policy/crq/pythonJson.js';
-import { FixPrBacklog } from '../../src/queue-runner/fixPrBacklog.js';
+import {
+  backfillRepairPresent,
+  FixPrBacklog,
+  refreshFixPrBacklog,
+} from '../../src/queue-runner/fixPrBacklog.js';
 import { finalizePublication } from '../../src/queue-runner/publicationFinalize.js';
 import { publicationNewItem } from '../../src/queue-runner/publicationEnroll.js';
 import { publishRepair } from '../../src/queue-runner/publicationPublish.js';
@@ -206,6 +217,9 @@ function joinSegments(parts: Outcome[]): Outcome {
 const SRC: Mods = {
   PyError,
   FixPrBacklog,
+  backfillRepairPresent,
+  refreshFixPrBacklog,
+  fileFixPrBacklogEffects,
   filePublicationEffects,
   loadQueueDocument,
   fileRepairHarvestReads,
@@ -790,5 +804,84 @@ describe('S6 repair-harvest shadow: durable restarts reload state/queue.json', (
     expect(count(o, 'push')).toBe(0);
     expect(count(o, 'mark')).toBe(1);
     expect(removals(o)).toEqual([tree(J1)]);
+  });
+});
+
+// --- backfill backlog hold and release --------------------------------------
+
+const BF = 'backfill-finding-a';
+const bfTree = `crq-repair-${BF}-${J1}`;
+
+/** `n` `review_started` events an hour ago: the limit is `n * 4 // 72`. */
+const startsText = (n: number): string => {
+  const at = new Date(Date.now() - 3_600_000).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  return (
+    Array.from({ length: n }, () => JSON.stringify({ at, event: 'review_started' })).join('\n') +
+    '\n'
+  );
+};
+
+/** One FIXED backfill run, a retained snapshot and a clean tree, with a limit of 2. */
+function backfill(ticks: Tick[]): Spec {
+  return base({
+    item: item({ id: BF }),
+    files: {
+      ...jobFiles(J1, fixed(J1, { item: BF, worktree: `{WT}/${bfTree}` }), { item: BF }),
+      'events.jsonl': startsText(36),
+    },
+    trees: { [bfTree]: CLEAN },
+    ticks,
+  });
+}
+
+const BACKLOG_FILE = 'repair/fix-pr-backlog.json';
+const refreshes = (o: Outcome): unknown[] =>
+  o.log.filter((e) => e[0] === 'refresh').map((e) => e[1]);
+
+describe('S6 repair-harvest shadow: a backfill fix PR held by the shared backlog, then released', () => {
+  it('holds on an unread view and on a full backlog, publishes once a slot frees, and re-reads each tick', async () => {
+    const spec = backfill([
+      // The listing fails: the view stays unread, so the run is pushed and journaled but held.
+      { gh_open: 'fail', external: ['crq/fix-backfill-x1', 'crq/fix-backfill-x2'] },
+      // Read again, but the two external backfill PRs fill the limit of 2: still held.
+      { restart: true, external: ['crq/fix-backfill-x1', 'crq/fix-backfill-x2'] },
+      // One of them closed: the freed slot is reserved, the PR created and the run enrolled.
+      { restart: true, external: ['crq/fix-backfill-x2'] },
+      // Our own open PR now counts toward the next view; cleanup takes the tree.
+      { restart: true, external: ['crq/fix-backfill-x2'] },
+    ]);
+    for (const o of [await parity(spec), await durable(spec)]) {
+      expect(refreshes(o)).toEqual([
+        null,
+        { open: 2, limit: 2 },
+        { open: 1, limit: 2 },
+        { open: 2, limit: 2 },
+      ]);
+      expect(states(o)).toEqual(['ready', 'ready', 'published', 'published']);
+      // Pushed and journaled on the first tick, then only recovered: one push, one create.
+      expect(count(o, 'push')).toBe(1);
+      expect(count(o, 'create')).toBe(1);
+      expect(count(o, 'event')).toBe(1);
+      const created = o.log.findIndex((e) => e[0] === 'create');
+      expect(o.log.findIndex((e) => e[0] === 'tick' && e[1] === 2)).toBeLessThan(created);
+      expect(created).toBeLessThan(o.log.findIndex((e) => e[0] === 'tick' && e[1] === 3));
+      // The reserved slot is visible at the end of the creating tick, then re-counted from the forge.
+      expect(o.log.filter((e) => e[0] === 'backlog').map((e) => e[1])).toEqual([
+        { open: null, limit: null },
+        { open: 2, limit: 2 },
+        { open: 2, limit: 2 },
+        { open: 2, limit: 2 },
+      ]);
+      // The view file is not written by the failed read and follows the listing afterwards.
+      expect(BACKLOG_FILE in o.ticks[0]!.files).toBe(false);
+      expect([1, 2, 3].map((i) => JSON.parse(o.ticks[i]!.files[BACKLOG_FILE]!) as unknown)).toEqual(
+        [
+          { open: 2, limit: 2 },
+          { open: 1, limit: 2 },
+          { open: 2, limit: 2 },
+        ],
+      );
+      expect(removals(o)).toEqual([bfTree]);
+    }
   });
 });
