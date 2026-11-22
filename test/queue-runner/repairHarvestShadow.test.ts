@@ -57,7 +57,7 @@
 // (repairHarvest.test.ts), of cleanup (repairCleanup.test.ts) and of enrollment
 // (publicationEnroll.test.ts). The scenarios here are the cross-component ones.
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, existsSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -940,6 +940,16 @@ describe('S6 repair-harvest shadow: a rejected inbox replayed across durable rel
     const ts = runTsDurable(spec);
     const a = norm(py.out, py.root) as Outcome;
     const b = norm(ts.out, ts.root) as Outcome;
+
+    // The edit landed on both sides' scratch disks: the row began as the foreign one and now
+    // names J2. Without the tick-2 `files` entry the file would still say `crq-other`.
+    const inboxRel = `repair/inbox/${J2}.json`;
+    expect(spec.files[inboxRel]).toMatchObject({ job: 'crq-other' });
+    for (const side of [py, ts]) {
+      const row = JSON.parse(readFileSync(join(side.root, 'state', inboxRel), 'utf8')) as Rec;
+      expect(row.job).toBe(J2);
+      expect(row.canonical_finding_id).toBe(`c-${J2}`);
+    }
 
     // Python: tick 0 writes J1's outcome, then J2's result under the FOREIGN job id.
     expect(trail(a)).toEqual([
