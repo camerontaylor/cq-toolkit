@@ -1690,6 +1690,114 @@ describe('repairHarvest sibling retry timing across ticks (Python vs port)', () 
   });
 });
 
+// The canonical-delivery check runs before the result file is read, so it also
+// runs ahead of a `retry_after` wait. The passing check is pinned above; here the
+// two failing checks decide what a waiting job does: a confirmed stale binding
+// retires the run (nothing is waited on), an unreadable triage row only defers
+// it (the run stays open and retryable). A malformed result file is the probe
+// for ordering: had the result been read first it would be terminalized as an
+// invalid result, which neither failing check does.
+describe('repairHarvest canonical delivery check ahead of a retry_after wait (Python vs port)', () => {
+  const calls = (o: Outcome): string[][] => JSON.parse(o.calls) as string[][];
+  const names = (o: Outcome): string[] => calls(o).map((c) => c[0] as string);
+  const carry = (o: Outcome): Record<string, unknown> =>
+    JSON.parse(o.queue) as Record<string, unknown>;
+  const runOf = (o: Outcome): Record<string, unknown> =>
+    (JSON.parse(o.queue) as { repair_runs: { R: Record<string, unknown> } }).repair_runs.R;
+  const inbox1 = job(J1, { canonical_finding_id: 'F1' });
+  const inbox2 = job(J2, { canonical_finding_id: 'F2' });
+  const waiting = (id: string) => verdict(id, 'FAILED', { retry_after: '2026-11-21T00:00:00Z' });
+  const STALE = 'value:selection moved';
+  const UNREADABLE = 'value:canonical delivery state unavailable';
+  const results: Array<[string, unknown]> = [
+    ['a waiting retry_after result', waiting(J1)],
+    ['a malformed result file', '{not json'],
+  ];
+
+  describe.each(results)('with %s', (_label, result) => {
+    it('stale binding: the run is retired, nothing is waited on or recorded', async () => {
+      const spec: Spec = {
+        item: item(),
+        files: files([J1, inbox1, result]),
+        stale: { [J1]: STALE },
+      };
+      const out = await same(spec);
+      expect(out.error).toBeUndefined();
+      expect(names(out)).toEqual(['canonical']);
+      const run = runOf(out);
+      expect(run.state).toBe('stale');
+      expect(run.error).toBe('selection moved');
+      expect(out.queue).toContain('"state":"done"'); // the item, no longer repairing
+      expect(out.calls).not.toContain('"mark"');
+      const dry = await same({ ...spec, dry: true });
+      expect(names(dry)).toEqual(['canonical']);
+      expect(runOf(dry).state).toBe('queued');
+      expect(dry.queue).toContain('"state":"repairing"');
+    });
+
+    it('unreadable delivery: the run stays open and retryable, nothing is recorded', async () => {
+      const spec: Spec = {
+        item: item(),
+        files: files([J1, inbox1, result]),
+        stale: { [J1]: UNREADABLE },
+      };
+      const out = await same(spec);
+      expect(out.error).toBeUndefined();
+      expect(names(out)).toEqual(['canonical']);
+      expect(runOf(out).state).toBe('queued');
+      expect(runOf(out).error).toBeUndefined();
+      expect(out.queue).toContain('"state":"repairing"');
+      expect(out.calls).not.toContain('"mark"');
+      // Another unreadable tick changes nothing, dry or not.
+      const again = await same({ ...spec, item: carry(out) });
+      expect(again.queue).toBe(out.queue);
+      expect(again.calls).toBe(out.calls);
+      const dry = await same({ ...spec, dry: true });
+      expect(dry.queue).toBe(out.queue);
+    });
+  });
+
+  it('unreadable delivery then readable: the retry_after wait resumes unchanged', async () => {
+    const f = files([J1, inbox1, waiting(J1)]);
+    const deferred = await same({ item: item(), files: f, stale: { [J1]: UNREADABLE } });
+    const waited = await same({ item: carry(deferred), files: f });
+    expect(waited.error).toBeUndefined();
+    expect(names(waited)).toEqual(['canonical']);
+    expect(waited.queue).toBe(deferred.queue);
+    expect(waited.calls).not.toContain('"mark"');
+    // The retry settles on a later tick: the verdict is recorded and the run ends.
+    const settled = await same({
+      item: carry(waited),
+      files: files([J1, inbox1, verdict(J1, 'NOT-FIXED')]),
+    });
+    expect(settled.calls).toContain('"mark","crq-R-F1"');
+  });
+
+  describe('behind an earlier job that recorded its own outcome', () => {
+    const f = files([J1, inbox1, verdict(J1, 'NOT-FIXED')], [J2, inbox2, waiting(J2)]);
+    const both = item({}, { jobs: [J1, J2] });
+
+    it('stale binding on the waiting job retires the run after the earlier mark', async () => {
+      const out = await same({ item: both, files: f, stale: { [J2]: STALE } });
+      expect(out.error).toBeUndefined();
+      expect(names(out)).toEqual(['canonical', 'mark', 'canonical']);
+      expect(runOf(out).state).toBe('stale');
+      expect(out.calls).not.toContain('"mark","crq-R-F2"');
+    });
+
+    it('unreadable delivery on the waiting job keeps the run open; the earlier mark replays', async () => {
+      const first = await same({ item: both, files: f, stale: { [J2]: UNREADABLE } });
+      expect(first.error).toBeUndefined();
+      expect(names(first)).toEqual(['canonical', 'mark', 'canonical']);
+      expect(runOf(first).state).toBe('queued');
+      const replay = await same({ item: carry(first), files: f, stale: { [J2]: UNREADABLE } });
+      expect(replay.queue).toBe(first.queue);
+      expect(replay.calls).toBe(first.calls);
+      expect(replay.calls).not.toContain('"mark","crq-R-F2"');
+    });
+  });
+});
+
 describe('repairHarvest with the file reads', () => {
   it('resolves paths like Path.resolve (symlinks and missing tails)', async () => {
     const root = mkdtempSync(join(tmpdir(), 'repair-hv-res-'));
