@@ -1641,6 +1641,10 @@ class EvidenceTests(unittest.TestCase):
         guest = pathlib.Path(base) / "executed-guest-probe.py"
         host.write_bytes(b"host bytes")
         guest.write_bytes(b"guest bytes")
+        stamp = {"at": "2024-01-01T00:00:00Z", "hostname": "probe-host",
+                 "kernel": "6.8.0-40-generic", "uptime_seconds": 3600.0,
+                 "load1": 0.05, "load5": 0.1, "load15": 0.15,
+                 "mem_available_kib": 4194304, "kvm_writable": True}
         return {
             "schema_version": vm.REPORT_SCHEMA,
             "image": {"sha256": DIGEST, "sums_verified": True,
@@ -1653,6 +1657,7 @@ class EvidenceTests(unittest.TestCase):
                                  "sha256": vm.sha256_file(guest),
                                  "remote_sha256": vm.sha256_file(guest),
                                  "verified": True}},
+            "host_stamps": {name: dict(stamp) for name in vm.REQUIRED_STAMPS},
             "phases": phases,
             "manager_restart": manager,
             "reboot": reboot,
@@ -1679,6 +1684,23 @@ class EvidenceTests(unittest.TestCase):
             problems = vm.verify_report(report, pathlib.Path(temporary))
             self.assertIn(
                 "provenance host_script artifact digest does not match", problems)
+
+    def test_verify_requires_host_load_stamps(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            report = self._bound_report(temporary)
+            self.assertEqual(vm.verify_report(report, pathlib.Path(temporary)), [])
+            stripped = json.loads(json.dumps(report))
+            del stripped["host_stamps"]
+            self.assertIn("host_stamps missing",
+                          vm.verify_report(stripped, pathlib.Path(temporary)))
+            partial = json.loads(json.dumps(report))
+            del partial["host_stamps"]["finish"]
+            self.assertIn("host stamp missing: finish",
+                          vm.verify_report(partial, pathlib.Path(temporary)))
+            fieldless = json.loads(json.dumps(report))
+            del fieldless["host_stamps"]["start"]["load1"]
+            self.assertIn("host stamp start lacks load1",
+                          vm.verify_report(fieldless, pathlib.Path(temporary)))
 
     def test_post_boundary_activation_refusal_is_required(self):
         phases = self._phases()
