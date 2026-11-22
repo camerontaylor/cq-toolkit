@@ -2367,27 +2367,32 @@ def activators_unknown(args):
         records_before = [record_summary(path)
                           for path in records_in(REPAIR_RECORDS)]
         result = cli_activators("switch", ["--runtime", NODE_RUNTIME])
-        text = ((result.get("stdout") or "")
-                + (result.get("stderr") or "")).lower()
-        records_after = [record_summary(path)
-                         for path in records_in(REPAIR_RECORDS)]
-        completions_after = read_completions(REPAIR_COMPLETIONS)
-        units_after = repair_units()
-        cleanup()
-        require(result["rc"] == 2, name + " refusal did not exit 2")
-        require(all(token in text for token in tokens),
-                name + " refusal text does not name the inventory defect")
-        require([item["sha256"] for item in records_before]
-                == [item["sha256"] for item in records_after],
-                name + " wrote a controller record before refusing")
-        require(len(completions_after) == len(baseline_completions),
-                name + " completed fixture work before refusing")
-        cases[name] = {
-            "command": result, "mutated_files": mutated_files,
-            "records_before": records_before,
-            "records_after": records_after,
-            "completions_after": len(completions_after),
-            "units_after": units_after}
+        try:
+            files_after = repair_files()
+            text = ((result.get("stdout") or "")
+                    + (result.get("stderr") or "")).lower()
+            records_after = [record_summary(path)
+                             for path in records_in(REPAIR_RECORDS)]
+            completions_after = read_completions(REPAIR_COMPLETIONS)
+            units_after = repair_units()
+            require(result["rc"] == 2, name + " refusal did not exit 2")
+            require(all(token in text for token in tokens),
+                    name + " refusal text does not name the inventory defect")
+            require([item["sha256"] for item in records_before]
+                    == [item["sha256"] for item in records_after],
+                    name + " wrote a controller record before refusing")
+            require(len(completions_after) == len(baseline_completions),
+                    name + " completed fixture work before refusing")
+            require(files_after == mutated_files,
+                    name + " modified fixture files before refusing")
+            cases[name] = {
+                "command": result, "mutated_files": mutated_files,
+                "records_before": records_before,
+                "records_after": records_after,
+                "completions_after": len(completions_after),
+                "units_after": units_after}
+        finally:
+            cleanup()
 
     rogue = UNIT_DIR / "crq-repair.socket"
     run_case("rogue-unit",
