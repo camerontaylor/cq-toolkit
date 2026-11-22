@@ -538,14 +538,19 @@ export async function runTs(mods: Mods, run: Run): Promise<Outcome> {
     }
     const out: Partial<Outcome['ticks'][number]> = {};
     let caught = '';
-    try {
-      out.messages = await mods.repairHarvest(q, item, fx, tick.dry === true);
-    } catch (e) {
-      out.error = familyOf(mods, e);
-      caught = e instanceof Error ? e.message : String(e);
+    // `crq.tick(dry=True)` never calls harvest, so a durable dry tick does not either; the
+    // in-process scenarios still reach `harvest(dry=True)` directly, a different entry point.
+    const skipHarvest = run.durable && tick.dry === true;
+    if (!skipHarvest) {
+      try {
+        out.messages = await mods.repairHarvest(q, item, fx, tick.dry === true);
+      } catch (e) {
+        out.error = familyOf(mods, e);
+        caught = e instanceof Error ? e.message : String(e);
+      }
     }
     // Key order matters to the JSON-text comparison: messages|error, queue, files.
-    if (run.durable && !tick.crash && !tick.dry) {
+    if (run.durable && !tick.crash && !skipHarvest) {
       if (out.error !== undefined) {
         // `crq.tick` catches a harvest failure into the item.
         q.items[0]!.last_error = `repair harvest failed: ${caught.slice(0, 300)}`;

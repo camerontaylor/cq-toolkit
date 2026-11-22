@@ -610,12 +610,27 @@ describe('S6 repair-harvest shadow: durable restarts reload state/queue.json', (
     );
   });
 
-  it('a dry tick harvests nothing durable: no last_error and no tick-end save, and the next process publishes once', async () => {
-    const o = await durable(base({ ticks: [{ dry: true }, { restart: true }, { restart: true }] }));
-    // `crq.tick` saves only when it is live, so the dry tick leaves queue.json as seeded.
+  it('a dry tick never reaches harvest: no canonical or harvest effect, scratch unchanged, and the next process publishes once', async () => {
+    // A `stale` directive would raise if harvest ran, so any error here means it was called.
+    const o = await durable(
+      base({
+        ticks: [{ dry: true, stale: { [J1]: 'value:x' } }, { restart: true }, { restart: true }],
+      }),
+    );
+    const next = o.log.findIndex((e) => e[0] === 'tick' && e[1] === 1);
+    // The dry tick's whole effect log is its own bookkeeping: no canonical, mark, push or save.
+    expect(o.log.slice(0, next).map((e) => e[0])).toEqual(['tick', 'backlog']);
+    expect(o.ticks[0]).not.toHaveProperty('messages');
+    expect(o.ticks[0]).not.toHaveProperty('error');
+    // Scratch is as seeded: queue.json is the fixture and nothing else was written.
+    expect(Object.keys(o.ticks[0]!.files)).toEqual(['queue.json']);
+    expect(JSON.parse(o.ticks[0]!.files['queue.json']!)).toEqual(o.ticks[0]!.queue);
+    expect(diskItem(o, 0)).not.toHaveProperty('last_error');
+    // Only the two live ticks save at tick end, and the run then publishes once.
     expect(count(o, 'tick-save')).toBe(2);
     expect(diskState(o, 0)).toBe('queued');
     expect(states(o)).toEqual(['queued', 'published', 'published']);
+    expect(count(o, 'canonical')).toBe(1);
     expect(count(o, 'push')).toBe(1);
     expect(count(o, 'create')).toBe(1);
     expect(removals(o)).toEqual([tree(J1)]);

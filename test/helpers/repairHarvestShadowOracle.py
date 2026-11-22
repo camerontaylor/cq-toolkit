@@ -43,7 +43,8 @@ effect seam raise OSError before anything is written; the durable tick-end write
 below is not counted. A live durable tick also does what `crq.tick` does around
 `harvest`: an exception is caught into `item['last_error'] = 'repair harvest
 failed: ' + str(exc)[:300]` and the queue is saved at the end of the tick. A dry
-tick does neither (`crq.tick` saves only when it is live). A tick's "crash": true
+durable tick does not call `harvest` at all and saves nothing (`crq.tick(dry=True)`
+does neither); non-durable ticks still call `harvest(dry=True)` directly. A tick's "crash": true
 is the process dying right after `harvest`, so neither happens (it must be the
 last tick of its segment).
 
@@ -300,13 +301,16 @@ def main():
                 cur['run'] = run_id
                 cur['picked'] = False
             out = {}
-            try:
-                out['messages'] = repair_tick.harvest(c, q, item, dry=bool(tick.get('dry')))
-            except Exception as exc:  # noqa: BLE001 - the exception family is the result
-                out['error'] = family(exc)
-                if segment and not tick.get('crash') and not tick.get('dry'):
-                    item['last_error'] = 'repair harvest failed: ' + str(exc)[:300]
-            if segment and not tick.get('crash') and not tick.get('dry'):
+            # crq.tick(dry=True) never calls harvest: a durable dry tick does not either.
+            skip_harvest = bool(segment) and bool(tick.get('dry'))
+            if not skip_harvest:
+                try:
+                    out['messages'] = repair_tick.harvest(c, q, item, dry=bool(tick.get('dry')))
+                except Exception as exc:  # noqa: BLE001 - the exception family is the result
+                    out['error'] = family(exc)
+                    if segment and not tick.get('crash'):
+                        item['last_error'] = 'repair harvest failed: ' + str(exc)[:300]
+            if segment and not tick.get('crash') and not skip_harvest:
                 log.append(['tick-save'])
                 crq_repair.atomic(state / 'queue.json', q)
             out['queue'] = copy.deepcopy(q)
