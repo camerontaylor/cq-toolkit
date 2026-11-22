@@ -2471,6 +2471,15 @@ def main(argv=None) -> int:
     parser.subcommand = args.operation
     if args.operation == "health" and (args.first_tick_timeout_seconds < 0 or args.interval_seconds < 0):
         parser.error("health wait intervals must be nonnegative")
+    # Switch mode selection is an argument contract, not a runtime refusal:
+    # validate both modes before the helper loads so an invalid combination
+    # answers as a usage artifact naming the switch subcommand (doctrine I1).
+    if args.operation == "switch":
+        if args.unit or args.runtime:
+            if not args.unit or not args.runtime or args.sha or args.tag:
+                parser.error("unit switch requires --unit and --runtime only")
+        elif not args.sha or not args.tag:
+            parser.error("checkout switch requires --sha and --tag")
 
     root = args.root.resolve()
     helper_path = args.helper or (root / "apps/crq-python/ops/prepare-host.py")
@@ -2490,8 +2499,6 @@ def main(argv=None) -> int:
         helper_module, helper_sha256 = _load_helper(helper_path,
                                                     args.expect_helper_sha256)
         if args.operation == "switch" and (args.unit or args.runtime):
-            if not args.unit or not args.runtime or args.sha or args.tag:
-                raise Refused("unit switch requires --unit and --runtime only")
             overlay, _raw = helper_module.load_overlay(args.overlay)
             live = _load_live_binding()
             try:
@@ -2503,8 +2510,6 @@ def main(argv=None) -> int:
             record = switch_unit(effects, adapter, args.unit, args.runtime)
             print(json.dumps(record, indent=2, sort_keys=True))
         elif args.operation == "switch":
-            if not args.sha or not args.tag:
-                raise Refused("checkout switch requires --sha and --tag")
             plan = deploy_plan(effects, helper_module, args.sha, args.tag,
                                args.overlay, helper_sha256)
             print(json.dumps({"operation": "switch", "target": plan["preflight"]["target"],
