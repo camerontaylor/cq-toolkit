@@ -23,8 +23,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
 import { checkRepairJobId } from '../../src/adapters/crq/repairPreparation.js';
-import { fileRepairHarvestReads } from '../../src/adapters/crq/repairHarvestReads.js';
 import {
+  type JsonNumber,
   parseJsonValue,
   pythonNonFinite,
   toPlainJsonRetainingNumbers,
@@ -79,8 +79,9 @@ interface Scenario {
   readonly expect: Expect;
   /** Reads made inside the check, in order, relative to the fixture root. */
   readonly reads: readonly string[];
+  /** The queue document; `raw(text)` parses that exact text on both sides. */
   readonly queue: unknown;
-  /** The job file; `undefined` keeps the default job. */
+  /** The job file (`raw(text)` for exact bytes); `undefined` keeps the default job. */
   readonly job?: unknown;
   /** Files under the fixture root (relative path -> body). */
   readonly files?: Readonly<Record<string, FileBody>>;
@@ -130,13 +131,9 @@ function canonical(
   extra: Partial<Scenario> = {},
   jobOver: Record<string, unknown> = {},
 ): Scenario {
-  const reads = [
-    'queue',
-    ...(rowBody === undefined ? [triage(FID)] : [triage(FID)]),
-    ...(extra.reads ?? []),
-  ];
-  const { reads: _ignored, ...rest } = extra;
-  void _ignored;
+  // A missing row is still a read attempt, so the triage read is always recorded.
+  const { reads: after = [], ...rest } = extra;
+  const reads = ['queue', triage(FID), ...after];
   return {
     name,
     expect: expected,
@@ -224,6 +221,76 @@ const SCENARIOS: readonly Scenario[] = [
     expect: { error: 'AttributeError', message: "'str' object has no attribute 'get'" },
     reads: ['queue'],
     queue: { items: ['junk', { id: ITEM, repair_runs: { [RUN]: owned() } }] },
+  },
+  {
+    name: 'an empty items dict matches no item',
+    expect: 'not-tick-owned',
+    reads: ['queue'],
+    queue: raw('{"items":{}}'),
+  },
+  {
+    name: 'an empty items string matches no item',
+    expect: 'not-tick-owned',
+    reads: ['queue'],
+    queue: raw('{"items":""}'),
+  },
+  {
+    name: 'a non-empty items dict yields keys that have no .get',
+    expect: { error: 'AttributeError', message: "'str' object has no attribute 'get'" },
+    reads: ['queue'],
+    queue: raw('{"items":{"a":1}}'),
+  },
+  {
+    name: 'a non-empty items string yields characters that have no .get',
+    expect: { error: 'AttributeError', message: "'str' object has no attribute 'get'" },
+    reads: ['queue'],
+    queue: raw('{"items":"ab"}'),
+  },
+  {
+    name: 'a null items is not iterable',
+    expect: { error: 'TypeError', message: "'NoneType' object is not iterable" },
+    reads: ['queue'],
+    queue: raw('{"items":null}'),
+  },
+  {
+    name: 'a numeric items is not iterable',
+    expect: { error: 'TypeError', message: "'int' object is not iterable" },
+    reads: ['queue'],
+    queue: raw('{"items":3}'),
+  },
+  {
+    name: 'an item id of [NaN] matches a job item of [NaN] (shared decoded NaN)',
+    expect: 'ok',
+    reads: ['queue'],
+    queue: raw(
+      '{"items":[{"id":[NaN],"repair_runs":{"R":{"jobs":["crq-R-F1"],"state":"queued"}}}]}',
+    ),
+    job: raw('{"job":"crq-R-F1","item":[NaN],"run":"R"}'),
+  },
+  {
+    name: 'an item id of {"k":NaN} matches a job item of {"k":NaN}',
+    expect: 'ok',
+    reads: ['queue'],
+    queue: raw(
+      '{"items":[{"id":{"k":NaN},"repair_runs":{"R":{"jobs":["crq-R-F1"],"state":"queued"}}}]}',
+    ),
+    job: raw('{"job":"crq-R-F1","item":{"k":NaN},"run":"R"}'),
+  },
+  {
+    name: 'a bare NaN item id never matches a bare NaN job item',
+    expect: 'not-tick-owned',
+    reads: ['queue'],
+    queue: raw('{"items":[{"id":NaN,"repair_runs":{"R":{"jobs":["crq-R-F1"],"state":"queued"}}}]}'),
+    job: raw('{"job":"crq-R-F1","item":NaN,"run":"R"}'),
+  },
+  {
+    name: 'a [NaN] item id does not match a [1] job item',
+    expect: 'not-tick-owned',
+    reads: ['queue'],
+    queue: raw(
+      '{"items":[{"id":[NaN],"repair_runs":{"R":{"jobs":["crq-R-F1"],"state":"queued"}}}]}',
+    ),
+    job: raw('{"job":"crq-R-F1","item":[1],"run":"R"}'),
   },
   {
     name: 'a job file that is not an object is an AttributeError',
@@ -495,6 +562,24 @@ const SCENARIOS: readonly Scenario[] = [
     },
   ),
   canonical(
+    'a float retry file keeps its kind in the AttributeError',
+    { error: 'AttributeError', message: "'float' object has no attribute 'get'" },
+    row({ receipt: { repair_task: RETRY } }),
+    { files: { [inbox(RETRY)]: raw('1.0') }, reads: [inbox(RETRY)] },
+  ),
+  canonical(
+    'an integer retry file keeps its kind in the AttributeError',
+    { error: 'AttributeError', message: "'int' object has no attribute 'get'" },
+    row({ receipt: { repair_task: RETRY } }),
+    { files: { [inbox(RETRY)]: raw('1') }, reads: [inbox(RETRY)] },
+  ),
+  canonical(
+    'a zero float retry file is falsy and refused',
+    'canonical-finding-reassigned',
+    row({ receipt: { repair_task: RETRY } }),
+    { files: { [inbox(RETRY)]: raw('0.0') }, reads: [inbox(RETRY)] },
+  ),
+  canonical(
     'a non-empty-list retry is an AttributeError',
     { error: 'AttributeError', message: "'list' object has no attribute 'get'" },
     row({ receipt: { repair_task: RETRY } }),
@@ -524,7 +609,7 @@ const SCENARIOS: readonly Scenario[] = [
     row({ receipt: { repair_task: '' } }),
   ),
   canonical(
-    'a foreign owner is not read when the status already refuses',
+    'a foreign owner is read but not inspected when the status already refuses',
     'canonical-finding-reassigned',
     row({ status: 'dismissed', receipt: { repair_task: RETRY } }),
     {
@@ -662,9 +747,19 @@ const SCENARIOS: readonly Scenario[] = [
   canonical(
     'an event id of 1 matches a previous_event_id of 1.0',
     'ok',
-    row({ status: 'needs-human', previous_event_id: 1.0 }),
+    // `JSON.stringify` would write 1.0 as `1`; the file must hold the float token.
+    raw('{"status":"needs-human","previous_event_id":1.0,"receipt":{"repair_task":"crq-R-F1"}}'),
     {
       events: [event({ id: 1 })],
+      reads: ['events'],
+    },
+  ),
+  canonical(
+    'a previous_event_id of 1.0 does not match an event id of 2',
+    'owner-decision-required',
+    raw('{"status":"needs-human","previous_event_id":1.0,"receipt":{"repair_task":"crq-R-F1"}}'),
+    {
+      events: [event({ id: 2 })],
       reads: ['events'],
     },
   ),
@@ -811,13 +906,17 @@ interface Laid {
   readonly job: unknown;
 }
 
+/** The exact text a fixture holds: `raw(text)` verbatim, any other value as JSON. */
+function bodyText(body: FileBody): string {
+  return typeof body === 'object' && body !== null && 'raw' in body
+    ? (body as { raw: string }).raw
+    : JSON.stringify(body);
+}
+
 function writeFileBody(root: string, rel: string, body: FileBody): void {
   const path = join(root, rel);
   mkdirSync(dirname(path), { recursive: true });
-  const text =
-    typeof body === 'object' && body !== null && 'raw' in body
-      ? (body as { raw: string }).raw
-      : JSON.stringify(body);
+  const text = bodyText(body);
   // `raw('\u0000')` stands for invalid UTF-8: write the byte, not the character.
   if (text === '\u0000') writeFileSync(path, Buffer.from([0xff, 0xfe, 0xfd]));
   else writeFileSync(path, text);
@@ -826,10 +925,11 @@ function writeFileBody(root: string, rel: string, body: FileBody): void {
 function lay(scenario: Scenario): Laid {
   const root = mkdtempSync(join(tmpdir(), 'repair-owner-'));
   dirs.push(root);
-  const job = scenario.job === undefined ? jobWith({}) : scenario.job;
-  writeFileBody(root, inbox(JOB), job);
+  writeFileBody(root, inbox(JOB), scenario.job === undefined ? jobWith({}) : scenario.job);
   for (const [rel, body] of Object.entries(scenario.files ?? {})) writeFileBody(root, rel, body);
-  return { scenario, root, job };
+  // The job the port sees is what Python's `json.loads` reads from that file, so a
+  // `1.0` stays a float on both sides.
+  return { scenario, root, job: readJsonFile(join(root, inbox(JOB))) };
 }
 
 const PY = String.raw`
@@ -850,7 +950,7 @@ for s in json.loads(sys.argv[2]):
     reads = []
     def load_queue(s=s, reads=reads):
         reads.append('queue')
-        return json.loads(json.dumps(s['queue']))
+        return json.loads(s['queue_text'])
     def retained(s=s, reads=reads):
         reads.append('events')
         if isinstance(s['events'], dict):
@@ -903,7 +1003,7 @@ function runPython(laid: readonly Laid[]): Outcome[] {
   const specs = laid.map(({ scenario, root }) => ({
     root,
     job_id: JOB,
-    queue: scenario.queue,
+    queue_text: bodyText(scenario.queue),
     events: scenario.events ?? [],
   }));
   const stdout = execFileSync('python3', ['-I', '-c', PY, PYTHON_DIR, JSON.stringify(specs)], {
@@ -929,6 +1029,14 @@ function runPython(laid: readonly Laid[]): Outcome[] {
 
 /** `json.loads(path.read_text())` for a fixture file: OSError, ValueError, else the parsed value. */
 const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+function parseFixtureText(text: string): unknown {
+  try {
+    return toPlainJsonRetainingNumbers(parseJsonValue(text, { parseConstant: pythonNonFinite }));
+  } catch (e) {
+    throw new PyError('ValueError', e instanceof Error ? e.message : String(e));
+  }
+}
+
 function readJsonFile(path: string): unknown {
   let bytes: Buffer;
   try {
@@ -937,24 +1045,19 @@ function readJsonFile(path: string): unknown {
     throw new PyError('OSError', e instanceof Error ? e.message : String(e));
   }
   try {
-    return toPlainJsonRetainingNumbers(
-      parseJsonValue(decoder.decode(bytes), { parseConstant: pythonNonFinite }),
-    );
+    return parseFixtureText(decoder.decode(bytes));
   } catch (e) {
+    if (e instanceof PyError) throw e;
     throw new PyError('ValueError', e instanceof Error ? e.message : String(e));
   }
 }
 
 async function runTs({ scenario, root, job }: Laid): Promise<Outcome> {
   const reads: string[] = [];
-  const fileReads = fileRepairHarvestReads({
-    stateRoot: join(root, 'state'),
-    worktreeRoot: join(root, 'wt'),
-  });
   const probes: RepairRecoveryOwnerReads = {
     loadQueue: () => {
       reads.push('queue');
-      return Promise.resolve(JSON.parse(JSON.stringify(scenario.queue)) as unknown);
+      return Promise.resolve(parseFixtureText(bodyText(scenario.queue)));
     },
     readTriageRow: (findingId) => {
       reads.push(triage(findingId));
@@ -974,8 +1077,13 @@ async function runTs({ scenario, root, job }: Laid): Promise<Outcome> {
       return Promise.resolve(events as readonly unknown[]);
     },
     readJob: (jobId) => {
-      if (checkRepairJobId(jobId)) reads.push(inbox(jobId));
-      return fileReads.readJob(jobId);
+      // `job_path`'s grammar refusal is a ValueError before any read; past it,
+      // read with the number-preserving decoder so a `1.0` file stays a float.
+      if (!checkRepairJobId(jobId)) {
+        return Promise.reject(new PyError('ValueError', `invalid repair job id: ${jobId}`));
+      }
+      reads.push(inbox(jobId));
+      return Promise.resolve().then(() => readJsonFile(join(root, inbox(jobId))));
     },
   };
   try {
@@ -1007,6 +1115,14 @@ function expected(scenario: Scenario): Outcome {
 describe('recovery ownership preflight (check_owner) against Python recover_job', () => {
   const laid = SCENARIOS.map(lay);
   const python = runPython(laid);
+
+  it('keeps a 1.0 fixture as a float and a 1 as an int on the port side', () => {
+    const float = parseFixtureText('{"a":1.0,"b":1}') as Record<string, unknown>;
+    expect((float.a as JsonNumber).kind).toBe('float');
+    expect((float.b as JsonNumber).kind).toBe('int');
+    const row = SCENARIOS.find((s) => s.name.startsWith('an event id of 1 matches'));
+    expect(bodyText(row?.files?.[triage(FID)])).toContain('"previous_event_id":1.0');
+  });
 
   it('has uniquely named scenarios', () => {
     const names = SCENARIOS.map((scenario) => scenario.name);

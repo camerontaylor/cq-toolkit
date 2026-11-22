@@ -30,6 +30,9 @@
  *
  * - `job_id not in record.get('jobs', [])` is Python's `in`: a list compares
  *   by `==`, a string by substring, a dict by key;
+ * - item and event ids compare with Python `==`, whose list and dict members
+ *   shortcut on identity: decoded `NaN` is one shared object, so `[NaN] == [NaN]`
+ *   holds while a bare `NaN == NaN` does not;
  * - when the row's `previous_event_id` is absent and a retained event has no
  *   `id`, `None == None` selects that event;
  * - the prepared retry (`current` or the stale record's note) is read with
@@ -171,6 +174,40 @@ function contains(container: unknown, needle: string): boolean {
   throw new PyError('TypeError', `argument of type '${pyTypeName(container)}' is not iterable`);
 }
 
+/** A decoded `NaN`: `json` hands every parse the one shared `float('nan')` object. */
+const isNaNFloat = (value: unknown): boolean =>
+  (typeof value === 'number' && Number.isNaN(value)) ||
+  (value instanceof JsonNumber && value.kind === 'float' && Number.isNaN(value.float));
+
+/**
+ * Python `a == b`. A top-level `NaN == NaN` is false, but list and dict equality
+ * compare members with an identity shortcut, and every decoded `NaN` is the same
+ * object, so `[NaN] == [NaN]` is true. `pyEq` alone would say false.
+ */
+function pyEqual(a: unknown, b: unknown): boolean {
+  const member = (x: unknown, y: unknown): boolean =>
+    (isNaNFloat(x) && isNaNFloat(y)) || pyEqual(x, y);
+  if (Array.isArray(a) && Array.isArray(b)) {
+    return a.length === b.length && a.every((value, i) => member(value, b[i]));
+  }
+  if (isDict(a) && isDict(b)) {
+    const keys = Object.keys(a);
+    return (
+      keys.length === Object.keys(b).length &&
+      keys.every((key) => Object.hasOwn(b, key) && member(a[key], b[key]))
+    );
+  }
+  return pyEq(a, b);
+}
+
+/** `for member in value`: a list yields its members, a dict its keys, a str its characters. */
+function iterate(value: unknown): readonly unknown[] {
+  if (Array.isArray(value)) return value;
+  if (typeof value === 'string') return [...value];
+  if (isDict(value)) return Object.keys(value);
+  throw new PyError('TypeError', `'${pyTypeName(value)}' object is not iterable`);
+}
+
 /**
  * `successor = json.loads(job_path(ROOT, id).read_text())` inside
  * `except (OSError, ValueError): pass`: absent on a refusal or unreadable file,
@@ -208,15 +245,12 @@ export async function decideRecoveryOwner(
 
   // `next((i for i in queue.get('items', []) if i.get('id') == job.get('item')), None)`:
   // lazy, so a malformed item after the match is never touched. `load_queue`
-  // itself walks `q["items"]` calling `.get` on each, so a queue that reaches
-  // the check holds a list of dicts and the non-list branch is unreachable.
-  const items = get(queue, 'items', []);
-  if (!Array.isArray(items)) {
-    throw new PyError('TypeError', `'${pyTypeName(items)}' object is not iterable`);
-  }
+  // only iterates `q["items"]`, so an empty dict or string reaches the check and
+  // matches nothing, while a non-empty one yields keys or characters that have
+  // no `.get`.
   let item: unknown = null;
-  for (const candidate of items) {
-    if (pyEq(get(candidate, 'id'), get(job, 'item'))) {
+  for (const candidate of iterate(get(queue, 'items', []))) {
+    if (pyEqual(get(candidate, 'id'), get(job, 'item'))) {
       item = candidate;
       break;
     }
@@ -249,7 +283,7 @@ export async function decideRecoveryOwner(
       const previous = get(row, 'previous_event_id');
       let event: unknown = null;
       for (const retained of await reads.retainedEvents()) {
-        if (pyEq(get(retained, 'id'), previous)) {
+        if (pyEqual(get(retained, 'id'), previous)) {
           event = retained;
           break;
         }
