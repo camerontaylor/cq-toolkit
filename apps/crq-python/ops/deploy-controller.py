@@ -2475,8 +2475,12 @@ def main(argv=None) -> int:
     # validate both modes before the helper loads so an invalid combination
     # answers as a usage artifact naming the switch subcommand (doctrine I1).
     if args.operation == "switch":
-        if args.unit or args.runtime:
-            if not args.unit or not args.runtime or args.sha or args.tag:
+        # Presence, not truthiness: an explicitly empty flag still selects its
+        # mode, so `--runtime ""` beside --sha/--tag (or `--sha ""` in unit
+        # mode) is a usage error instead of silently falling through.
+        if args.unit is not None or args.runtime is not None:
+            if (not args.unit or not args.runtime
+                    or args.sha is not None or args.tag is not None):
                 parser.error("unit switch requires --unit and --runtime only")
         elif not args.sha or not args.tag:
             parser.error("checkout switch requires --sha and --tag")

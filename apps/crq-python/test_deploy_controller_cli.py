@@ -307,6 +307,27 @@ class CliTests(ControllerFixture):
         self.assertEqual(error["subcommand"], "health")
         self.assertEqual(error["exitCode"], 2)
 
+    def test_empty_switch_options_are_usage_errors_before_the_helper_loads(self):
+        # Option presence selects the mode, not truthiness. A helper path that
+        # cannot exist proves nothing reached the helper or dispatch: a later
+        # stage would answer "refused", never "usage".
+        sha, tag, unit = "a" * 40, self.tag, "crq-tick.service"
+        cases = {
+            "empty runtime beside checkout options": ("--runtime", "", "--sha", sha, "--tag", tag),
+            "empty sha in unit mode": ("--unit", unit, "--runtime", "r", "--sha", ""),
+            "empty tag in unit mode": ("--unit", unit, "--runtime", "r", "--tag", ""),
+            "empty runtime with unit": ("--unit", unit, "--runtime", ""),
+            "empty sha and tag in unit mode": ("--unit", unit, "--runtime", "r", "--sha", "", "--tag", ""),
+            "empty required checkout value": ("--sha", "", "--tag", tag),
+        }
+        for name, flags in cases.items():
+            with self.subTest(name):
+                result = self.run_cli("--json", "--helper", "/nonexistent/prepare-host.py",
+                                      "switch", *flags)
+                self.assertEqual(result.returncode, 2)
+                error = json.loads(result.stdout)["error"]
+                self.assertEqual((error["kind"], error["subcommand"]), ("usage", "switch"))
+
     def test_json_refusal_keeps_stderr_empty(self):
         result = self.run_cli("--json", "switch", "--sha", "nothex",
                               "--tag", self.tag)
