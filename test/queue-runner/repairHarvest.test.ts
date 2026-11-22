@@ -776,6 +776,30 @@ describe('repairHarvest result validation (differential)', () => {
       });
     }
 
+    it('refuses a byte-order-marked inbox that is otherwise valid, so no finding is written', async () => {
+      // Stripping the BOM would make this a well-formed, correctly bound inbox, and the
+      // harvest would write a finding outcome from a file Python's json.loads rejects.
+      const spec: Spec = {
+        item: item({}, { jobs: [J1] }),
+        files: files([
+          J1,
+          `\ufeff${JSON.stringify(job(J1, { canonical_finding_id: 'F1' }))}`,
+          verdict(J1, 'NOT-FIXED'),
+        ]),
+      };
+      const py = runPython(spec);
+      expect(py.error).toBeDefined(); // JSONDecodeError: Unexpected UTF-8 BOM
+      expect(py.calls).not.toContain('"mark"');
+      const ts = await runTs(spec);
+      expect(ts.error).toBeUndefined();
+      expect(ts.queue).toContain('"reason":"invalid repair inbox: ');
+      expect(ts.queue).toContain('"state":"failed"');
+      expect(ts.queue).toContain('"finding":null');
+      expect(ts.calls).not.toContain('"mark"');
+      expect(ts.calls).not.toContain('"canonical"');
+      expect(JSON.parse(ts.calls)).toHaveLength(1); // the terminal queue save only
+    });
+
     it('does not read the inbox while the result is absent (nothing to terminalize yet)', async () => {
       const out = await same({
         item: item({}, { jobs: [J1] }),
