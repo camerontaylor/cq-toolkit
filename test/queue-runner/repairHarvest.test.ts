@@ -38,6 +38,10 @@ interface Spec {
   readonly publish?: Raise;
   /** `hasattr(c, 'WT_ROOT') and hasattr(c, 'CLONE')`; a job id keyed raise per alternate. */
   readonly cleanup?: boolean | Record<string, Raise>;
+  /** Symlinks under `state/`: relative path -> link target text. */
+  readonly symlinks?: Record<string, string>;
+  /** A `state/` directory chmod 000 once the layout is written (restored after the run). */
+  readonly lock?: string;
 }
 
 const PY = `
@@ -133,7 +137,7 @@ result['calls'] = calls
 print(json.dumps(result))
 `;
 
-function layout(root: string, spec: Spec): void {
+function layout(root: string, spec: Spec): () => void {
   mkdirSync(join(root, 'wt'), { recursive: true });
   for (const [rel, doc] of Object.entries(spec.files ?? {})) {
     const path = join(root, 'state', rel);
@@ -141,6 +145,15 @@ function layout(root: string, spec: Spec): void {
     const text = typeof doc === 'string' ? doc : JSON.stringify(doc);
     writeFileSync(path, text.replaceAll('{WT}', join(root, 'wt')));
   }
+  for (const [rel, target] of Object.entries(spec.symlinks ?? {})) {
+    const path = join(root, 'state', rel);
+    mkdirSync(dirname(path), { recursive: true });
+    symlinkSync(target, path);
+  }
+  if (spec.lock === undefined) return () => undefined;
+  const locked = join(root, 'state', spec.lock);
+  chmodSync(locked, 0o000);
+  return () => chmodSync(locked, 0o755);
 }
 
 interface Outcome {
@@ -153,12 +166,17 @@ interface Outcome {
 function runPython(spec: Spec): Outcome {
   const root = mkdtempSync(join(tmpdir(), 'repair-hv-py-'));
   dirs.push(root);
-  layout(root, spec);
-  const out = JSON.parse(
-    execFileSync('python3', ['-I', '-c', PY, PYTHON_DIR, root, JSON.stringify(spec)], {
-      encoding: 'utf8',
-    }),
-  ) as { messages?: string[]; error?: string; queue: { items: unknown[] }; calls: unknown[] };
+  const restore = layout(root, spec);
+  let out: { messages?: string[]; error?: string; queue: { items: unknown[] }; calls: unknown[] };
+  try {
+    out = JSON.parse(
+      execFileSync('python3', ['-I', '-c', PY, PYTHON_DIR, root, JSON.stringify(spec)], {
+        encoding: 'utf8',
+      }),
+    ) as typeof out;
+  } finally {
+    restore();
+  }
   return {
     messages: out.messages,
     error: out.error,
@@ -196,7 +214,7 @@ function raise(directive: Raise | undefined): void {
 async function runTs(spec: Spec): Promise<Outcome> {
   const root = mkdtempSync(join(tmpdir(), 'repair-hv-ts-'));
   dirs.push(root);
-  layout(root, spec);
+  const restore = layout(root, spec);
   const calls: unknown[] = [];
   const reads = fileRepairHarvestReads({
     stateRoot: join(root, 'state'),
@@ -254,6 +272,8 @@ async function runTs(spec: Spec): Promise<Outcome> {
     messages = await repairHarvest(q, parsed, fx, spec.dry === true);
   } catch (e) {
     error = kindOf(e);
+  } finally {
+    restore();
   }
   return {
     messages,
@@ -468,6 +488,78 @@ describe('repairHarvest open runs (differential vs repair_tick.harvest)', () => 
       dry: true,
     });
   });
+});
+
+// Harvest reads `result.json` through `Path.exists()`; Python 3.14 reports every
+// stat OSError as absent. Here "absent" only ends the job scan (`break`), so the
+// run stays open and is retried next tick: nothing is rebound or archived. The
+// port matches that for every errno, and these runs pin the queue effects.
+describe('repairHarvest result.json stat errors (differential vs Path.exists)', () => {
+  const canLock = process.getuid?.() !== 0; // root ignores the mode bits
+  const open = (): Spec['item'] => item();
+  const runState = (out: Outcome): unknown =>
+    (JSON.parse(out.queue) as { repair_runs: { R: { state: unknown } } }).repair_runs.R.state;
+  const heldOpen = (out: Outcome): void => {
+    expect(out.messages).toEqual([]);
+    expect(out.calls).toBe('[]'); // no mark, verify, publish or save
+    expect(runState(out)).toBe('queued');
+  };
+
+  it('keeps the run open when repair/<job> is a file (ENOTDIR)', async () => {
+    heldOpen(
+      await same({
+        item: open(),
+        files: { 'repair/inbox/crq-R-F1.json': job(J1), 'repair/crq-R-F1': 'not a dir' },
+      }),
+    );
+  });
+
+  it('keeps the run open behind a dangling result.json link (ENOENT)', async () => {
+    heldOpen(
+      await same({
+        item: open(),
+        files: files([J1, job(J1), undefined]),
+        symlinks: { 'repair/crq-R-F1/result.json': 'gone.json' },
+      }),
+    );
+  });
+
+  it('keeps the run open behind a result.json symlink loop (ELOOP)', async () => {
+    heldOpen(
+      await same({
+        item: open(),
+        files: files([J1, job(J1), undefined]),
+        symlinks: { 'repair/crq-R-F1/result.json': 'result.json' },
+      }),
+    );
+  });
+
+  it.skipIf(!canLock)(
+    'keeps the run open, unharvested, while the result dir is unreadable (EACCES)',
+    async () => {
+      heldOpen(
+        await same({
+          item: open(),
+          files: files([J1, job(J1), fixed(J1)]),
+          lock: 'repair/crq-R-F1',
+        }),
+      );
+    },
+  );
+
+  it.skipIf(!canLock)(
+    'harvests the readable first job, then waits on the unreadable second',
+    async () => {
+      const out = await same({
+        item: item({}, { jobs: [J1, J2] }),
+        files: files([J1, job(J1), verdict(J1, 'NOT-FIXED')], [J2, job(J2), fixed(J2)]),
+        lock: 'repair/crq-R-F2',
+      });
+      expect(runState(out)).toBe('queued');
+      expect(out.calls).toContain('"mark"');
+      expect(out.calls).not.toContain('"publish"');
+    },
+  );
 });
 
 describe('repairHarvest result validation (differential)', () => {

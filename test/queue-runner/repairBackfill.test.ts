@@ -1,12 +1,15 @@
 import { execFileSync } from 'node:child_process';
 import {
+  chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
+  readlinkSync,
   rmSync,
-  statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -44,6 +47,10 @@ interface Spec {
   /** `runs/<run>/meta.json` (object) and `review` (any text) per run. */
   readonly runs?: Record<string, { meta?: unknown; review?: string }>;
   readonly ledger?: string[];
+  /** Symlinks under the state root: relative path -> link target text. */
+  readonly symlinks?: Record<string, string>;
+  /** A state directory chmod 000 once the layout is written (restored before the tree is read). */
+  readonly lock?: string;
   /** `c.git(*args)` answers keyed by `args.join(' ')`; anything else raises. */
   readonly git?: Record<string, string>;
   /** `findings()` rows per run (a list of `{finding, source}`). */
@@ -92,7 +99,7 @@ result['queue'] = q
 print(json.dumps(result))
 `;
 
-function layout(root: string, spec: Spec): void {
+function layout(root: string, spec: Spec): () => void {
   for (const [rel, doc] of Object.entries(spec.state ?? {})) {
     const path = join(root, 'state', rel);
     mkdirSync(dirname(path), { recursive: true });
@@ -106,6 +113,15 @@ function layout(root: string, spec: Spec): void {
   }
   mkdirSync(join(root, 'ledger'), { recursive: true });
   for (const name of spec.ledger ?? []) writeFileSync(join(root, 'ledger', name), name);
+  for (const [rel, target] of Object.entries(spec.symlinks ?? {})) {
+    const path = join(root, 'state', rel);
+    mkdirSync(dirname(path), { recursive: true });
+    symlinkSync(target, path);
+  }
+  if (spec.lock === undefined) return () => undefined;
+  const locked = join(root, 'state', spec.lock);
+  chmodSync(locked, 0o000);
+  return () => chmodSync(locked, 0o755);
 }
 
 function tree(root: string): Record<string, string> {
@@ -113,7 +129,9 @@ function tree(root: string): Record<string, string> {
   const walk = (dir: string): void => {
     for (const name of readdirSync(dir).sort()) {
       const path = join(dir, name);
-      if (statSync(path).isDirectory()) walk(path);
+      const stat = lstatSync(path);
+      if (stat.isSymbolicLink()) out[relative(root, path)] = `-> ${readlinkSync(path)}`;
+      else if (stat.isDirectory()) walk(path);
       else out[relative(root, path)] = readFileSync(path, 'utf8');
     }
   };
@@ -131,12 +149,17 @@ interface Outcome {
 function runPython(spec: Spec): Outcome {
   const root = mkdtempSync(join(tmpdir(), 'repair-bf-py-'));
   dirs.push(root);
-  layout(root, spec);
-  const out = JSON.parse(
-    execFileSync('python3', ['-I', '-c', PY, PYTHON_DIR, root, JSON.stringify(spec)], {
-      encoding: 'utf8',
-    }),
-  ) as { ret?: boolean; error?: boolean; queue: unknown };
+  const restore = layout(root, spec);
+  let out: { ret?: boolean; error?: boolean; queue: unknown };
+  try {
+    out = JSON.parse(
+      execFileSync('python3', ['-I', '-c', PY, PYTHON_DIR, root, JSON.stringify(spec)], {
+        encoding: 'utf8',
+      }),
+    ) as typeof out;
+  } finally {
+    restore();
+  }
   return {
     ret: out.ret,
     error: out.error === true,
@@ -148,7 +171,7 @@ function runPython(spec: Spec): Outcome {
 async function runTs(spec: Spec): Promise<Outcome> {
   const root = mkdtempSync(join(tmpdir(), 'repair-bf-ts-'));
   dirs.push(root);
-  layout(root, spec);
+  const restore = layout(root, spec);
   const q = JSON.parse(JSON.stringify(spec.queue)) as Queue;
   const fx = fileRepairBackfillEffects({
     stateRoot: join(root, 'state'),
@@ -186,6 +209,7 @@ async function runTs(spec: Spec): Promise<Outcome> {
   } catch {
     error = true;
   }
+  restore();
   return { ret, error, queue: JSON.stringify(q), files: tree(root) };
 }
 
@@ -737,6 +761,121 @@ describe('injected effects only', () => {
     expect(calls).toEqual(['has:r9']);
     expect(q.legacy_repair_missing).toEqual([]);
     expect(q.legacy_repair_backfilled).toBe(ISO);
+  });
+});
+
+// `(STATE/repair/<job>/result.json).exists()` guards the stale-orphan rebind in
+// `enqueue`. Python 3.14 answers False for every stat OSError; the TS adapter
+// agrees only where nothing can exist there (ENOENT, ENOTDIR). A fault that
+// leaves a completed result possibly hidden (EACCES, ELOOP) raises instead, so
+// an unknown state never authorises overwriting the inbox job.
+describe('repairEnqueue result.json stat errors (Python 3.14 Path.exists)', () => {
+  const stale = { job: 'crq-r1-F1', finding: F1, repair_base: 'old', source: { id: 's' } };
+  const INBOX = 'repair/inbox/crq-r1-F1.json';
+  const orphan = (over: Partial<Spec> = {}): Spec => ({
+    mode: 'enqueue',
+    queue: { items: [openItem()] },
+    itemIndex: 0,
+    meta: META,
+    git: GIT,
+    findings: { r1: rows(F1) },
+    state: { [INBOX]: stale },
+    ...over,
+  });
+  const inboxAfter = (out: Outcome): Record<string, unknown> =>
+    JSON.parse(out.files[`state/${INBOX}`] as string) as Record<string, unknown>;
+  const canLock = process.getuid?.() !== 0; // root ignores the mode bits
+
+  it('rebinds the orphan when the result path cannot exist (ENOTDIR), as Python does', async () => {
+    const out = await same(orphan({ state: { [INBOX]: stale, 'repair/crq-r1-F1': 'not a dir' } }));
+    expect(out.ret).toBe(true);
+    expect(inboxAfter(out).repair_base).toBe('h0');
+  });
+
+  it('rebinds the orphan behind a dangling result.json link (ENOENT), as Python does', async () => {
+    const out = await same(
+      orphan({ symlinks: { 'repair/crq-r1-F1/result.json': 'missing.json' } }),
+    );
+    expect(out.ret).toBe(true);
+    expect(inboxAfter(out).repair_base).toBe('h0');
+  });
+
+  it('keeps the orphan whose present result is readable', async () => {
+    const out = await same(
+      orphan({ state: { [INBOX]: stale, 'repair/crq-r1-F1/result.json': {} } }),
+    );
+    expect(inboxAfter(out).repair_base).toBe('old');
+  });
+
+  it.skipIf(!canLock)(
+    'does not rebind when the result directory is unreadable (EACCES); Python would',
+    async () => {
+      const spec = orphan({
+        state: { [INBOX]: stale, 'repair/crq-r1-F1/result.json': { verdict: 'FIXED' } },
+        lock: 'repair/crq-r1-F1',
+      });
+      // The runtime baseline treats the unreadable result as absent and overwrites the job.
+      const py = runPython(spec);
+      expect(py.error).toBe(false);
+      expect(inboxAfter(py).repair_base).toBe('h0');
+      // The port refuses: the completed result may be hidden, so the job is untouched
+      // and no repair record is made; the next tick retries.
+      const ts = await runTs(spec);
+      expect(ts.error).toBe(true);
+      expect(inboxAfter(ts)).toEqual(stale);
+      expect(
+        (JSON.parse(ts.queue) as { items: Array<{ repair_runs?: Record<string, unknown> }> })
+          .items[0]?.repair_runs?.r1,
+      ).toBeUndefined();
+    },
+  );
+
+  it('does not rebind behind a result.json symlink loop (ELOOP); Python would', async () => {
+    const spec = orphan({ symlinks: { 'repair/crq-r1-F1/result.json': 'result.json' } });
+    const py = runPython(spec);
+    expect(py.error).toBe(false);
+    expect(inboxAfter(py).repair_base).toBe('h0');
+    const ts = await runTs(spec);
+    expect(ts.error).toBe(true);
+    expect(inboxAfter(ts)).toEqual(stale);
+  });
+
+  it.skipIf(!canLock)('classifies each stat errno at the adapter boundary', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'repair-bf-errno-'));
+    dirs.push(root);
+    const state = join(root, 'state');
+    const file = (job: string): string => join(state, 'repair', job);
+    mkdirSync(file('present'), { recursive: true });
+    writeFileSync(join(file('present'), 'result.json'), '{}');
+    mkdirSync(file('locked'), { recursive: true });
+    writeFileSync(join(file('locked'), 'result.json'), '{}');
+    writeFileSync(file('plain'), 'x');
+    mkdirSync(file('loop'), { recursive: true });
+    symlinkSync('result.json', join(file('loop'), 'result.json'));
+    const fx = fileRepairBackfillEffects({
+      stateRoot: state,
+      runsRoot: join(root, 'runs'),
+      ledgerRoot: join(root, 'ledger'),
+      primaryRepo: 'o/r',
+      defaultRef: 'origin/main',
+      mergedCurrentEnabled: false,
+      maxRoundsPerPin: 2,
+      iso: () => ISO,
+      git: async () => '',
+      findings: async () => [],
+    });
+    expect(await fx.resultExists('present')).toBe(true);
+    expect(await fx.resultExists('missing')).toBe(false); // ENOENT
+    expect(await fx.resultExists('plain')).toBe(false); // ENOTDIR
+    await expect(fx.resultExists('loop')).rejects.toMatchObject({ code: 'ELOOP' });
+    chmodSync(file('locked'), 0o000);
+    try {
+      await expect(fx.resultExists('locked')).rejects.toMatchObject({ code: 'EACCES' });
+    } finally {
+      chmodSync(file('locked'), 0o755);
+    }
+    // The unreadable state is transient: once access returns the answer is true.
+    expect(await fx.resultExists('locked')).toBe(true);
   });
 });
 
