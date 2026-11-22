@@ -46,6 +46,25 @@ const exists = (path: string): Promise<boolean> =>
     },
   );
 
+/**
+ * `(c.STATE / 'repair' / job / 'result.json').exists()`. Python 3.14 reports
+ * every stat `OSError` as absent; here only a path that cannot exist is absent.
+ * ENOTDIR (`repair/<job>` is a file) proves nothing can live at the path, as
+ * ENOENT does. EACCES, EIO and the like leave a completed result possibly
+ * hiding, and a false answer authorises `repairEnqueue` to rebind (overwrite)
+ * the inbox job or `crq-…-F<n>` slot over it, so they raise and the tick
+ * retries. A deliberate, safe divergence from the runtime baseline.
+ */
+const resultExists = (path: string): Promise<boolean> =>
+  stat(path).then(
+    () => true,
+    (error: unknown): boolean => {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') return false;
+      throw error;
+    },
+  );
+
 async function readJson(path: string): Promise<unknown> {
   // Python's strict utf-8 decode raises; so does a fatal decoder.
   return toPlainJson(parseJsonValue(decoder.decode(await readFile(path))), { bigints: true });
@@ -86,7 +105,7 @@ export function fileRepairBackfillEffects(
       await mkdir(join(input.stateRoot, 'repair', 'inbox'), { recursive: true });
       await atomicWrite(path, atomicJsonText(doc));
     },
-    resultExists: (jobId) => exists(join(input.stateRoot, 'repair', jobId, 'result.json')),
+    resultExists: (jobId) => resultExists(join(input.stateRoot, 'repair', jobId, 'result.json')),
     async hasRunEvidence(run) {
       const dir = join(input.runsRoot, run);
       return (await exists(join(dir, 'meta.json'))) && (await exists(join(dir, 'review.ndjson')));
