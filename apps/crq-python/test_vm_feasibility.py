@@ -945,7 +945,7 @@ class LifecycleTests(unittest.TestCase):
                 "-c", "user.name=probe", "add", ".")
             git(root, "-c", "user.email=probe@example.com",
                 "-c", "user.name=probe", "commit", "-q", "--no-verify",
-                "-m", "probe")
+                "--no-gpg-sign", "-m", "probe")
             commit = subprocess.run(["git", "rev-parse", "HEAD"],
                                     cwd=str(root), check=True,
                                     capture_output=True).stdout.decode().strip()
