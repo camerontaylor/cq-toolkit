@@ -31,6 +31,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
 import {
+  JsonNumber,
   parseJsonValue,
   pythonNonFinite,
   toPlainJsonRetainingNumbers,
@@ -438,10 +439,28 @@ const SCENARIOS: readonly Scenario[] = [
   },
   {
     name: 'retry_after is dropped from the re-run result, keeping the other keys in order',
-    want: selected('result', raw('{"z":1,"job":"crq-R-F1","a":1.0,"verdict":"FAILED"}')),
+    want: selected(
+      'result',
+      raw(
+        '{"z":1,"job":"crq-R-F1","a":1.0,"attempts":[{"rung":"A0","b":1,"a":2}],"verdict":"FAILED"}',
+      ),
+    ),
     reads: [R, RR, R, RR, P],
     result: raw(
-      '{"z":1,"job":"crq-R-F1","retry_after":"2000-01-01T00:00:00Z","a":1.0,"verdict":"FAILED"}',
+      '{"z":1,"job":"crq-R-F1","retry_after":"2000-01-01T00:00:00Z","a":1.0,"attempts":[{"rung":"A0","b":1,"a":2}],"verdict":"FAILED"}',
+    ),
+  },
+  {
+    name: 'a progress file keeps its own key order, nested keys included',
+    want: selected(
+      'progress',
+      raw(
+        '{"verdict":"FAILED","job":"crq-R-F1","attempts":[{"rung":"A0","z":1,"a":2}],"commits":[]}',
+      ),
+    ),
+    reads: [R, R, P, R, RP],
+    progress: raw(
+      '{"verdict":"FAILED","job":"crq-R-F1","attempts":[{"rung":"A0","z":1,"a":2}],"commits":[]}',
     ),
   },
 
@@ -703,7 +722,10 @@ const SCENARIOS: readonly Scenario[] = [
     want: selected('result', without({ from: 'second' })),
     reads: [R, RR, R, RR, P],
     result: past(),
-    resultBodies: [past(), deferred('9999-12-31T23:59:59Z') && without({ from: 'second' })],
+    resultBodies: [
+      past(),
+      json({ job: JOB, verdict: 'FAILED', retry_after: '9999-12-31T23:59:59Z', from: 'second' }),
+    ],
   },
 ];
 
@@ -787,6 +809,7 @@ function applyMtimes(laid: readonly Laid[]): void {
     'python3',
     [
       '-I',
+      '-B',
       '-c',
       `
 import json, os, sys
@@ -912,6 +935,8 @@ interface Outcome {
   readonly kind?: 'preserved' | 'selected';
   readonly resumed?: boolean;
   readonly result?: unknown;
+  /** Dict key order of `result`, recursively: `toEqual` ignores it, so it is asserted separately. */
+  readonly order?: unknown;
   readonly error?: string;
   readonly message?: string;
   readonly reads: readonly string[];
@@ -919,6 +944,25 @@ interface Outcome {
 
 /** The messages worth comparing: those Python builds from the value, never a path or a JSON offset. */
 const MESSAGE_KINDS = new Set(['AttributeError', 'TypeError', 'KeyError']);
+
+/**
+ * Insertion order of every dict key in `value`, recursively. Plain JS objects order
+ * integer-like keys ascending ahead of the rest, so a key such as `"2"` cannot keep
+ * Python's position: see the documented-limitation test below. The names the repair
+ * result and progress files use (`job`, `attempts`, `rung`, ...) are all non-integer.
+ */
+function orderOf(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(orderOf);
+  if (typeof value === 'object' && value !== null && !(value instanceof JsonNumber)) {
+    return Object.entries(value).map(([key, inner]) => [key, orderOf(inner)]);
+  }
+  return null;
+}
+
+/** An outcome with the key order of its result made comparable. */
+function ordered(outcome: Outcome): Outcome {
+  return 'result' in outcome ? { ...outcome, order: orderOf(outcome.result) } : outcome;
+}
 
 function view(outcome: Outcome, want: Want): Outcome {
   if (outcome.error === undefined) return outcome;
@@ -940,7 +984,7 @@ function runPython(laid: readonly Laid[]): Outcome[] {
   }));
   const stdout = execFileSync(
     'python3',
-    ['-I', '-c', PY, PYTHON_DIR, JSON.stringify(specs), NOW_STAMP],
+    ['-I', '-B', '-c', PY, PYTHON_DIR, JSON.stringify(specs), NOW_STAMP],
     {
       encoding: 'utf8',
       maxBuffer: 16 * 1024 * 1024,
@@ -1089,8 +1133,8 @@ describe('result/progress selection (process) against Python crq_repair.process'
       const oracle = python[index];
       if (item === undefined || oracle === undefined) throw new Error('missing scenario');
       const want = expected(item.scenario);
-      expect(view(oracle, item.scenario.want)).toEqual(want);
-      expect(view(await runTs(item), item.scenario.want)).toEqual(want);
+      expect(ordered(view(oracle, item.scenario.want))).toEqual(ordered(want));
+      expect(ordered(view(await runTs(item), item.scenario.want))).toEqual(ordered(want));
     },
   );
 
@@ -1160,6 +1204,21 @@ describe('selection reads: laziness, purity and failure transparency (TS side)',
     calls.length = 0;
     await ask(fresh({ result: past() }), [], clock);
     expect(calls).toEqual(['now', 'utc']);
+  });
+
+  it('documented limitation: integer-like keys reorder in a plain object, unlike a Python dict', async () => {
+    // Python keeps `2, 1, z` after `pop('retry_after')`; a JS object lists integer-like
+    // keys ascending first. The representation is deliberately unchanged, and every key
+    // the repair files really use is non-integer (pinned in order by the scenarios above).
+    const body = '{"2":"b","1":"a","z":"c","retry_after":"2000-01-01T00:00:00Z"}';
+    const laid = fresh({ result: raw(body) });
+    const decision = await ask(laid, []);
+    expect(decision.kind === 'selected' && Object.keys(decision.result as object)).toEqual([
+      '1',
+      '2',
+      'z',
+    ]);
+    expect(decision.kind === 'selected' && decision.result).toEqual({ 2: 'b', 1: 'a', z: 'c' });
   });
 
   it('does not mutate the prior result it removes retry_after from', async () => {

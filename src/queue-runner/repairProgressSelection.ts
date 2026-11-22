@@ -46,6 +46,12 @@
  *
  * Failures Python lets escape propagate as `PyError`s of the same class, with
  * the 3.14 message text where Python builds one from the value.
+ *
+ * Known limitation (representation unchanged): results are plain objects, which
+ * list integer-like keys (`"1"`, `"2"`) ascending ahead of all others, while a
+ * Python dict keeps insertion order. Every key the repair result and progress
+ * files use (`job`, `attempts`, `rung`, ...) is non-integer, and the tests pin
+ * their order; a file with integer-like keys would only differ in key order.
  */
 import { parseUtcDetailed, UtcParseError, utcHasOffset } from '../policy/crq/utc.js';
 import { JsonNumber } from '../policy/crq/jsonValue.js';
