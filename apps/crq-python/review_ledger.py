@@ -419,12 +419,22 @@ def durable_directory(directory):
 def atomic(filename, data):
     filename = Path(filename)
     durable_directory(filename.parent)
-    with tempfile.NamedTemporaryFile(dir=filename.parent, delete=False) as stream:
-        stream.write(data)
-        stream.flush()
-        os.fsync(stream.fileno())
-        temporary = stream.name
-    os.replace(temporary, filename)
+    # Record the staging path before the first write so a failed write, fsync,
+    # or replace removes the staging file: a retry would otherwise stage
+    # another file beside every leftover until the disk holds the bytes that
+    # recovery itself needs.
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=filename.parent, delete=False) as stream:
+            temporary = stream.name
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, filename)
+        temporary = None
+    finally:
+        if temporary is not None:
+            Path(temporary).unlink(missing_ok=True)
     fsync_dir(filename.parent)
 
 
