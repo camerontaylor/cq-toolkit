@@ -30,11 +30,12 @@
 // every restart a real process boundary instead. Python runs one separate
 // `python3` process per segment; each reloads `state/queue.json` with the real
 // `crq.load_queue` and the in-memory world from `world.json`, a scratch file
-// outside `state/`. The TypeScript side runs each segment through `runTs` with
-// a fresh effects world, backlog and reads built only from disk: the queue
-// comes back through `loadQueueDocument` and the world from `world.json`, and
-// nothing is carried in memory between segments. (The vitest process is shared,
-// so this is isolation by construction, not a separate OS process.) A tick's
+// outside `state/`. The TypeScript side is just as separate: each segment is a
+// `node` child process that runs test/helpers/repairHarvestShadowTs.ts (native
+// type stripping) against the built `dist/` modules, with a fresh effects world,
+// backlog and reads built only from disk: the queue comes back through
+// `loadQueueDocument` and the world from `world.json`. The in-process scenarios
+// run the same helper against `src/`. A tick's
 // `save_fail` makes its N-th queue save fail before writing. A durable tick
 // also does what `crq.tick` does around `harvest`: an exception becomes
 // `last_error` and the queue is saved at the end of the tick; a tick's `crash`
@@ -45,20 +46,9 @@
 // (repairHarvest.test.ts), of cleanup (repairCleanup.test.ts) and of enrollment
 // (publicationEnroll.test.ts). The scenarios here are the cross-component ones.
 import { execFileSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import {
-  lstatSync,
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
-import { lstat } from 'node:fs/promises';
+import { mkdirSync, mkdtempSync, existsSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, relative } from 'node:path';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
 import { filePublicationEffects } from '../../src/adapters/crq/publicationFiles.js';
@@ -67,31 +57,31 @@ import { fileRepairHarvestReads } from '../../src/adapters/crq/repairHarvestRead
 import { toPlainJson } from '../../src/policy/crq/jsonValue.js';
 import { receiptJsonDigest } from '../../src/policy/crq/pythonJson.js';
 import { FixPrBacklog } from '../../src/queue-runner/fixPrBacklog.js';
-import {
-  finalizePublication,
-  type PublicationFinalizeEffects,
-} from '../../src/queue-runner/publicationFinalize.js';
+import { finalizePublication } from '../../src/queue-runner/publicationFinalize.js';
 import { publicationNewItem } from '../../src/queue-runner/publicationEnroll.js';
-import {
-  publishRepair,
-  type PublicationPublishEffects,
-} from '../../src/queue-runner/publicationPublish.js';
+import { publishRepair } from '../../src/queue-runner/publicationPublish.js';
 import { PyError } from '../../src/queue-runner/pyErrors.js';
-import type { Item, Queue } from '../../src/queue-runner/repairBackfill.js';
+import { decideRepairCleanup, RETAINED_ARCHIVES } from '../../src/queue-runner/repairCleanup.js';
+import { repairHarvest } from '../../src/queue-runner/repairHarvest.js';
 import {
-  decideRepairCleanup,
-  RETAINED_ARCHIVES,
-  type RepairCleanupProbes,
-  type RetentionRecord,
-} from '../../src/queue-runner/repairCleanup.js';
-import { repairHarvest, type RepairHarvestEffects } from '../../src/queue-runner/repairHarvest.js';
+  putFile,
+  runTs as runTsModule,
+  sha,
+  type Mods,
+  type Outcome,
+  type Rec,
+  type Retained,
+  type Spec,
+  type Tick,
+} from '../helpers/repairHarvestShadowTs.js';
 
 const ORACLE = fileURLToPath(new URL('../helpers/repairHarvestShadowOracle.py', import.meta.url));
 const APPS = fileURLToPath(new URL('../../apps/crq-python', import.meta.url));
-
-type Rec = Record<string, unknown>;
-type Entry = unknown[];
-type Mode = 'ok' | 'runtime' | 'timeout-landed' | 'timeout-lost';
+// The durable TypeScript side is this helper run as `node <helper>` against the built `dist/`.
+const TS_CHILD = fileURLToPath(new URL('../helpers/repairHarvestShadowTs.ts', import.meta.url));
+const DIST_CHECK = fileURLToPath(
+  new URL('../../dist/queue-runner/repairHarvest.js', import.meta.url),
+);
 
 const SHA1 = 'a'.repeat(40);
 const BASE = 'b0';
@@ -105,68 +95,12 @@ afterAll(() => {
   for (const dir of cleanups) rmSync(dir, { recursive: true, force: true });
 });
 
-interface Tick {
-  restart?: boolean;
-  dry?: boolean;
-  /** Files under `state/` written before the tick (an object is JSON, a string is raw). */
-  files?: Record<string, unknown>;
-  create?: Mode;
-  push_fail?: boolean;
-  /** job -> `kind:message` raise from `require_canonical_delivery`. */
-  stale?: Record<string, string>;
-  /** job -> `kind:message` raise from `mark_finding_outcome`. */
-  outcome?: Record<string, string>;
-  /** `git rev-parse HEAD` in a cleanup tree fails with this message. */
-  head_error?: string;
-  /** The N-th (1-based) queue save of this tick raises OSError before writing. */
-  save_fail?: number;
-  /** Durable runs: the process dies right after harvest, so no `last_error` and no tick-end save. */
-  crash?: boolean;
-}
-
-/** One process of a durable run: the ticks it runs and where they sit in the whole run. */
-interface Segment {
-  root: string;
-  spec: Spec;
-  ticks: Tick[];
-  offset: number;
-}
-
-interface Retained {
-  job: string;
-  head: string;
-  base: string;
-}
-
-interface Spec {
-  item: Rec;
-  extra?: Rec[];
-  files: Record<string, unknown>;
-  /** Worktree directories under WT_ROOT: name -> scripted head and `git status` text. */
-  trees: Record<string, { head: string; status: string }>;
-  retained?: Retained[];
-  remote?: Record<string, string>;
-  prs?: Record<string, unknown[]>;
-  pr_info?: Rec | null;
-  ancestor?: boolean;
-  ticks: Tick[];
-}
-
-interface Outcome {
-  log: Entry[];
-  ticks: { messages?: string[]; error?: string; queue: Rec; files: Record<string, string> }[];
-  files: Record<string, string>;
-  removed: string[];
-}
-
 // --- the synthetic world ----------------------------------------------------
 
 const STUB_REPAIR = `import builtins
 def mechanical(config, wt, predecessor, commits, job_id, directory):
     builtins.SHADOW_LOG.append(['mechanical', wt.name, predecessor, list(commits), job_id, directory.name])
 `;
-
-const sha = (text: string): string => createHash('sha256').update(text).digest('hex');
 
 /** One `retained-<token>/` snapshot written the way `retain()` does. */
 function writeRetained(root: string, r: Retained, index: number): void {
@@ -191,12 +125,6 @@ function writeRetained(root: string, r: Retained, index: number): void {
   mkdirSync(target, { recursive: true });
   for (const [name, body] of Object.entries(contents)) writeFileSync(join(target, name), body);
   writeFileSync(join(target, 'manifest.json'), JSON.stringify(manifest));
-}
-
-function putFile(state: string, rel: string, doc: unknown): void {
-  const path = join(state, rel);
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, typeof doc === 'string' ? doc : JSON.stringify(doc));
 }
 
 /** The spec with `{WT}` bound to this side's worktree root. */
@@ -273,452 +201,51 @@ function joinSegments(parts: Outcome[]): Outcome {
 
 // --- the TypeScript side ----------------------------------------------------
 
-const NAMES: Record<string, PyError['kind']> = {
-  value: 'ValueError',
-  runtime: 'RuntimeError',
-  os: 'OSError',
-  key: 'KeyError',
-  type: 'TypeError',
+// --- the TypeScript side ----------------------------------------------------
+
+/** The modules under test as vitest sees them: `src/`, in this process. */
+const SRC: Mods = {
+  PyError,
+  FixPrBacklog,
+  filePublicationEffects,
+  loadQueueDocument,
+  fileRepairHarvestReads,
+  toPlainJson,
+  finalizePublication,
+  publicationNewItem,
+  publishRepair,
+  decideRepairCleanup,
+  repairHarvest,
 };
 
-function raise(directive: string | undefined): void {
-  if (!directive) return;
-  const [kind, ...rest] = directive.split(':');
-  const text = rest.join(':');
-  throw new PyError(NAMES[kind as string] as PyError['kind'], kind === 'key' ? `'${text}'` : text);
-}
-
-/** Python's `family()` reports the exception class name; PyError carries it as `kind`. */
-const familyOf = (e: unknown): string => (e instanceof PyError ? e.kind : (e as Error).name);
-
-interface PrRow extends Rec {
-  number: number;
-  url: string;
-  state: string;
-  headRefOid: string;
-}
-
-function walkRetained(dir: string, out: string[]): void {
-  let entries: string[];
-  try {
-    entries = readdirSync(dir);
-  } catch {
-    return;
-  }
-  for (const entry of entries) {
-    const path = join(dir, entry);
-    let walk = false;
-    try {
-      walk = !lstatSync(path).isSymbolicLink() && statSync(path).isDirectory();
-    } catch {
-      walk = false;
-    }
-    if (!walk) continue;
-    if (entry.startsWith('retained-')) {
-      try {
-        statSync(join(path, 'manifest.json'));
-        out.push(path);
-      } catch {
-        // no manifest: not a snapshot
-      }
-    }
-    walkRetained(path, out);
-  }
-}
-
-function readBytes(path: string): Promise<Buffer> {
-  try {
-    return Promise.resolve(readFileSync(path));
-  } catch (e) {
-    return Promise.reject(new PyError('OSError', e instanceof Error ? e.message : String(e)));
-  }
-}
-
-function listFiles(dir: string): string[] {
-  const out: string[] = [];
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const path = join(dir, entry.name);
-    if (entry.isDirectory()) out.push(...listFiles(path));
-    else out.push(path);
-  }
-  return out;
-}
-
-async function runTs(spec: Spec, segment?: Segment): Promise<{ out: Outcome; root: string }> {
-  const { root, spec: bound } = segment ?? layout(spec);
-  const ticksToRun = segment?.ticks ?? bound.ticks;
-  const stateRoot = join(root, 'state');
-  const wtRoot = join(root, 'wt');
-  const log: Entry[] = [];
-  const worldPath = join(root, 'world.json');
-  const saved = segment
-    ? (() => {
-        try {
-          return JSON.parse(readFileSync(worldPath, 'utf8')) as {
-            prs: Record<string, PrRow[]>;
-            remote: Record<string, string>;
-            removed: string[];
-            n: number;
-          };
-        } catch {
-          return undefined;
-        }
-      })()
-    : undefined;
-  const world = {
-    prs: new Map<string, PrRow[]>(
-      Object.entries(saved?.prs ?? ((bound.prs ?? {}) as Record<string, PrRow[]>)),
-    ),
-    remote: new Map<string, string>(Object.entries(saved?.remote ?? bound.remote ?? {})),
-    removed: saved?.removed ?? ([] as string[]),
-    n: saved?.n ?? 0,
-  };
-  const cur = { tick: {} as Tick, run: '', picked: false, saves: 0 };
-  const reads = fileRepairHarvestReads({ stateRoot, worktreeRoot: wtRoot });
-  const files = filePublicationEffects({ stateRoot });
-  const saveQueue = async (queue: Rec): Promise<void> => {
-    cur.saves += 1;
-    if (cur.tick.save_fail === cur.saves) {
-      log.push(['save-fail', cur.saves]);
-      throw new PyError('OSError', 'disk full');
-    }
-    log.push(['save', structuredClone(queue)]);
-    await files.saveQueue(queue);
-  };
-  let backlog = new FixPrBacklog();
-
-  /** The journal, patch, body and queue files the real writers have produced so far. */
-  const snapshotFiles = (): Record<string, string> => {
-    const found: Record<string, string> = {};
-    for (const path of listFiles(stateRoot).sort()) {
-      if (
-        !['publication.json', 'queue.json', 'publication.patch', 'fix-pr.md'].includes(
-          basename(path),
-        )
-      ) {
-        continue;
-      }
-      found[relative(stateRoot, path)] = readFileSync(path, 'utf8');
-    }
-    return found;
-  };
-
-  // The cleanup probes: read-only questions over the fixture, with an in-memory
-  // removal overlay in place of the directory deletion.
-  const probes: RepairCleanupProbes = {
-    resolve: (path) => reads.resolvePath(path),
-    isSymlink: async (path) => {
-      try {
-        return (await lstat(path)).isSymbolicLink();
-      } catch {
-        return false;
-      }
-    },
-    isDirectory: (path) => {
-      if (world.removed.includes(basename(path)) && dirname(path) === wtRoot) {
-        return Promise.resolve(false);
-      }
-      try {
-        return Promise.resolve(statSync(path).isDirectory());
-      } catch {
-        return Promise.resolve(false);
-      }
-    },
-    status: (worktree) => {
-      log.push(['wt-status', basename(worktree)]);
-      return Promise.resolve({
-        failed: false,
-        stdout: bound.trees[basename(worktree)]?.status ?? '',
-      });
-    },
-    head: (worktree) => {
-      log.push(['wt-head', basename(worktree)]);
-      if (cur.tick.head_error !== undefined) {
-        return Promise.reject(new PyError('RuntimeError', cur.tick.head_error));
-      }
-      return Promise.resolve(bound.trees[basename(worktree)]!.head);
-    },
-    retainedManifests: (directory) => {
-      const found: string[] = [];
-      walkRetained(directory, found);
-      return Promise.resolve(
-        found.map((path): RetentionRecord => {
-          const name = basename(path);
-          return {
-            directoryName: name,
-            readManifest: () => readBytes(join(path, 'manifest.json')),
-            archiveDigest: async (archive) =>
-              sha((await readBytes(join(path, archive))).toString()),
-          };
-        }),
-      );
-    },
-  };
-
-  const listBranchPrs = async (branch: string): Promise<PrRow[]> => {
-    log.push(['list', branch]);
-    return structuredClone(world.prs.get(branch) ?? []);
-  };
-
-  const finalizeEffects: PublicationFinalizeEffects = {
-    repo: 'o/r',
-    iso: () => 'now',
-    listBranchPrs,
-    repairProvenance: async () => [],
-    writeFixPrBody: (job, body) => files.writeFixPrBody(job, body),
-    writeJournal: (job, publication) => files.writeJournal(job, publication),
-    saveQueue,
-    async createPr(request) {
-      const mode = cur.tick.create ?? 'ok';
-      log.push(['create', request.head, mode, request.title]);
-      if (mode === 'runtime') throw new PyError('RuntimeError', 'gh pr create failed');
-      if (mode !== 'timeout-lost') {
-        world.n += 1;
-        const rows = world.prs.get(request.head) ?? [];
-        rows.push({
-          number: 100 + world.n,
-          url: `u${world.n}`,
-          state: 'OPEN',
-          headRefOid: `head-${cur.run}`,
-        });
-        world.prs.set(request.head, rows);
-      }
-      if (mode.startsWith('timeout')) {
-        // `str(subprocess.TimeoutExpired(argv, 600))`: harvest stores it in the
-        // record, so the fixture reproduces CPython's text for the exact argv.
-        const argv = [
-          'gh',
-          'pr',
-          'create',
-          '--repo',
-          'o/r',
-          '--base',
-          request.base,
-          '--head',
-          request.head,
-          '--title',
-          request.title,
-          '--body-file',
-          request.bodyFile,
-        ];
-        const text = `[${argv.map((a) => `'${a}'`).join(', ')}]`;
-        throw Object.assign(new Error(`Command '${text}' timed out after 600 seconds`), {
-          name: 'TimeoutExpired',
-        });
-      }
-    },
-    newItem: publicationNewItem({
-      iso: () => 'now',
-      event: async (id, reason) => {
-        log.push(['event', id, reason]);
-      },
-    }),
-  };
-
-  const publishEffects = (p: {
-    q: Rec;
-    item: Rec;
-    run: string;
-    rec: Rec;
-  }): PublicationPublishEffects => ({
-    iso: () => 'now',
-    readJournal: (job) => files.readJournal(job),
-    async revParseDefaultRef() {
-      return 'target-main';
-    },
-    async prInfo(pr) {
-      log.push(['pr-info', pr]);
-      return structuredClone(bound.pr_info) as never;
-    },
-    async isAncestor(older, newer) {
-      log.push(['ancestor', older, newer]);
-      return bound.ancestor ?? true;
-    },
-    async makeWorktree(name, sha1) {
-      log.push(['worktree', name, sha1]);
-      return { path: join(wtRoot, `x-${name}`), branch: `wtb-${name}` };
-    },
-    async removeWorktree(worktree) {
-      log.push(['remove-worktree', basename(worktree.path), worktree.branch]);
-    },
-    async revParseHead() {
-      return cur.picked ? `head-${cur.run}` : `base-${cur.run}`;
-    },
-    async cherryPick() {
-      cur.picked = true;
-    },
-    async verifyCherryPickHead() {
-      throw new PyError('RuntimeError', 'no CHERRY_PICK_HEAD');
-    },
-    async conflictedFiles() {
-      return '';
-    },
-    async stagedFiles() {
-      return '';
-    },
-    async revListSince() {
-      return [`claim-${cur.run}`];
-    },
-    async verify(wt, before, claims, job) {
-      log.push(['verify', basename(wt.path), before, [...claims], job]);
-    },
-    async diffSince() {
-      return `diff-${cur.run}`;
-    },
-    writePatch: (job, body) => files.writePatch(job, body),
-    async hackDetector(_wt, diff) {
-      log.push(['hack', diff]);
-    },
-    async secretScan(_job, target, head) {
-      log.push(['secret-scan', target, head]);
-      return true;
-    },
-    async updateRef(ref, sha1) {
-      log.push(['update-ref', ref, sha1]);
-    },
-    writeJournal: (job, publication) => files.writeJournal(job, publication),
-    saveQueue,
-    async push(branch, expected, sha1) {
-      log.push(['push', branch, expected, sha1]);
-      if (cur.tick.push_fail) throw new PyError('RuntimeError', 'git push failed: network');
-      world.remote.set(branch, sha1);
-    },
-    async lsRemoteHeads(branch) {
-      log.push(['ls-remote', branch]);
-      const head = world.remote.get(branch);
-      return head === undefined ? '' : `${head}\trefs/heads/${branch}`;
-    },
-    listBranchPrs,
-    finalize: (publication) =>
-      finalizePublication(finalizeEffects, backlog, p.q, p.item, p.run, p.rec, publication),
+async function runTs(spec: Spec): Promise<{ out: Outcome; root: string }> {
+  const { root, spec: bound } = layout(spec);
+  const out = await runTsModule(SRC, {
+    root,
+    spec: bound,
+    ticks: bound.ticks,
+    offset: 0,
+    durable: false,
   });
-
-  let q: Queue = { items: [bound.item as Item, ...((bound.extra ?? []) as Item[])] };
-
-  const fx: RepairHarvestEffects = {
-    ...reads,
-    async requireCanonicalDelivery(job) {
-      log.push(['canonical', job.job]);
-      raise(cur.tick.stale?.[job.job as string]);
-    },
-    async makeWorktree(name, commit) {
-      log.push(['worktree', name, commit]);
-      return { path: join(wtRoot, `x-${name}`), branch: `wtb-${name}` };
-    },
-    async removeWorktree(path, branch) {
-      log.push(['remove-worktree', basename(path), branch]);
-    },
-    async verify(wt, predecessor, commits, jobId) {
-      log.push(['verify', basename(wt), predecessor, [...commits], jobId]);
-    },
-    async mechanical(wt, predecessor, commits, jobId) {
-      log.push(['mechanical', basename(wt), predecessor, [...commits], jobId, jobId]);
-    },
-    saveQueue: (queue) => saveQueue(queue as Rec),
-    async markFindingOutcome(job, result) {
-      log.push(['mark', job.job ?? null, JSON.stringify(result)]);
-      raise(cur.tick.outcome?.[job.job as string]);
-    },
-    async recordUnpublishedFixedSibling(findingId, jobId, reason, repairBase) {
-      log.push(['sibling', findingId, jobId, 'needs-human', reason, repairBase, 'exhausted']);
-    },
-    async cleanupHarvested(itemId, jobId, result, alternate) {
-      log.push(['cleanup', itemId, jobId, alternate]);
-      const decision = await decideRepairCleanup(
-        {
-          worktreeRoot: wtRoot,
-          directory: join(stateRoot, 'repair', jobId),
-          itemId,
-          jobId,
-          result,
-          alternate,
-        },
-        probes,
-      );
-      if (decision.remove) {
-        // `git worktree remove` is recorded, never run; the overlay is the removal.
-        log.push(['wt-remove', basename(decision.worktree)]);
-        world.removed.push(basename(decision.worktree));
-      }
-    },
-    publish: (queue, item, run, record, fixed) =>
-      publishRepair(
-        publishEffects({ q: queue as Rec, item, run, rec: record }),
-        queue as Rec,
-        item,
-        run,
-        record,
-        fixed,
-      ),
-  };
-
-  const ticks: Outcome['ticks'] = [];
-  for (const [index, tick] of ticksToRun.entries()) {
-    cur.tick = tick;
-    cur.saves = 0;
-    log.push(['tick', index + (segment?.offset ?? 0)]);
-    for (const [rel, doc] of Object.entries(tick.files ?? {})) putFile(stateRoot, rel, doc);
-    if (segment && index === 0) {
-      // A fresh process: the queue is only what is on disk.
-      q = toPlainJson(await loadQueueDocument(join(stateRoot, 'queue.json'))) as unknown as Queue;
-    }
-    if (tick.restart) {
-      if (!segment) {
-        q = JSON.parse(JSON.stringify(q)) as Queue;
-        backlog = new FixPrBacklog();
-      }
-      log.push(['restart']);
-    }
-    const item = q.items[0]!;
-    for (const run of Object.keys((item.repair_runs ?? {}) as Rec)) {
-      cur.run = run;
-      cur.picked = false;
-    }
-    const out: Partial<Outcome['ticks'][number]> = {};
-    let caught = '';
-    try {
-      out.messages = await repairHarvest(q, item, fx, tick.dry === true);
-    } catch (e) {
-      out.error = familyOf(e);
-      caught = e instanceof Error ? e.message : String(e);
-    }
-    // Key order matters to the JSON-text comparison: messages|error, queue, files.
-    if (segment && !tick.crash) {
-      if (out.error !== undefined) {
-        // `crq.tick` catches a harvest failure into the item.
-        q.items[0]!.last_error = `repair harvest failed: ${caught.slice(0, 300)}`;
-      }
-      log.push(['tick-save']);
-      await files.saveQueue(q as Rec);
-    }
-    out.queue = structuredClone(q) as Rec;
-    out.files = snapshotFiles();
-    ticks.push(out as Outcome['ticks'][number]);
-    log.push(['backlog', { open: backlog.open, limit: backlog.limit }]);
-  }
-
-  if (segment) {
-    writeFileSync(
-      worldPath,
-      JSON.stringify({
-        prs: Object.fromEntries(world.prs),
-        remote: Object.fromEntries(world.remote),
-        removed: world.removed,
-        n: world.n,
-      }),
-    );
-  }
-  const out = snapshotFiles();
-  return { out: { log, ticks, files: out, removed: world.removed }, root };
+  return { out, root };
 }
 
-/** One durable run: each segment is built from disk alone, nothing carried between them. */
-async function runTsDurable(spec: Spec): Promise<{ out: Outcome; root: string }> {
+/**
+ * One durable run: a separate `node` process per segment, each running the built
+ * `dist/` modules. Nothing but the scratch tree is shared between them.
+ */
+function runTsDurable(spec: Spec): { out: Outcome; root: string } {
+  if (!existsSync(DIST_CHECK)) throw new Error('dist is missing: run pnpm run build');
   const { root, spec: bound } = layout(spec, true);
-  const parts: Outcome[] = [];
-  for (const segment of segmentsOf(bound.ticks)) {
-    parts.push((await runTs(bound, { root, spec: bound, ...segment })).out);
-  }
+  const parts = segmentsOf(bound.ticks).map((segment) => {
+    const stdout = execFileSync(process.execPath, ['--no-warnings', TS_CHILD], {
+      input: JSON.stringify({ root, spec: bound, durable: true, ...segment }),
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+      env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
+    });
+    return JSON.parse(stdout) as Outcome;
+  });
   return { out: joinSegments(parts), root };
 }
 
@@ -730,7 +257,7 @@ const norm = (value: unknown, root: string): unknown =>
 /** Run one scenario on both sides; fail naming the first diverging piece. */
 async function parity(spec: Spec, durable = false): Promise<Outcome> {
   const py = durable ? runPythonDurable(spec) : runPython(spec);
-  const ts = durable ? await runTsDurable(spec) : await runTs(spec);
+  const ts = durable ? runTsDurable(spec) : await runTs(spec);
   const a = norm(py.out, py.root) as Outcome;
   const b = norm(ts.out, ts.root) as Outcome;
   const at = a.log.findIndex((e, i) => JSON.stringify(e) !== JSON.stringify(b.log[i]));
