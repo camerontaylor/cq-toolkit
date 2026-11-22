@@ -7,7 +7,7 @@
 import { lstat, readFile, readlink, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import { parseJsonValue, toPlainJson } from '../../policy/crq/jsonValue.js';
+import { parseJsonValue, pythonNonFinite, toPlainJson } from '../../policy/crq/jsonValue.js';
 import { PyError } from '../../queue-runner/pyErrors.js';
 import type { RepairHarvestEffects } from '../../queue-runner/repairHarvest.js';
 import { checkRepairJobId } from './repairPreparation.js';
@@ -24,9 +24,18 @@ export type FileRepairHarvestReads = Pick<
   'readJob' | 'resultExists' | 'readResult' | 'resolvePath' | 'worktreeRoot'
 >;
 
-const decoder = new TextDecoder('utf-8', { fatal: true });
+/**
+ * `ignoreBOM: true` keeps a leading byte-order mark in the text, so the parser
+ * refuses it as Python's `read_text()` + `json.loads` does; the default would
+ * strip it and accept a file Python rejects.
+ */
+const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
-/** A failed read is an `OSError`; a decode or parse failure is a `ValueError`. */
+/**
+ * A failed read is an `OSError`; a decode or parse failure is a `ValueError`.
+ * `json.loads` accepts `NaN`/`Infinity`/`-Infinity`, which `json.dump` writes
+ * for a non-finite float, so a document carrying one is valid, not malformed.
+ */
 async function readJson(path: string): Promise<unknown> {
   let bytes: Uint8Array;
   try {
@@ -35,7 +44,9 @@ async function readJson(path: string): Promise<unknown> {
     throw new PyError('OSError', e instanceof Error ? e.message : String(e));
   }
   try {
-    return toPlainJson(parseJsonValue(decoder.decode(bytes)), { bigints: true });
+    return toPlainJson(parseJsonValue(decoder.decode(bytes), { parseConstant: pythonNonFinite }), {
+      bigints: true,
+    });
   } catch (e) {
     throw new PyError('ValueError', e instanceof Error ? e.message : String(e));
   }

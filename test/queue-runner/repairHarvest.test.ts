@@ -142,6 +142,10 @@ function layout(root: string, spec: Spec): () => void {
   for (const [rel, doc] of Object.entries(spec.files ?? {})) {
     const path = join(root, 'state', rel);
     mkdirSync(dirname(path), { recursive: true });
+    if (doc instanceof Uint8Array) {
+      writeFileSync(path, doc); // raw bytes: a fixture that is not valid UTF-8
+      continue;
+    }
     const text = typeof doc === 'string' ? doc : JSON.stringify(doc);
     writeFileSync(path, text.replaceAll('{WT}', join(root, 'wt')));
   }
@@ -728,6 +732,308 @@ describe('repairHarvest result validation (differential)', () => {
     });
     expect(later.error).toBeUndefined();
     expect(later.calls).toContain('"mark","crq-R-F2"');
+  });
+
+  // The malformed-inbox terminalization is a deliberate TS-only difference: a
+  // content defect in the inbox fails its run once, where Python re-raises on every
+  // tick. These fixtures run both sides and pin the boundary: Python raises (the
+  // queue is left untouched, nothing is written), TS terminalizes without ever
+  // handing the file's content to canonical delivery or the finding ledger.
+  describe('malformed inbox content (Python raises, TS terminalizes)', () => {
+    const SHAPES: Array<[string, unknown]> = [
+      ['unparsable JSON', '{not json'],
+      ['an empty file', ''],
+      ['trailing garbage', '{"job":"x"} x'],
+      ['invalid UTF-8', new Uint8Array([0x7b, 0x22, 0xff, 0x22, 0x7d])],
+      ['a UTF-8 byte-order mark', '﻿{}'],
+      ['a UTF-16 document', new Uint8Array([0xff, 0xfe, 0x7b, 0x00, 0x7d, 0x00])],
+      ['JSON null', 'null'],
+      ['a JSON number', '7'],
+      ['a JSON string', '"crq-R-F1"'],
+      ['a JSON boolean', 'true'],
+      ['a JSON list of objects', '[{"job":"crq-R-F1","item":"i1","canonical_finding_id":"F1"}]'],
+    ];
+    for (const [name, body] of SHAPES) {
+      it(`fails the run alone on ${name}`, async () => {
+        const spec: Spec = {
+          item: item({}, { jobs: [J1] }),
+          files: files([J1, body, fixed(J1)]),
+        };
+        const py = runPython(spec);
+        expect(py.error).toBeDefined(); // Python never survives an unreadable inbox
+        expect(py.calls).not.toContain('"mark"');
+        expect(py.queue).not.toContain('"state":"failed"');
+        const ts = await runTs(spec);
+        expect(ts.error).toBeUndefined();
+        expect(ts.queue).toContain('"state":"failed"');
+        expect(ts.queue).toContain('"state":"repair_failed"');
+        expect(ts.queue).toContain('"last_error":"repair_failed; needs human"');
+        expect(ts.queue).toContain('"reason":"invalid repair inbox: ');
+        expect(ts.queue).toContain('"finding":null');
+        // Exactly one queue save, and no ledger or delivery call derived from the file.
+        expect(ts.calls).toMatch(/^\[\["save_queue",/);
+        expect(JSON.parse(ts.calls)).toHaveLength(1);
+      });
+    }
+
+    it('refuses a byte-order-marked inbox that is otherwise valid, so no finding is written', async () => {
+      // Stripping the BOM would make this a well-formed, correctly bound inbox, and the
+      // harvest would write a finding outcome from a file Python's json.loads rejects.
+      const spec: Spec = {
+        item: item({}, { jobs: [J1] }),
+        files: files([
+          J1,
+          `\ufeff${JSON.stringify(job(J1, { canonical_finding_id: 'F1' }))}`,
+          verdict(J1, 'NOT-FIXED'),
+        ]),
+      };
+      const py = runPython(spec);
+      expect(py.error).toBeDefined(); // JSONDecodeError: Unexpected UTF-8 BOM
+      expect(py.calls).not.toContain('"mark"');
+      const ts = await runTs(spec);
+      expect(ts.error).toBeUndefined();
+      expect(ts.queue).toContain('"reason":"invalid repair inbox: ');
+      expect(ts.queue).toContain('"state":"failed"');
+      expect(ts.queue).toContain('"finding":null');
+      expect(ts.calls).not.toContain('"mark"');
+      expect(ts.calls).not.toContain('"canonical"');
+      expect(JSON.parse(ts.calls)).toHaveLength(1); // the terminal queue save only
+    });
+
+    it('does not read the inbox while the result is absent (nothing to terminalize yet)', async () => {
+      const out = await same({
+        item: item({}, { jobs: [J1] }),
+        files: { [`repair/inbox/${J1}.json`]: '{not json' }, // no result.json
+      });
+      expect(out.error).toBeUndefined();
+      expect(out.queue).toContain('"state":"queued"');
+    });
+
+    it('terminalizes before the result artifact is read, even a retry_after one', async () => {
+      const out = await runTs({
+        item: item({}, { jobs: [J1] }),
+        files: files([J1, '{not json', { ...verdict(J1, 'FAILED'), retry_after: 60 }]),
+      });
+      expect(out.error).toBeUndefined();
+      expect(out.queue).toContain('invalid repair inbox');
+    });
+
+    it('terminalizes a receipt item as done with its repair outcome', async () => {
+      const out = await runTs({
+        item: item({ kind: 'merged-current' }, { jobs: [J1] }),
+        files: files([J1, '[]', fixed(J1)]),
+      });
+      expect(out.error).toBeUndefined();
+      expect(out.queue).toContain('"state":"done"');
+      expect(out.queue).toContain('"repair_outcome":"failed"');
+      expect(out.queue).toContain('"last_error":null');
+    });
+
+    it('leaves a dry harvest alone: no terminalization, no save', async () => {
+      const spec: Spec = {
+        item: item({}, { jobs: [J1] }),
+        files: files([J1, '{not json', fixed(J1)]),
+        dry: true,
+      };
+      expect(runPython(spec).error).toBeDefined();
+      const ts = await runTs(spec);
+      expect(ts.error).toBeUndefined();
+      expect(ts.messages).toEqual([]);
+      expect(ts.queue).toContain('"state":"queued"');
+      expect(ts.calls).toBe('[]');
+    });
+
+    it('keeps the verdicts already harvested and writes nothing for the rejected job', async () => {
+      const two = item({}, { jobs: [J1, J2] });
+      const spec: Spec = {
+        item: two,
+        files: files(
+          [J1, job(J1, { canonical_finding_id: 'F1' }), verdict(J1, 'NOT-FIXED')],
+          [J2, '{not json', fixed(J2)],
+        ),
+      };
+      const py = runPython(spec);
+      expect(py.error).toBeDefined();
+      expect(py.calls).toContain('"mark","crq-R-F1"'); // Python marked J1, then raised
+      const ts = await runTs(spec);
+      expect(ts.error).toBeUndefined();
+      // Order: J1's own outcome, then the terminal save (before any write-back from
+      // the rejection), then the idempotent sibling replay of J1. J2 is never
+      // canonical-checked and never marked.
+      const calls = JSON.parse(ts.calls) as string[][];
+      expect(calls.map((c) => c[0])).toEqual(['canonical', 'mark', 'save_queue', 'mark']);
+      expect(calls[1]?.[1]).toBe(J1);
+      expect(calls[3]?.[1]).toBe(J1);
+      expect(ts.calls).not.toContain(J2 + '","');
+      const verdicts = (JSON.parse(ts.queue) as { repair_runs: { R: { verdicts: unknown[] } } })
+        .repair_runs.R.verdicts;
+      expect(verdicts).toHaveLength(2);
+      expect(JSON.stringify(verdicts[0])).toContain('"verdict":"NOT-FIXED"');
+      expect(JSON.stringify(verdicts[1])).toContain('invalid repair inbox: ');
+    });
+
+    it('terminalizes a wrong-shape inbox, then a replay tick leaves the failed run alone', async () => {
+      const first = await runTs({
+        item: item({}, { jobs: [J1, J2] }),
+        files: files(
+          [J1, '[]', fixed(J1)],
+          [J2, job(J2, { canonical_finding_id: 'F2' }), fixed(J2)],
+        ),
+      });
+      expect(first.error).toBeUndefined();
+      // The J2 sibling is a verified FIXED result of a dead run: it gets its own decision.
+      expect(first.calls).toContain('"sibling","F2"');
+      const replay = await runTs({
+        item: JSON.parse(first.queue) as Record<string, unknown>,
+        files: files(
+          [J1, '[]', fixed(J1)],
+          [J2, job(J2, { canonical_finding_id: 'F2' }), fixed(J2)],
+        ),
+      });
+      expect(replay.error).toBeUndefined();
+      expect(replay.queue).toBe(first.queue);
+      expect(replay.calls).toContain('"sibling","F2"'); // idempotent re-decision, nothing for J1
+      expect(replay.calls).not.toContain('"sibling","F1"');
+      expect(replay.calls).not.toContain('"mark"');
+    });
+  });
+
+  // Not a content defect: the inbox may be fine, so the run stays open and the
+  // read is retried on a later tick, exactly as Python's uncaught OSError does.
+  describe('transient inbox state (Python and TS both retry)', () => {
+    it('keeps the run open when the inbox is a directory (EISDIR)', async () => {
+      const out = await same({
+        item: item({}, { jobs: [J1] }),
+        files: { [`repair/inbox/${J1}.json/x`]: '{}', [`repair/${J1}/result.json`]: fixed(J1) },
+      });
+      expect(out.error).toBe('other');
+      expect(out.queue).toContain('"state":"queued"');
+    });
+
+    it('keeps the run open when the inbox is a dangling symlink', async () => {
+      const out = await same({
+        item: item({}, { jobs: [J1] }),
+        files: { [`repair/${J1}/result.json`]: fixed(J1) },
+        symlinks: { [`repair/inbox/${J1}.json`]: 'gone.json' },
+      });
+      expect(out.error).toBe('other');
+      expect(out.queue).toContain('"state":"queued"');
+    });
+
+    it('keeps the run open when the inbox directory is unreadable', async () => {
+      if (process.getuid?.() === 0) return; // root ignores the mode bits
+      const out = await same({
+        item: item({}, { jobs: [J1] }),
+        files: files([J1, job(J1, { canonical_finding_id: 'F1' }), fixed(J1)]),
+        lock: 'repair/inbox',
+      });
+      expect(out.error).toBe('other');
+      expect(out.queue).toContain('"state":"queued"');
+      expect(out.calls).not.toContain('"mark"');
+    });
+
+    it('harvests on the next tick once the inbox appears', async () => {
+      const first = await same({
+        item: item({}, { jobs: [J1] }),
+        files: { [`repair/${J1}/result.json`]: verdict(J1, 'NOT-FIXED') },
+      });
+      expect(first.error).toBe('other');
+      const next = await same({
+        item: JSON.parse(first.queue) as Record<string, unknown>,
+        files: files([J1, job(J1, { canonical_finding_id: 'F1' }), verdict(J1, 'NOT-FIXED')]),
+      });
+      expect(next.error).toBeUndefined();
+      expect(next.queue).toContain('"state":"done"');
+      expect(next.calls).toContain('"mark","crq-R-F1"');
+    });
+
+    it('treats a later missing inbox as transient after an earlier job was harvested', async () => {
+      const out = await same({
+        item: item({}, { jobs: [J1, J2] }),
+        files: {
+          ...files([J1, job(J1, { canonical_finding_id: 'F1' }), verdict(J1, 'NOT-FIXED')]),
+          [`repair/${J2}/result.json`]: verdict(J2, 'NOT-FIXED'),
+        },
+      });
+      expect(out.error).toBe('other');
+      expect(out.calls).toContain('"mark","crq-R-F1"'); // J1's outcome is idempotent on the retry
+      expect(out.queue).toContain('"state":"queued"');
+    });
+  });
+
+  // Valid-to-Python documents the TS read must not mistake for malformed.
+  describe('inbox documents Python accepts', () => {
+    it('accepts the non-finite constants json.dump writes', async () => {
+      for (const token of ['NaN', 'Infinity', '-Infinity']) {
+        const body = `{"job":"${J1}","item":"i1","finding":{"id":"f-${J1}"},"canonical_finding_id":"F1","weight":${token}}`;
+        const out = await same({
+          item: item({}, { jobs: [J1] }),
+          files: files([J1, body, verdict(J1, 'NOT-FIXED')]),
+        });
+        expect(out.error).toBeUndefined();
+        expect(out.queue).toContain('"state":"done"');
+        expect(out.calls).toContain('"mark","crq-R-F1"');
+      }
+    });
+
+    it('keeps the last of a duplicated key', async () => {
+      const body = `{"job":"${J1}","item":"i1","finding":{"id":"a"},"finding":{"id":"b"},"canonical_finding_id":"F1"}`;
+      const out = await same({
+        item: item({}, { jobs: [J1] }),
+        files: files([J1, body, verdict(J1, 'NOT-FIXED')]),
+      });
+      expect(out.queue).toContain('"finding":{"id":"b"}');
+    });
+
+    it('accepts a non-finite constant in a result artifact too', async () => {
+      // TS only: Python echoes the NaN into its own queue dump, which JSON.parse refuses.
+      const out = await runTs({
+        item: item({}, { jobs: [J1] }),
+        files: files([
+          J1,
+          job(J1, { canonical_finding_id: 'F1' }),
+          `{"job":"${J1}","item":"i1","verdict":"NOT-FIXED","reason":"r","cost":NaN}`,
+        ]),
+      });
+      expect(out.error).toBeUndefined();
+      expect(out.queue).toContain('"state":"done"'); // not terminalized as an invalid result
+      expect(out.calls).toContain('"mark","crq-R-F1"');
+    });
+
+    it('refuses a byte-order-marked result as an invalid result, like Python', async () => {
+      const spec: Spec = {
+        item: item({}, { jobs: [J1] }),
+        files: files([
+          J1,
+          job(J1, { canonical_finding_id: 'F1' }),
+          `﻿${JSON.stringify(verdict(J1, 'NOT-FIXED'))}`,
+        ]),
+      };
+      const py = runPython(spec);
+      const ts = await runTs(spec);
+      expect(py.queue).toContain('"state":"failed"');
+      expect(py.queue).toContain('invalid repair result: ');
+      expect(ts.queue).toContain('"state":"failed"');
+      expect(ts.queue).toContain('invalid repair result: ');
+    });
+  });
+
+  // An inbox whose JSON is a dict but lacks `finding` is not malformed content:
+  // both sides read `expected['finding']` and raise KeyError, leaving the run to retry.
+  it('lets an inbox without a finding raise KeyError on both sides', async () => {
+    const noFinding = { job: J1, item: 'i1', canonical_finding_id: 'F1' };
+    const ok = await same({
+      item: item({}, { jobs: [J1] }),
+      files: files([J1, noFinding, verdict(J1, 'NOT-FIXED')]),
+    });
+    expect(ok.error).toBe('other');
+    expect(ok.queue).toContain('"state":"queued"');
+    const bad = await same({
+      item: item({}, { jobs: [J1] }),
+      files: files([J1, noFinding, fixed(J1, { commits: [] })]),
+    });
+    expect(bad.error).toBe('other');
+    expect(bad.queue).toContain('"state":"queued"');
   });
 
   it('keeps a rejected inbox out of the sibling replay on later ticks', async () => {
