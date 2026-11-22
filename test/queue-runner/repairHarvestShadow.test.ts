@@ -48,12 +48,16 @@
 // once through the mocked open-PR listing and `events.jsonl` when a backfill repair
 // is present, harvest, reset), on both sides.
 //
+// The last scenario is the one that is NOT parity: a swapped inbox row (#2313), where Python
+// and the port deliberately differ. Each side runs the same four durable processes on its own
+// and its actual ordered effects and queue are pinned separately, with no late-write policy.
+//
 // Out of scope here, pinned elsewhere: the fix-PR backlog accounting on its own
 // (publicationBacklog.test.ts), the individual policy edges of harvest
 // (repairHarvest.test.ts), of cleanup (repairCleanup.test.ts) and of enrollment
 // (publicationEnroll.test.ts). The scenarios here are the cross-component ones.
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, existsSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -885,3 +889,201 @@ describe('S6 repair-harvest shadow: a backfill fix PR held by the shared backlog
     }
   });
 });
+
+// --- a rejected (swapped) inbox across durable reloads -----------------------
+
+/** One two-job run whose second job's inbox row names another job, then is rewritten. */
+function swappedInbox(): Spec {
+  return base({
+    item: item({}, { jobs: [J1, J2] }),
+    files: {
+      ...jobFiles(J1, notFixed(J1)),
+      ...jobFiles(J2, notFixed(J2), { job: 'crq-other', canonical_finding_id: 'FSWAP' }),
+    },
+    trees: { [tree(J1)]: CLEAN, [tree(J2)]: CLEAN },
+    retained: [
+      { job: J1, head: HEAD, base: BASE },
+      { job: J2, head: HEAD, base: BASE },
+    ],
+    ticks: [
+      {},
+      { restart: true },
+      // The inbox row is corrected on disk before the third process starts.
+      { restart: true, files: { [`repair/inbox/${J2}.json`]: inbox(J2) } },
+      { restart: true },
+    ],
+  });
+}
+
+/** The ordered effects that matter here, one short string each. */
+function trail(o: Outcome): string[] {
+  const keep = new Set(['tick', 'restart', 'canonical', 'mark', 'save', 'tick-save', 'wt-remove']);
+  return o.log.flatMap((e) => {
+    if (e[0] === 'cleanup') return [`cleanup:${String(e[2])}:${e[3] === true ? 'alt' : 'base'}`];
+    if (!keep.has(String(e[0]))) return [];
+    return [e.length > 1 && e[0] !== 'save' ? `${String(e[0])}:${String(e[1])}` : String(e[0])];
+  });
+}
+
+const markPayloads = (o: Outcome): string[] =>
+  o.log.filter((e) => e[0] === 'mark').map((e) => String(e[2]));
+
+describe('S6 repair-harvest shadow: a rejected inbox replayed across durable reloads', () => {
+  // Python and the port are NOT the same here, deliberately (#2313): Python trusts an inbox
+  // row whose job id is foreign and finishes the run; the port refuses it as an invalid inbox.
+  // This fixture records what each side actually does over one run of four real processes. It
+  // settles nothing about a late finding write: a corrected inbox arrives, and neither side
+  // reads it again.
+  it('records each side separately: Python finishes the run on the foreign row, the port fails it, across reloads', () => {
+    const spec = swappedInbox();
+    const py = runPythonDurable(spec);
+    const ts = runTsDurable(spec);
+    const a = norm(py.out, py.root) as Outcome;
+    const b = norm(ts.out, ts.root) as Outcome;
+
+    // The edit landed on both sides' scratch disks: the row began as the foreign one and now
+    // names J2. Without the tick-2 `files` entry the file would still say `crq-other`.
+    const inboxRel = `repair/inbox/${J2}.json`;
+    expect(spec.files[inboxRel]).toMatchObject({ job: 'crq-other' });
+    for (const side of [py, ts]) {
+      const row = JSON.parse(readFileSync(join(side.root, 'state', inboxRel), 'utf8')) as Rec;
+      expect(row.job).toBe(J2);
+      expect(row.canonical_finding_id).toBe(`c-${J2}`);
+    }
+
+    // Python: tick 0 writes J1's outcome, then J2's result under the FOREIGN job id.
+    expect(trail(a)).toEqual([
+      'tick:0',
+      'canonical:crq-R-F1',
+      'mark:crq-R-F1',
+      'canonical:crq-other',
+      'mark:crq-other',
+      'tick-save',
+      'tick:1',
+      'restart',
+      'cleanup:crq-R-F1:base',
+      'wt-remove:crq-repair-pr7-crq-R-F1',
+      'cleanup:crq-R-F1:alt',
+      'cleanup:crq-R-F2:base',
+      'wt-remove:crq-repair-pr7-crq-R-F2',
+      'cleanup:crq-R-F2:alt',
+      'tick-save',
+      'tick:2',
+      'restart',
+      'cleanup:crq-R-F1:base',
+      'cleanup:crq-R-F1:alt',
+      'cleanup:crq-R-F2:base',
+      'cleanup:crq-R-F2:alt',
+      'tick-save',
+      'tick:3',
+      'restart',
+      'cleanup:crq-R-F1:base',
+      'cleanup:crq-R-F1:alt',
+      'cleanup:crq-R-F2:base',
+      'cleanup:crq-R-F2:alt',
+      'tick-save',
+    ]);
+
+    // The port: tick 0 writes J1, persists the terminal failure, then replays J1's outcome once.
+    // Every later process replays J1 once more (its only effect), cleans J1, and never J2.
+    expect(trail(b)).toEqual([
+      'tick:0',
+      'canonical:crq-R-F1',
+      'mark:crq-R-F1',
+      'save',
+      'mark:crq-R-F1',
+      'tick-save',
+      'tick:1',
+      'restart',
+      'mark:crq-R-F1',
+      'cleanup:crq-R-F1:base',
+      'wt-remove:crq-repair-pr7-crq-R-F1',
+      'cleanup:crq-R-F1:alt',
+      'cleanup:crq-R-F2:base',
+      'cleanup:crq-R-F2:alt',
+      'tick-save',
+      'tick:2',
+      'restart',
+      'mark:crq-R-F1',
+      'cleanup:crq-R-F1:base',
+      'cleanup:crq-R-F1:alt',
+      'cleanup:crq-R-F2:base',
+      'cleanup:crq-R-F2:alt',
+      'tick-save',
+      'tick:3',
+      'restart',
+      'mark:crq-R-F1',
+      'cleanup:crq-R-F1:base',
+      'cleanup:crq-R-F1:alt',
+      'cleanup:crq-R-F2:base',
+      'cleanup:crq-R-F2:alt',
+      'tick-save',
+    ]);
+
+    // J1's outcome payload is the same on both sides, and the port repeats it byte for byte.
+    const pyMarks = markPayloads(a);
+    const tsMarks = markPayloads(b);
+    expect(tsMarks).toHaveLength(5);
+    expect(new Set(tsMarks).size).toBe(1);
+    expect(tsMarks[0]).toBe(pyMarks[0]);
+    // Python's second write is J2's own result, filed under the foreign id; the port has none.
+    expect(JSON.parse(pyMarks[1]!)).toMatchObject({ job: J2, verdict: 'NOT-FIXED' });
+    expect(pyMarks).toHaveLength(2);
+
+    // The queue on disk after each process: Python is done, the port is terminally failed,
+    // and a reload (and the corrected inbox) changes neither.
+    expect(a.ticks.map((t) => runOf(t.files['queue.json']!).state)).toEqual([
+      'done',
+      'done',
+      'done',
+      'done',
+    ]);
+    expect(b.ticks.map((t) => runOf(t.files['queue.json']!).state)).toEqual([
+      'failed',
+      'failed',
+      'failed',
+      'failed',
+    ]);
+    for (const o of [a, b]) {
+      expect(new Set(o.ticks.map((t) => t.files['queue.json'])).size).toBe(1);
+    }
+    expect(runOf(b.ticks[0]!.files['queue.json']!)).toMatchObject({
+      error: 'repair job identity mismatch',
+      verdicts: [
+        { job: J1, verdict: 'NOT-FIXED' },
+        {
+          job: J2,
+          verdict: 'FAILED',
+          reason: 'invalid repair inbox: repair job identity mismatch',
+        },
+      ],
+    });
+    expect(
+      (runOf(a.ticks[0]!.files['queue.json']!).verdicts as Rec[]).map((v) => v.verdict),
+    ).toEqual(['NOT-FIXED', 'NOT-FIXED']);
+
+    // Trees: Python's cleanup takes both; the port's refuses the rejected job's, every process.
+    expect(removals(a)).toEqual([tree(J1), tree(J2)]);
+    expect(a.removed).toEqual([tree(J1), tree(J2)]);
+    expect(removals(b)).toEqual([tree(J1)]);
+    expect(b.removed).toEqual([tree(J1)]);
+
+    // Nothing external was done on either side: no push, no PR, no enrolment, no sibling decision,
+    // and the corrected inbox never reaches a canonical check or a finding write.
+    for (const o of [a, b]) {
+      for (const kind of ['push', 'create', 'event', 'sibling'])
+        expect(count(o, kind), kind).toBe(0);
+    }
+    expect(a.log.filter((e) => e[0] === 'canonical').map((e) => e[1])).toEqual([
+      'crq-R-F1',
+      'crq-other',
+    ]);
+    expect(b.log.filter((e) => e[0] === 'canonical').map((e) => e[1])).toEqual(['crq-R-F1']);
+  });
+});
+
+/** The single run `R` of the first queue item in a `queue.json` text. */
+function runOf(text: string): Rec {
+  const doc = JSON.parse(text) as { items: Rec[] };
+  return (doc.items[0]!.repair_runs as Record<string, Rec>).R!;
+}
