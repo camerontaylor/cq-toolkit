@@ -2361,14 +2361,21 @@ def activators_unknown(args):
     baseline_completions = read_completions(REPAIR_COMPLETIONS)
     cases = {}
 
-    def run_case(name, mutate, cleanup, tokens):
+    def case_files(paths):
+        # repair_files() tracks only fixed fixture paths; each case's own
+        # mutation path (rogue socket, drop-in, link) is recorded explicitly.
+        state = repair_files()
+        state["case_paths"] = {str(path): file_state(path) for path in paths}
+        return state
+
+    def run_case(name, paths, mutate, cleanup, tokens):
         mutate()
-        mutated_files = repair_files()
+        mutated_files = case_files(paths)
         records_before = [record_summary(path)
                           for path in records_in(REPAIR_RECORDS)]
         result = cli_activators("switch", ["--runtime", NODE_RUNTIME])
         try:
-            files_after = repair_files()
+            files_after = case_files(paths)
             text = ((result.get("stdout") or "")
                     + (result.get("stderr") or "")).lower()
             records_after = [record_summary(path)
@@ -2387,6 +2394,7 @@ def activators_unknown(args):
                     name + " modified fixture files before refusing")
             cases[name] = {
                 "command": result, "mutated_files": mutated_files,
+                "files_after": files_after,
                 "records_before": records_before,
                 "records_after": records_after,
                 "completions_after": len(completions_after),
@@ -2395,26 +2403,26 @@ def activators_unknown(args):
             cleanup()
 
     rogue = UNIT_DIR / "crq-repair.socket"
-    run_case("rogue-unit",
+    run_case("rogue-unit", [rogue],
              lambda: _write(rogue,
                             "[Socket]\nListenStream=%t/crq-repair-proof.sock\n"),
              lambda: rogue.unlink(missing_ok=True),
              ("outside the allowlisted", "socket"))
 
     rogue_link = UNIT_DIR / "default.target.wants" / REPAIR_TIMER
-    run_case("unknown-link",
+    run_case("unknown-link", [rogue_link],
              lambda: rogue_link.symlink_to("../" + REPAIR_TIMER),
              lambda: rogue_link.unlink(missing_ok=True),
              ("outside the allowlisted", "crq-repair.timer"))
 
     rogue_dropin = REPAIR_DROPIN_DIR / "20-rogue.conf"
-    run_case("unknown-dropin",
+    run_case("unknown-dropin", [rogue_dropin],
              lambda: _write(rogue_dropin, "[Unit]\nDescription=rogue\n"),
              lambda: rogue_dropin.unlink(missing_ok=True),
              ("outside the allowlisted", "unexpected drop-in"))
 
     original_mode = REPAIR_DROPIN.stat().st_mode & 0o7777
-    run_case("unsafe-metadata",
+    run_case("unsafe-metadata", [REPAIR_DROPIN],
              lambda: os.chmod(REPAIR_DROPIN, 0o666),
              lambda: os.chmod(REPAIR_DROPIN, original_mode),
              ("group- or world-writable",))
