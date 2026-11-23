@@ -1442,27 +1442,53 @@ def cmd_status(args, units=None):
     require(isinstance(expected_head, str) and SHA_RE.match(expected_head),
             "record does not name an expected HEAD")
     root = Path(args.root)
-    live_head = git(root, "rev-parse", "HEAD")
-    marker = root / MARKER_RELPATH
     units = units or RealUnits()
     final = deploy.get("final_triggers")
+    live_head = None
     live = None
     refused = None
-    if marker.exists():
-        refused = "the admission marker is present: units are held"
-    elif live_head != expected_head:
-        refused = ("live HEAD " + live_head + " is not the recorded "
-                   + expected_head)
-    elif not isinstance(final, dict) or not final:
-        refused = "record carries no trigger map to compare"
-    else:
-        live = {unit: units.state(unit) for unit in sorted(final)}
-        drifted = {unit: {"live": state, "recorded": final.get(unit)}
-                   for unit, state in live.items()
-                   if final.get(unit) != state}
-        if drifted:
-            refused = ("live trigger state differs from the record: "
-                       + json.dumps(drifted, sort_keys=True))
+    # HEAD, the marker and the trigger states must describe one deployment.
+    # A deploy holds deploy.lock and the controller lock from before its
+    # first measurement through its released health window, so claiming both
+    # here fences these observations against a concurrent deploy or
+    # controller transaction. A busy lock means a transition is in flight and
+    # the answer would mix two deployments, so report that status cannot be
+    # verified instead of answering from observations that straddle it.
+    with contextlib.ExitStack() as guard:
+        try:
+            controller = load_module("crq_deploy_runbook_status_controller",
+                                     OPS_DIR / "deploy-controller.py")
+        except Refused as exc:
+            refused = ("status cannot be verified during a deployment "
+                       "transition: " + str(exc))
+        else:
+            try:
+                deploy_lock = DeployLock(root)
+                deploy_lock.acquire()
+                guard.callback(deploy_lock.release)
+                guard.enter_context(
+                    controller.Effects(root, run_dir).controller_lock())
+            except (Refused, controller.Refused) as exc:
+                refused = ("status cannot be verified during a deployment "
+                           "transition: " + str(exc))
+            else:
+                live_head = git(root, "rev-parse", "HEAD")
+                marker = root / MARKER_RELPATH
+                if marker.exists():
+                    refused = "the admission marker is present: units are held"
+                elif live_head != expected_head:
+                    refused = ("live HEAD " + live_head + " is not the recorded "
+                               + expected_head)
+                elif not isinstance(final, dict) or not final:
+                    refused = "record carries no trigger map to compare"
+                else:
+                    live = {unit: units.state(unit) for unit in sorted(final)}
+                    drifted = {unit: {"live": state, "recorded": final.get(unit)}
+                               for unit, state in live.items()
+                               if final.get(unit) != state}
+                    if drifted:
+                        refused = ("live trigger state differs from the record: "
+                                   + json.dumps(drifted, sort_keys=True))
     print(json.dumps({"operation": "status",
                       "ok": refused is None,
                       "outcome": outcome,

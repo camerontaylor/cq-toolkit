@@ -1010,6 +1010,49 @@ class DeployTests(DeployFixture, unittest.TestCase):
         self.assertIn("marker is present", json.loads(
             output.getvalue())["refusal"])
 
+    def test_status_refuses_while_a_deploy_holds_the_deploy_lock(self):
+        run = self.build()
+        run.run()
+        status_args = rb.build_parser().parse_args(
+            ["status", "--run-dir", str(run.run_dir),
+             "--root", str(self.root)])
+        holder = rb.DeployLock(self.root)
+        holder.acquire()
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(
+                    rb.cmd_status(status_args, units=self.units), 1)
+        finally:
+            holder.release()
+        document = json.loads(output.getvalue())
+        self.assertFalse(document["ok"])
+        self.assertIn("cannot be verified during a deployment transition",
+                      document["refusal"])
+        self.assertIn("deployment lock", document["refusal"])
+        self.assertIsNone(document["live_head"])
+        self.assertIsNone(document["live_triggers"])
+
+    def test_status_refuses_while_a_controller_run_holds_the_lock(self):
+        run = self.build()
+        run.run()
+        status_args = rb.build_parser().parse_args(
+            ["status", "--run-dir", str(run.run_dir),
+             "--root", str(self.root)])
+        effects = dc.Effects(self.root, Path(run.run_dir))
+        with effects.controller_lock():
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(
+                    rb.cmd_status(status_args, units=self.units), 1)
+        document = json.loads(output.getvalue())
+        self.assertFalse(document["ok"])
+        self.assertIn("cannot be verified during a deployment transition",
+                      document["refusal"])
+        self.assertIn("controller lock", document["refusal"])
+        # The refused probe released the deploy lock it had already taken.
+        probe = rb.DeployLock(self.root)
+        probe.acquire()
+        probe.release()
+
     def test_main_reports_an_interrupt_as_one_json_document(self):
         class Interrupted:
             def __init__(self, args):
