@@ -5121,7 +5121,7 @@ def cmd_verify(args):
 
 def cmd_destroy(args):
     run = vm.load_run(pathlib.Path(args.state_dir).expanduser().resolve(),
-                      args.run_id)
+                      args.run_id, require_process=False)
     result = vm.stop_owned_process(run, purge=args.purge)
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result["stopped"] else 1
