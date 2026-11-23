@@ -929,16 +929,30 @@ class GuestFixtureAdapter:
         queue = self._observe_queue_drain()
         # Capture the completion log at the settled fence. Any work already
         # recorded before this point is bounded and reported truthfully; no
-        # completion after this baseline can be credited to the fence.
-        completion_records = self._read_completions()
-        completion_baseline = {
-            "count": len(completion_records),
-            "sequences": [record["sequence"] for record in completion_records],
-            "invocations": [record["invocation"]
-                            for record in completion_records],
-            "max_sequence": max((record["sequence"]
-                                 for record in completion_records), default=0),
-        }
+        # completion after this baseline can be credited to the fence. A
+        # malformed, oversized or unreadable log is invalid evidence, not a
+        # fence fault: this method is also the rollback fence, and a refusal
+        # here would stop the controller before restore() with the unit left
+        # masked. Invalid evidence still blocks installation and completion
+        # credit on the forward switch through sequence() and completion(),
+        # and the queue observation below still refuses live or unknown
+        # ownership.
+        try:
+            completion_records = self._read_completions()
+            completion_baseline = {
+                "count": len(completion_records),
+                "sequences": [record["sequence"]
+                              for record in completion_records],
+                "invocations": [record["invocation"]
+                                for record in completion_records],
+                "max_sequence": max((record["sequence"]
+                                     for record in completion_records),
+                                    default=0),
+            }
+        except (self.error, ValueError) as exc:
+            completion_baseline = {"count": None, "sequences": None,
+                                   "invocations": None, "max_sequence": None,
+                                   "invalid": str(exc)[:200]}
         self.last_drain = {"before": before, "masked": masked,
                            "stopped": stopped,
                            "service_stop": service_stop,
