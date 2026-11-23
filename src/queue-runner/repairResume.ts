@@ -1,7 +1,7 @@
 /**
  * Candidate-worktree selection for a resumed repair job: `resume_worktree`
- * (apps/crq-python/crq_repair.py:472-483) and the missing-candidate refusal
- * `process` applies right after it (crq_repair.py:508-521).
+ * (apps/crq-python/crq_repair.py:472-493) and the missing-candidate refusal
+ * `process` applies right after it (crq_repair.py:517-530).
  *
  * DECISION ONLY. The module never saves a result, removes or writes a
  * worktree, touches the queue, runs a judge or the mechanical gate, or spawns

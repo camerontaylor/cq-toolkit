@@ -2,7 +2,7 @@
  * Differential test for the resumed-repair candidate decision
  * (src/queue-runner/repairResume.ts) against Python's
  * `crq_repair.resume_worktree` and the missing-candidate refusal at the top of
- * `crq_repair.process` (crq_repair.py:472-483, 508-521).
+ * `crq_repair.process` (crq_repair.py:472-493, 517-530).
  *
  * Offline and non-mutating by construction. Every scenario is a throwaway
  * fixture tree. The Python oracle runs the real `resume_worktree` and the real
