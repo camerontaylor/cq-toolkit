@@ -599,6 +599,9 @@ export async function assertAddressDependencyMetadata(
     '.yarnrc',
     '.yarnrc.yml',
     'bunfig.toml',
+    // pnpm 10 loads `.pnpmfile.cjs` next to the lockfile, and its readPackage
+    // hook changes which versions resolution selects, so it must match too.
+    '.pnpmfile.cjs',
   ])
     await compare(path);
 
@@ -643,8 +646,15 @@ export async function assertAddressDependencyMetadata(
   for (const path of [...members].sort()) {
     await compare(path, true);
     // A member lockfile (pnpm without a shared workspace lockfile, or a nested
-    // project) selects versions this checkout's installed tree may not match.
-    for (const config of [...dependencyLockfiles, '.npmrc', '.yarnrc.yml', 'bunfig.toml'])
+    // project) selects versions this checkout's installed tree may not match,
+    // and so does the `.pnpmfile.cjs` hook pnpm loads beside that lockfile.
+    for (const config of [
+      ...dependencyLockfiles,
+      '.npmrc',
+      '.yarnrc.yml',
+      'bunfig.toml',
+      '.pnpmfile.cjs',
+    ])
       await compare(`${dirname(path)}/${config}`);
   }
 }

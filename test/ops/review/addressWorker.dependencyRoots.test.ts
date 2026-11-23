@@ -602,7 +602,7 @@ describe('review.address candidate isolation', () => {
     },
   );
 
-  test.each(['pnpm-lock.yaml', 'pnpm-workspace.yaml'])(
+  test.each(['pnpm-lock.yaml', 'pnpm-workspace.yaml', '.pnpmfile.cjs'])(
     'changed %s refuses dependency reuse',
     async (path) => {
       const f = await fixture(undefined, '', { installedDependencies: 'matching' });
