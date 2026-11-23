@@ -34,6 +34,7 @@ import { parseJsonValue, toPlainJsonRetainingNumbers } from '../../src/policy/cr
 import { PyError } from '../../src/queue-runner/pyErrors.js';
 import {
   decideResumeCandidate,
+  type RepairResumeOwner,
   type RepairResumeProbes,
   selectResumeWorktree,
 } from '../../src/queue-runner/repairResume.js';
@@ -83,6 +84,64 @@ const at = (name: string) => (c: Ctx) => c.w(name);
 const JUDGE = { pending_judge: true };
 const MECH = { pending_mechanical: true };
 const DISPATCH = { dispatch_pending: true };
+
+/** Recorded trees the old selector adopted for lack of an ownership check. */
+const FOREIGN: ReadonlyArray<{
+  readonly label: string;
+  readonly trees: Readonly<Record<string, GitEntry>>;
+  readonly record: (c: Ctx) => string;
+}> = [
+  {
+    label: 'a tree outside WT_ROOT',
+    trees: { '../outside-tree': 'file' },
+    record: at('../outside-tree'),
+  },
+  {
+    label: 'the owned name outside WT_ROOT',
+    trees: { [`../elsewhere/${BASE}`]: 'file' },
+    record: at(`../elsewhere/${BASE}`),
+  },
+  {
+    label: 'the owned name nested below WT_ROOT',
+    trees: { [`sub/${BASE}`]: 'file' },
+    record: at(`sub/${BASE}`),
+  },
+  {
+    label: 'WT_ROOT itself',
+    trees: { '': 'file' },
+    record: at(''),
+  },
+  {
+    label: 'a foreign job id',
+    trees: { [`crq-repair-${ITEM}-crq-R-F2`]: 'dir' },
+    record: at(`crq-repair-${ITEM}-crq-R-F2`),
+  },
+  {
+    label: 'a foreign item id',
+    trees: { [`crq-repair-pr2-merged-${JOB}`]: 'file' },
+    record: at(`crq-repair-pr2-merged-${JOB}`),
+  },
+  {
+    label: 'the legacy crq-repair-<item> name',
+    trees: { [`crq-repair-${ITEM}`]: 'file' },
+    record: at(`crq-repair-${ITEM}`),
+  },
+  {
+    label: 'a generic foreign name',
+    trees: { 'crq-repair-other-job': 'dir' },
+    record: at('crq-repair-other-job'),
+  },
+  {
+    label: 'an -A2 of an -A2 name',
+    trees: { [`${A2}-A2`]: 'file' },
+    record: at(`${A2}-A2`),
+  },
+  {
+    label: 'an owned name with a trailing suffix',
+    trees: { [`${BASE}-A3`]: 'file' },
+    record: at(`${BASE}-A3`),
+  },
+];
 
 const SCENARIOS: readonly Scenario[] = [
   // --- candidate selection, including the -A2 sibling -----------------------
@@ -169,10 +228,16 @@ const SCENARIOS: readonly Scenario[] = [
   },
   // --- path resolution -------------------------------------------------------
   {
-    name: 'recorded path is a symlink to a valid -A2 checkout: adopted as the target',
+    name: 'recorded path named -A2 but a symlink to a foreign-named checkout: not owned, refused',
     trees: { [BASE]: 'file', 'real-a2': 'file' },
     links: { [A2]: 'real-a2' },
     result: res(JUDGE, at(A2)),
+  },
+  {
+    name: 'recorded path is a foreign-named symlink to the owned -A2 checkout: adopted as the target',
+    trees: { [BASE]: 'file', [A2]: 'file' },
+    links: { alias: A2 },
+    result: res(JUDGE, at('alias')),
   },
   {
     name: 'recorded path is a symlink to the base tree: same tree, no refusal',
@@ -197,18 +262,32 @@ const SCENARIOS: readonly Scenario[] = [
     wt: (c) => `${c.w(BASE)}/`,
     result: res(JUDGE, at(BASE)),
   },
+  // --- ownership: formerly adopted, now refused or kept ----------------------
+  ...FOREIGN.flatMap(({ label, trees, record }): Scenario[] => [
+    {
+      name: `pending judge, ${label} (has .git): not owned, refused`,
+      trees: { [BASE]: 'file', ...trees },
+      result: res(JUDGE, record),
+    },
+    {
+      name: `pending mechanical, ${label} (has .git): not owned, refused`,
+      trees: { [BASE]: 'file', ...trees },
+      result: res(MECH, record),
+    },
+    {
+      name: `dispatch_pending alone, ${label} (has .git): not adopted, tree in hand kept`,
+      trees: { [BASE]: 'file', ...trees },
+      result: res(DISPATCH, record),
+    },
+    {
+      name: `running in the -A2 tree, ${label} recorded: refused, not adopted`,
+      trees: { [BASE]: 'file', [A2]: 'file', ...trees },
+      wt: at(A2),
+      result: res(JUDGE, record),
+    },
+  ]),
   {
-    name: 'a tree outside WT_ROOT is adopted: no ownership check',
-    trees: { [BASE]: 'file', '../outside-tree': 'file' },
-    result: res(JUDGE, at('../outside-tree')),
-  },
-  {
-    name: 'a foreign job tree is adopted: no ownership check',
-    trees: { [BASE]: 'file', 'crq-repair-other-job': 'dir' },
-    result: res(MECH, at('crq-repair-other-job')),
-  },
-  {
-    name: 'non-ASCII tree name',
+    name: 'non-ASCII tree name: not owned, refused',
     trees: { [BASE]: 'file', 'crq-repair-naïve-ß-\u{1f600}': 'file' },
     result: res(JUDGE, at('crq-repair-naïve-ß-\u{1f600}')),
   },
@@ -398,7 +477,7 @@ out = []
 for s in json.loads(sys.argv[2]):
     root = Path(s['root'])
     service.ROOT = root
-    config = {'repair': {'roles': {}}}
+    config = {'repair': {'roles': {}}, 'worktree_root': s['wt_root']}
     job = {'job': s['job'], 'item': s['item'], 'repair_base': 'a' * 40, 'source_sha': 'c' * 40, 'finding_sha256': 'd' * 64}
     trace = []
     effects = []
@@ -442,7 +521,7 @@ for s in json.loads(sys.argv[2]):
          mock.patch.object(service, 'atomic', fake_atomic), \
          mock.patch.object(service, 'retain', fake_retain):
         progress = json.loads((root / 'state' / 'repair' / s['job'] / 'progress.json').read_text())
-        direct = run(lambda: str(service.resume_worktree(progress, s['wt'])))
+        direct = run(lambda: str(service.resume_worktree(progress, s['wt'], s['wt_root'], s['item'], s['job'])))
         entry = run(lambda: service.process(config, job, s['wt']))
         # process returns the refusal result; a Stop leaves the first effect.
         if 'error' not in entry:
@@ -481,7 +560,13 @@ function normalizeOracle(raw: Record<string, unknown>, refusalOnly: boolean): Ou
 }
 
 function runPython(laid: readonly Laid[]): Observed[] {
-  const specs = laid.map(({ ctx, wt }) => ({ root: ctx.root, wt, job: JOB, item: ITEM }));
+  const specs = laid.map(({ ctx, wt }) => ({
+    root: ctx.root,
+    wt,
+    wt_root: ctx.wtRoot,
+    job: JOB,
+    item: ITEM,
+  }));
   const stdout = execFileSync('python3', ['-I', '-c', PY, PYTHON_DIR, JSON.stringify(specs)], {
     encoding: 'utf8',
     maxBuffer: 16 * 1024 * 1024,
@@ -522,6 +607,12 @@ function fileProbes(laid: Laid, trace: Probe[]): RepairResumeProbes {
   };
 }
 
+const ownerOf = (laid: Laid): RepairResumeOwner => ({
+  worktreeRoot: laid.ctx.wtRoot,
+  itemId: ITEM,
+  jobId: JOB,
+});
+
 const plain = (text: string): Record<string, unknown> =>
   toPlainJsonRetainingNumbers(parseJsonValue(text)) as Record<string, unknown>;
 
@@ -542,7 +633,7 @@ async function runTs(laid: Laid): Promise<Observed> {
   const processTrace: Probe[] = [];
   const processProbes = fileProbes(laid, processTrace);
   const decided = await settle(processTrace, async () => {
-    const decision = await decideResumeCandidate(resultOf(), laid.wt, processProbes);
+    const decision = await decideResumeCandidate(resultOf(), laid.wt, processProbes, ownerOf(laid));
     return decision.kind === 'proceed'
       ? { proceed: decision.worktree }
       : { refuse: decision.reason, pending: decision.pending };
@@ -550,7 +641,7 @@ async function runTs(laid: Laid): Promise<Observed> {
   const directTrace: Probe[] = [];
   const directProbes = fileProbes(laid, directTrace);
   const direct = await settle(directTrace, async () => ({
-    proceed: await selectResumeWorktree(resultOf(), laid.wt, directProbes),
+    proceed: await selectResumeWorktree(resultOf(), laid.wt, directProbes, ownerOf(laid)),
   }));
   return { process: decided, direct };
 }
@@ -633,40 +724,118 @@ describe('decideResumeCandidate with synthetic probes', () => {
     };
   };
 
+  const OWNER: RepairResumeOwner = { worktreeRoot: '/w', itemId: 'i', jobId: 'j' };
+  const OWNED = '/w/crq-repair-i-j';
+  const OWNED_A2 = `${OWNED}-A2`;
+
   it('asks nothing when no resume state is set', async () => {
     const { probes: p, calls } = probes();
-    const decision = await decideResumeCandidate({ worktree: '/w/a-A2' }, '/w/a', p);
-    expect(decision).toEqual({ kind: 'proceed', worktree: '/w/a', adopted: false });
+    const decision = await decideResumeCandidate({ worktree: OWNED_A2 }, OWNED, p, OWNER);
+    expect(decision).toEqual({ kind: 'proceed', worktree: OWNED, adopted: false });
     expect(calls).toEqual([]);
   });
 
-  it('adopts a valid candidate and reports it as adopted', async () => {
+  it('adopts an owned candidate and reports it as adopted', async () => {
     const { probes: p, calls } = probes();
     const decision = await decideResumeCandidate(
-      { pending_judge: true, worktree: '/w/a-A2' },
-      '/w/a',
+      { pending_judge: true, worktree: OWNED_A2 },
+      OWNED,
       p,
+      OWNER,
     );
-    expect(decision).toEqual({ kind: 'proceed', worktree: '/w/a-A2', adopted: true });
+    expect(decision).toEqual({ kind: 'proceed', worktree: OWNED_A2, adopted: true });
     expect(calls).toEqual([
-      'resolve /w/a-A2',
-      'resolve /w/a',
-      'is_dir /w/a-A2',
-      'exists /w/a-A2/.git',
-      'resolve /w/a-A2',
-      'resolve /w/a-A2',
+      `resolve ${OWNED_A2}`,
+      `resolve ${OWNED}`,
+      'resolve /w',
+      `is_dir ${OWNED_A2}`,
+      `exists ${OWNED_A2}/.git`,
+      `resolve ${OWNED_A2}`,
+      `resolve ${OWNED_A2}`,
     ]);
   });
 
-  it('names the judge stage before the mechanical stage', async () => {
-    const { probes: p } = probes({ isDirectory: () => false });
-    const both = { pending_judge: 1, pending_mechanical: 1, worktree: '/w/a-A2' };
-    expect(await decideResumeCandidate(both, '/w/a', p)).toEqual({
+  it('adopts the owned base tree while running in -A2', async () => {
+    const { probes: p } = probes();
+    const decision = await decideResumeCandidate(
+      { pending_mechanical: true, worktree: OWNED },
+      OWNED_A2,
+      p,
+      OWNER,
+    );
+    expect(decision).toEqual({ kind: 'proceed', worktree: OWNED, adopted: true });
+  });
+
+  it('refuses a foreign candidate before asking whether it is a directory', async () => {
+    const { probes: p, calls } = probes();
+    const decision = await decideResumeCandidate(
+      { pending_judge: true, worktree: '/w/crq-repair-i-other' },
+      OWNED,
+      p,
+      OWNER,
+    );
+    expect(decision).toEqual({
       kind: 'refuse-missing-candidate',
       pending: 'judge',
       reason: 'pending judge worktree unavailable; needs human',
     });
-    expect(await decideResumeCandidate({ ...both, pending_judge: 0 }, '/w/a', p)).toEqual({
+    expect(calls.some((c) => c.startsWith('is_dir') || c.startsWith('exists'))).toBe(false);
+  });
+
+  it('keeps the tree in hand for a foreign candidate under dispatch_pending alone', async () => {
+    const { probes: p } = probes();
+    const decision = await decideResumeCandidate(
+      { dispatch_pending: true, worktree: '/w/crq-repair-i-other' },
+      OWNED,
+      p,
+      OWNER,
+    );
+    expect(decision).toEqual({ kind: 'proceed', worktree: OWNED, adopted: false });
+  });
+
+  it('identifies ownership by the resolved path, not the recorded spelling', async () => {
+    // A foreign-named link whose target is the owned -A2 tree resolves to it.
+    const alias = probes({ resolve: (x) => (x === '/w/alias' ? OWNED_A2 : x) });
+    expect(
+      await decideResumeCandidate(
+        { pending_judge: true, worktree: '/w/alias' },
+        OWNED,
+        alias.probes,
+        OWNER,
+      ),
+    ).toEqual({ kind: 'proceed', worktree: OWNED_A2, adopted: true });
+    // An owned-named link whose target is elsewhere does not.
+    const escape = probes({ resolve: (x) => (x === OWNED_A2 ? '/elsewhere/tree' : x) });
+    expect(
+      await decideResumeCandidate(
+        { pending_judge: true, worktree: OWNED_A2 },
+        OWNED,
+        escape.probes,
+        OWNER,
+      ),
+    ).toMatchObject({ kind: 'refuse-missing-candidate', pending: 'judge' });
+  });
+
+  it('compares against the resolved worktree root', async () => {
+    const { probes: p } = probes({ resolve: (x) => (x === '/link-root' ? '/w' : x) });
+    const decision = await decideResumeCandidate(
+      { pending_judge: true, worktree: OWNED_A2 },
+      OWNED,
+      p,
+      { ...OWNER, worktreeRoot: '/link-root' },
+    );
+    expect(decision).toEqual({ kind: 'proceed', worktree: OWNED_A2, adopted: true });
+  });
+
+  it('names the judge stage before the mechanical stage', async () => {
+    const { probes: p } = probes({ isDirectory: () => false });
+    const both = { pending_judge: 1, pending_mechanical: 1, worktree: OWNED_A2 };
+    expect(await decideResumeCandidate(both, OWNED, p, OWNER)).toEqual({
+      kind: 'refuse-missing-candidate',
+      pending: 'judge',
+      reason: 'pending judge worktree unavailable; needs human',
+    });
+    expect(await decideResumeCandidate({ ...both, pending_judge: 0 }, OWNED, p, OWNER)).toEqual({
       kind: 'refuse-missing-candidate',
       pending: 'mechanical',
       reason: 'pending mechanical worktree unavailable; needs human',
@@ -676,17 +845,18 @@ describe('decideResumeCandidate with synthetic probes', () => {
   it('never refuses a dispatch_pending-only result', async () => {
     const { probes: p } = probes({ isDirectory: () => false });
     const decision = await decideResumeCandidate(
-      { dispatch_pending: true, worktree: '/w/a-A2' },
-      '/w/a',
+      { dispatch_pending: true, worktree: OWNED_A2 },
+      OWNED,
       p,
+      OWNER,
     );
-    expect(decision).toEqual({ kind: 'proceed', worktree: '/w/a', adopted: false });
+    expect(decision).toEqual({ kind: 'proceed', worktree: OWNED, adopted: false });
   });
 
   it('raises a Python TypeError for a truthy non-string worktree', async () => {
     const { probes: p, calls } = probes();
     await expect(
-      decideResumeCandidate({ pending_judge: true, worktree: 5 }, '/w/a', p),
+      decideResumeCandidate({ pending_judge: true, worktree: 5 }, OWNED, p, OWNER),
     ).rejects.toEqual(
       new PyError(
         'TypeError',

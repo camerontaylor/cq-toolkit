@@ -428,35 +428,41 @@ renders as CPython does because the real `createPr` binding does not exist yet.
 
 S5b resume candidate (inactive, decision only): `src/queue-runner/repairResume.ts`
 models `resume_worktree` and the missing-candidate refusal at the top of
-`crq_repair.process` (`crq_repair.py:472-483,508-521`) over injected read-only probes
-(`resolve`, `is_dir`, `exists`). It answers with the tree to carry on with (the
-recorded `-A2` checkout is adopted only when it resolves differently, is a directory and
-has a `.git` entry; there is no ownership check) or a typed
+`crq_repair.process` (`crq_repair.py`, `resume_worktree` and the pending-stage refusal in
+`process`) over injected read-only probes (`resolve`, `is_dir`, `exists`) and the job's
+owner identity (`worktreeRoot`, `itemId`, `jobId`; Python's `config['worktree_root']`,
+`job['item']`, `job['job']`). It answers with the tree to carry on with or a typed
 `refuse-missing-candidate` naming the pending `judge` (reported first) or `mechanical`
 stage. It saves nothing, runs no judge or mechanical gate and mutates no worktree or
 queue; the caller still owns Python's `atomic(result.json)`.
-`test/queue-runner/repairResume.test.ts` replays 63 named fake-fixture differential
-scenarios against the real `resume_worktree` and `process` (with `atomic` and `retain`
-stubbed to record the first effect and stop), comparing the chosen tree, the refusal, the Python
-`TypeError`/`ValueError` text and the ordered `resolve`/`is_dir`/`exists` probe trace.
-The file holds 71 tests: those 63 scenarios plus 8 that never run Python (the
-scenario-uniqueness guard, the path-coverage guard, a snapshot-discrimination test and
-5 synthetic-probe tests).
-Relative recorded paths are not modelled (resolution is the probe's cwd).
 
-S5b resume ownership gap (evidence only, no behavior change):
-`test/queue-runner/repairResumeOwnership.test.ts` (17 synthetic tests, no filesystem,
-Git, Python, judge or network) feeds the same recorded worktrees to
-`decideRepairCleanup`, used as the ownership oracle, and to `decideResumeCandidate`.
-The established contract (`recovery.py:70-72`, `retain.py:29`) owns only
-`crq-repair-<item>-<job>` and `...-A2` directly under the resolved `WT_ROOT`; the harvest
-validator also accepts the legacy `crq-repair-<item>`. The owned base and `-A2` controls
-agree, but the selector adopts every foreign job or item, legacy, unrelated, `-A2-A2`,
-outside-root, nested and `WT_ROOT` record that has a `.git` entry (9 pinned divergences),
-and refuses only a missing candidate. Open gate before any wiring: the policy for a
-resumed tree is undecided (adopt as Python does, or require the owned name), and no
-Python contract for Git registration exists (nothing runs `git worktree list`), so a
-registration flag in the fixtures is synthetic and provably inert.
+Resume ownership (Python and TS change together): the recorded tree is adopted only when
+it resolves differently from the tree in hand, is owned, is a directory and has a `.git`
+entry. Owned is the rule `recovery.py:70-72` and `retain.cleanup_harvested` already apply:
+the resolved tree sits directly under the resolved worktree root and is named
+`crq-repair-<item>-<job>` or that name plus `-A2`. A foreign job or item, the legacy
+`crq-repair-<item>` name, an `-A2-A2` or `-A3` name, a tree outside or nested below the
+root, the root itself, and an owned-looking symlink whose target is not so named are not
+adopted. Because the tree in hand then differs from the recorded one, a pending judge or
+mechanical stage is refused with the existing `pending <stage> worktree unavailable; needs
+human` result (never judged or verified in a foreign tree), and `dispatch_pending` alone
+keeps the tree in hand and so never retains a foreign tree. A foreign-named symlink whose
+target is the owned `-A2` tree still resolves to it and is adopted. Nothing reads `git
+worktree list`: `.git` existence remains the only registration evidence, and a registration
+flag in the fixtures is synthetic and provably inert.
+
+Evidence: `test/queue-runner/repairResume.test.ts` replays named fake-fixture differential
+scenarios against the real `resume_worktree` and `process` (with `atomic` and `retain`
+stubbed to record the first effect and stop), comparing the chosen tree, the refusal, the
+Python `TypeError`/`ValueError` text and the ordered `resolve`/`is_dir`/`exists` probe
+trace (the worktree-root resolve is part of the trace); every formerly adopted foreign,
+outside, nested, legacy and `-A2-A2` name is replayed as a judge, mechanical,
+`dispatch_pending` and running-in-`-A2` case. `test/queue-runner/repairResumeOwnership.test.ts`
+feeds synthetic records to `decideRepairCleanup`, used as the ownership oracle, and to
+`decideResumeCandidate`, which now agree on every record.
+`apps/crq-python/test_repair_resume_ownership.py` pins the same names and the refusal and
+fallback effects on the Python side with throwaway directories. Relative recorded paths are
+not modelled (resolution is the probe's cwd).
 
 Still unwired after S6-l through S6-t: `push` (the leased remote write),
 `createPr` (forge write) and `hackDetector`, plus the binding of any of these, or
