@@ -155,7 +155,7 @@ _UNESCAPE_RE = re.compile(r"\\x([0-9A-Fa-f]{2})")
 
 
 def _unescape_instance(instance):
-    """Undo systemd's unit-name escaping on one instance name.
+    r"""Undo systemd's unit-name escaping on one instance name.
 
     The instance of ``ingress@crq\x2dtick.socket`` is the text
     ``crq\x2dtick``: systemd escaped ``-`` when it named the unit. Specifier
