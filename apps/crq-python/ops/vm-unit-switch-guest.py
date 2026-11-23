@@ -2361,21 +2361,22 @@ def activators_unknown(args):
     baseline_completions = read_completions(REPAIR_COMPLETIONS)
     cases = {}
 
-    def case_files(paths):
-        # repair_files() tracks only fixed fixture paths; each case's own
-        # mutation path (rogue socket, drop-in, link) is recorded explicitly.
-        state = repair_files()
-        state["case_paths"] = {str(path): file_state(path) for path in paths}
-        return state
+    def case_paths(paths):
+        # repair_files() keeps its fixed inventory shape (the host verifier
+        # compares it with the baseline). Each case's own mutation path
+        # (rogue socket, drop-in, link) is recorded separately.
+        return {str(path): file_state(path) for path in paths}
 
     def run_case(name, paths, mutate, cleanup, tokens):
         mutate()
-        mutated_files = case_files(paths)
+        mutated_files = repair_files()
+        paths_before = case_paths(paths)
         records_before = [record_summary(path)
                           for path in records_in(REPAIR_RECORDS)]
         result = cli_activators("switch", ["--runtime", NODE_RUNTIME])
         try:
-            files_after = case_files(paths)
+            files_after = repair_files()
+            paths_after = case_paths(paths)
             text = ((result.get("stdout") or "")
                     + (result.get("stderr") or "")).lower()
             records_after = [record_summary(path)
@@ -2390,11 +2391,14 @@ def activators_unknown(args):
                     name + " wrote a controller record before refusing")
             require(len(completions_after) == len(baseline_completions),
                     name + " completed fixture work before refusing")
-            require(files_after == mutated_files,
+            require(files_after == mutated_files
+                    and paths_after == paths_before,
                     name + " modified fixture files before refusing")
             cases[name] = {
                 "command": result, "mutated_files": mutated_files,
                 "files_after": files_after,
+                "case_paths_before": paths_before,
+                "case_paths_after": paths_after,
                 "records_before": records_before,
                 "records_after": records_after,
                 "completions_after": len(completions_after),
