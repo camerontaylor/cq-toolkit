@@ -19,20 +19,27 @@ def source_settings(path):
     return overlay['fleet_reader']
 
 
-def _machine_error(kind, subcommand, message, exit_code):
-    """One JSON error artifact on stdout; stderr stays empty (doctrine I1)."""
+def _machine_error(kind, subcommand, message, exit_code, machine=True):
+    """One JSON error artifact on stdout in every mode (doctrine I1).
+
+    Machine mode keeps stderr empty; otherwise a one-line narration goes to
+    stderr. The exit code is unchanged: 2 for usage, 1 for operation failure.
+    """
     artifact = {'error': {'kind': kind, 'subcommand': subcommand,
                           'message': message, 'exitCode': exit_code}}
     sys.stdout.write(json.dumps(artifact, sort_keys=True, indent=2) + '\n')
+    if not machine:
+        sys.stderr.write(subcommand + ': ' + message + '\n')
     raise SystemExit(exit_code)
 
 
 class _MachineArgumentParser(argparse.ArgumentParser):
     """Argument parser whose usage errors honor machine mode (doctrine I1).
 
-    `--json` is detected in argv before parsing; in machine mode an argparse
-    usage error writes one JSON error artifact to stdout, keeps stderr empty
-    and exits 2 instead of narrating on stderr.
+    `--json` is detected in argv before parsing. A usage error always writes
+    one JSON error artifact to stdout and exits 2; narration goes to stderr
+    only outside machine mode. In machine mode `--help` prints one JSON help
+    artifact instead of argparse's plain text.
     """
 
     def __init__(self, *args, machine=False, subcommand=None, **kwargs):
@@ -45,9 +52,15 @@ class _MachineArgumentParser(argparse.ArgumentParser):
         self._subcommand = subcommand
 
     def error(self, message):
-        if self._machine:
-            _machine_error('usage', self._subcommand, message, 2)
-        super().error(message)
+        _machine_error('usage', self._subcommand, message, 2, self._machine)
+
+    def print_help(self, file=None):
+        if not self._machine:
+            return super().print_help(file)
+        artifact = {'help': {'subcommand': self._subcommand,
+                             'usage': self.format_usage().strip(),
+                             'description': self.description}}
+        (file or sys.stdout).write(json.dumps(artifact, sort_keys=True, indent=2) + '\n')
 
 
 def main(argv=None):
@@ -70,7 +83,8 @@ def main(argv=None):
         if result.returncode:
             raise RuntimeError('queue-host summary unavailable; previous snapshot remains stale')
         summary = json.loads(result.stdout)
-        if not isinstance(summary, dict) or not summary.get('last_tick') or summary.get('schema_version') != 2:
+        if not isinstance(summary, dict) or not summary.get('last_tick') \
+                or not isinstance(summary['last_tick'], str) or summary.get('schema_version') != 2:
             raise ValueError('queue-host has not published a valid completed tick summary')
         dt.datetime.fromisoformat(summary['last_tick'].replace('Z', '+00:00'))
         summary['source_host'] = settings['ssh_host']
@@ -91,9 +105,7 @@ def main(argv=None):
                 Path(name).unlink(missing_ok=True)
     except (RuntimeError, ValueError, OSError, KeyError,
             subprocess.TimeoutExpired) as exc:
-        if machine:
-            _machine_error('failed', 'fleet-reader', str(exc)[:400], 1)
-        parser.exit(1, 'fleet-reader: ' + str(exc) + '\n')
+        _machine_error('failed', 'fleet-reader', str(exc)[:400], 1, machine)
     print(json.dumps(summary, sort_keys=True, indent=2))
     if not machine:
         print('queue-host summary mirrored; completed tick ' + summary['last_tick'], file=sys.stderr)
