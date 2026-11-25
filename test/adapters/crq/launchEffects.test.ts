@@ -39,6 +39,7 @@ async function build(
     worktreeRoot?: string;
     executableArgs?: string[];
     entry?: string;
+    root?: string;
   } = {},
 ) {
   const stateRoot = await mkdtemp(join(tmpdir(), 'crq-launch-'));
