@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -54,7 +54,7 @@ async function build(
       config: { primaryRepo: 'Owner/Repo', repos: [], localReviewAgingMinutes: 60 },
       nowMicros: 0n,
     }),
-    root: stateRoot,
+    root: over.root ?? stateRoot,
     entry: over.entry ?? '/crq.js',
     ...(over.executableArgs ? { executableArgs: over.executableArgs } : {}),
     workRecords: join(stateRoot, 'work', 'records.jsonl'),
@@ -182,6 +182,46 @@ describe('fileLaunchEffects', () => {
       const text = await readFile(out, 'utf8').catch(() => '');
       if (text) {
         expect(JSON.parse(text)).toEqual(['_review', 'r5']);
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    throw new Error('child never ran');
+  });
+
+  it('removeWorktree still prunes and deletes the branch when the directory has vanished', async () => {
+    const { clone, head } = await realClone();
+    git(clone, 'branch', 'crq/wt-gone', head);
+    const { effects } = await build({ primaryClone: clone });
+    await effects.removeWorktree(join(tmpdir(), 'crq-wt-does-not-exist'), 'crq/wt-gone', null);
+    expect(git(clone, 'branch', '--list', 'crq/wt-gone')).toBe('');
+  });
+
+  it('checks out in an explicit clone, not the primary clone', async () => {
+    const { clone, head } = await realClone();
+    const root = await mkdtemp(join(tmpdir(), 'crq-wtroot-'));
+    const { effects } = await build({ primaryClone: '/nonexistent-primary', worktreeRoot: root });
+    const wt = await effects.checkout({ runId: 'rx', head, clone });
+    expect(git(wt.path, 'rev-parse', 'HEAD')).toBe(head);
+    expect(git(clone, 'branch', '--list', 'crq/wt-rx')).toContain('crq/wt-rx');
+  });
+
+  it('spawns with the runner root as cwd (Popen cwd=ROOT)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'crq-spawn-'));
+    const root = await mkdtemp(join(tmpdir(), 'crq-root-'));
+    const entry = join(dir, 'entry.mjs');
+    const out = join(dir, 'cwd.txt');
+    await writeFile(
+      entry,
+      `import { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(out)}, process.cwd());\n`,
+    );
+    const { effects } = await build({ entry, root });
+    const rdir = await effects.allocateRun('r6');
+    await effects.spawn('r6', rdir);
+    for (let i = 0; i < 100; i += 1) {
+      const text = await readFile(out, 'utf8').catch(() => '');
+      if (text) {
+        expect(await realpath(text)).toBe(await realpath(root));
         return;
       }
       await new Promise((resolve) => setTimeout(resolve, 50));
