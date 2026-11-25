@@ -7,6 +7,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
 import { fileRepairUnit } from '../../../src/adapters/crq/repairUnit.js';
 import { withLock } from '../../../src/adapters/crq/lock.js';
@@ -14,8 +15,8 @@ import { workerLimit } from '../../../src/ops/crq/internal/repairDrain.js';
 import { JsonNumber, JsonObject, parseJsonValue } from '../../../src/policy/crq/jsonValue.js';
 import type { JsonValue } from '../../../src/policy/crq/jsonValue.js';
 
-const ORACLE = new URL('../../helpers/repairUnitOracle.py', import.meta.url).pathname;
-const APPS = new URL('../../../apps/crq-python', import.meta.url).pathname;
+const ORACLE = fileURLToPath(new URL('../../helpers/repairUnitOracle.py', import.meta.url));
+const APPS = fileURLToPath(new URL('../../../apps/crq-python', import.meta.url));
 
 /** Python 3.14 is production's minor: `python3.14` when present, else `python3` iff it is 3.14. */
 function oraclePython(): string {
@@ -285,9 +286,34 @@ describe('fileRepairUnit drain bindings against crq_repair.py (Python 3.14)', ()
         args: repairConfig(roles),
       },
       { name: 'config without repair', op: 'dispatch_paused', args: { config: {} } },
+      // Only the fallback branch reads the environment and the cooldown file.
+      {
+        name: 'ready fallback passes a live marker',
+        op: 'dispatch_paused',
+        files: until('2026-11-21T01:00:00Z'),
+        env: { ZAI_API_KEY: 'k' },
+        args: repairConfig({ ...roles, fallback_models: ['zai/glm-4'] }),
+      },
+      {
+        name: 'fallback without credentials stays paused',
+        op: 'dispatch_paused',
+        files: until('2026-11-21T01:00:00Z'),
+        args: repairConfig({ ...roles, fallback_models: ['zai/glm-4'] }),
+      },
+      {
+        name: 'fallback with corrupt cooldowns fails closed',
+        op: 'dispatch_paused',
+        files: { 'repair/provider-cooldowns.json': '{' },
+        env: { ZAI_API_KEY: 'k' },
+        args: repairConfig({ ...roles, fallback_models: ['zai/glm-4'] }),
+      },
     ]);
     expect(python[1]?.ok).toBe('2026-11-21T01:00:00Z');
     expect(python[0]?.ok).toBeNull();
+    expect(python[5]?.ok).toBeNull();
+    expect(python[6]?.ok).toBe('2026-11-21T01:00:00Z');
+    expect(python[7]?.ok).not.toBeNull();
+    expect(python[7]?.ok).not.toBe('2026-11-21T01:00:00Z');
   });
 
   it('blocked: GLM peak blackout, with and without a reaching wall-clock budget', async () => {
@@ -328,7 +354,11 @@ describe('fileRepairUnit drain bindings against crq_repair.py (Python 3.14)', ()
       },
       { name: 'config without repair', op: 'fetch_clone', args: { config: {} } },
       { name: 'bad wait type', op: 'fetch_clone', args: repairConfig({ tick_lock_wait_s: 'x' }) },
+      { name: 'repair is a list', op: 'fetch_clone', args: { config: { repair: [] } } },
+      { name: 'repair is a string', op: 'fetch_clone', args: { config: { repair: 'x' } } },
+      { name: 'repair is null', op: 'fetch_clone', args: { config: { repair: null } } },
     ]);
+    expect(python.slice(-3).every((o) => o.error === 'AttributeError')).toBe(true);
     expect(python[0]?.ok).toBeNull();
     expect(String(python[1]?.ok)).toMatch(/^clone fetch failed: /);
     expect(python[2]?.ok).toBe('crq tick holds tick.lock');
@@ -344,9 +374,50 @@ describe('fileRepairUnit drain bindings against crq_repair.py (Python 3.14)', ()
     expect(await drain.triage()).toBeNull();
     await mkdir(join(state, 'backfill', 'findings', 'triage'), { recursive: true });
     expect(await drain.triage()).toBeNull();
-    // A provisioned rollout would run the judge, which is not bound: it throws (deferring triage).
-    await writeFile(join(state, 'backfill-rollout.json'), '{}');
-    await expect(drain.triage()).rejects.toThrow();
+    // A complete rollout reaches the judge, which is not bound: it throws (deferring triage).
+    await writeFile(
+      join(state, 'backfill-rollout.json'),
+      JSON.stringify({
+        operational_ruling: 'r',
+        no_live_run_verification: 'v',
+        owner_branch_ruleset_evidence: 'e',
+        durable_artifact_root: '/tmp/artifacts',
+        runner_identity: 'crq-runner-app',
+        publisher_spool: { ssh_alias: 'user@host', ssh_key: '/tmp/key' },
+      }),
+    );
+    await expect(drain.triage()).rejects.toThrow('judge dispatch is not bound');
+    // The directory gate comes first: a complete rollout without the triage directory is null.
+    await rm(join(state, 'backfill', 'findings', 'triage'), { recursive: true });
+    expect(await drain.triage()).toBeNull();
+  });
+
+  it('withAdmissionLock: waits for a held tick.lock, then runs the admission', async () => {
+    const tmp = await mkdtemp(join(tmpdir(), 'crq-unit-admission-'));
+    cleanups.push(tmp);
+    const state = join(tmp, 'state');
+    await mkdir(state);
+    const { drain } = fileRepairUnit({ stateRoot: state, clone: tmp, narrate: () => undefined });
+    let ran = false;
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let acquired: () => void = () => undefined;
+    const holding = new Promise<void>((resolve) => (acquired = resolve));
+    const holder = withLock(join(state, 'tick.lock'), { wait: false }, async () => {
+      acquired();
+      await held;
+    });
+    await holding;
+    const admitted = drain.withAdmissionLock(async () => {
+      ran = true;
+      return 'admitted';
+    });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(ran).toBe(false);
+    release();
+    await holder;
+    expect(await admitted).toBe('admitted');
+    expect(ran).toBe(true);
   });
 
   it('inboxOrder: oldest file first, odd names and non-files ignored', async () => {
