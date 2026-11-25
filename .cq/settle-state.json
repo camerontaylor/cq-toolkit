@@ -248,6 +248,19 @@
           "by": "self-merge-prs:observe"
         }
       ]
+    },
+    "2351": {
+      "tuple": {
+        "head": "9e13963366f1e9ef0d0ce4f73fd025a538582d97",
+        "base": "199a4d9d782b18a4e267cd7298517741ef168249",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-11-25T22:59:06.634Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
     }
   }
 }
