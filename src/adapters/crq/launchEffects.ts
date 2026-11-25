@@ -16,8 +16,8 @@
  * REQUIRED injected seam, so a caller cannot build a launch that silently
  * skips one.
  */
-import { appendFile, mkdir, rm } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { appendFile, mkdir, rm, stat } from 'node:fs/promises';
+import { basename, dirname, join } from 'node:path';
 import { hostname } from 'node:os';
 import { atomicWrite } from './atomic.js';
 import { GitPool, gitCall } from './gitExec.js';
@@ -65,6 +65,13 @@ export interface FileLaunchOptions extends LaunchInjectedEffects {
   readonly workRecords?: string;
   readonly pool: GitPool;
   readonly now?: () => Date;
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  return stat(path).then(
+    () => true,
+    () => false,
+  );
 }
 
 function pad(value: number): string {
@@ -128,13 +135,22 @@ export function fileLaunchEffects(options: FileLaunchOptions): LaunchEffects {
         head,
         pool: options.pool,
       }),
-    // `remove_worktree`: every step is `check=False`; only the directory
-    // sweep is guarded by the worktree prefix, as in Python.
+    // `remove_worktree` (crq.py:351) raises nothing: every git call is
+    // `check=False` and the sweep is `rmtree(ignore_errors=True)`, guarded by
+    // `path.exists()` and the worktree prefix. A failed sweep must not skip the
+    // prune or `branch -D`, nor replace the launch error the caller is raising.
     removeWorktree: async (path, branch, clone) => {
       const cwd = cloneOf(clone);
-      await gitCall(options.pool, cwd, ['worktree', 'remove', '--force', path]);
-      const name = path.slice(path.lastIndexOf('/') + 1);
-      if (name.startsWith(options.worktreePrefix)) await rm(path, { recursive: true, force: true });
+      if (await pathExists(path)) {
+        await gitCall(options.pool, cwd, ['worktree', 'remove', '--force', path]);
+        if ((await pathExists(path)) && basename(path).startsWith(options.worktreePrefix)) {
+          try {
+            await rm(path, { recursive: true, force: true });
+          } catch {
+            // `ignore_errors=True`.
+          }
+        }
+      }
       await gitCall(options.pool, cwd, ['worktree', 'prune']);
       if (branch) await gitCall(options.pool, cwd, ['branch', '-D', branch]);
     },
