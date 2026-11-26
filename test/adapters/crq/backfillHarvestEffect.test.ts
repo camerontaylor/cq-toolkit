@@ -18,7 +18,7 @@ import {
 } from '../../../src/adapters/crq/backfillHarvestEffect.js';
 import { fileArtifactStore } from '../../../src/adapters/crq/findingStore.js';
 import type { BackfillRepo } from '../../../src/policy/crq/backfillCompletion.js';
-import { JsonObject, toPlainJsonDeep } from '../../../src/policy/crq/jsonValue.js';
+import { JsonNumber, JsonObject, toPlainJsonDeep } from '../../../src/policy/crq/jsonValue.js';
 import { withObjectKeys } from '../../../src/policy/crq/queueDoc.js';
 
 interface Case {
@@ -310,14 +310,17 @@ describe('backfillHarvest effect: queue write-back', () => {
     return found;
   };
 
-  it('keeps a null items slot and still syncs the caller queue', async () => {
+  it('keeps null and numeric items slots and still syncs the caller queue', async () => {
     const got = await replay(pick(), (queue) => {
-      queue.items.push(null, { id: 'other', kind: 'review' });
+      queue.items.push(null, JsonNumber.int(7), { id: 'other', kind: 'review' });
       return queue.items[0] as Record<string, unknown>;
     });
     expect(got.error).toBeNull();
     expect(got.result).toBe(pick().expected.result);
     expect(got.queue.items[1]).toBeNull();
+    // A retained number is a JsonNumber instance, not a record: it must not be emptied.
+    expect(got.queue.items[2]).toBeInstanceOf(JsonNumber);
+    expect((got.queue.items[2] as JsonNumber).integer).toBe(7n);
     expect(got.queue.items[0]).toBe(got.item);
     expect(got.log).toEqual(pick().expected.log);
   });

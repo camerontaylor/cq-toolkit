@@ -47,7 +47,11 @@ import {
   type BackfillFailureHarvestEffects,
 } from '../../ops/crq/internal/backfillHarvest.js';
 import { harvestBackfillCounted } from '../../ops/crq/internal/backfillHarvestCounted.js';
-import { type JsonObject, toPlainJsonRetainingNumbers } from '../../policy/crq/jsonValue.js';
+import {
+  JsonNumber,
+  type JsonObject,
+  toPlainJsonRetainingNumbers,
+} from '../../policy/crq/jsonValue.js';
 import { LedgerIntegrityError } from '../../policy/crq/ledger.js';
 import { fromPlainJson } from '../../policy/crq/queueDoc.js';
 import { type HarvestReviewEffects, py } from '../../queue-runner/harvestReview.js';
@@ -130,7 +134,7 @@ export function backfillHarvestEffect(
     const rebuilt = toPlainJsonRetainingNumbers(next) as Plain;
     const oldItems = plainQueue.items as Plain[];
     const isRecord = (v: unknown): v is Plain =>
-      typeof v === 'object' && v !== null && !Array.isArray(v);
+      typeof v === 'object' && v !== null && !Array.isArray(v) && !(v instanceof JsonNumber);
     (rebuilt.items as unknown[]).forEach((row, i) => {
       // Slots the schedule never visits (null, scalars) have no identity to keep: take the new value.
       const slot: unknown = oldItems[i];
