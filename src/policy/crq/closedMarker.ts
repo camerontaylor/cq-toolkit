@@ -18,6 +18,13 @@ export const CLOSED_FIX_RECHECK_MICROS = 24n * 3600n * 1_000_000n;
  * stamp. An unreadable stamp (missing, non-string, malformed, out of range) is
  * due: the recheck rewrites it, so a corrupt or pre-cadence marker never
  * silences a record permanently. A stamp in the future is not yet due.
+ *
+ * Two declared properties of the seam, both pinned in closedMarker.test.ts:
+ * - `now` has millisecond precision here (Python reads microseconds), so a
+ *   sub-millisecond stamp can read as not yet due up to 1 ms later than in
+ *   Python. Production stamps are whole seconds, so this is harmless.
+ * - An Invalid Date `now` throws `RangeError` (BigInt(NaN)); Python has no
+ *   equivalent. Every producer is `new Date()` or an injected clock.
  */
 export function closedMarkerDue(marker: unknown, now: Date): boolean {
   const stamp = parseUtc(marker instanceof JsonObject ? marker.get('at') : marker);

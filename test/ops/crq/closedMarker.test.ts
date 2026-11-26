@@ -88,6 +88,18 @@ describe('closedMarkerDue replays the Python oracle', () => {
   test('the window is 24 hours', () => {
     expect(CLOSED_FIX_RECHECK_MICROS).toBe(86_400_000_000n);
   });
+
+  // Declared deviation: Python (3.14) is due here with now at .123456 exactly
+  // 24h after the stamp; a ms clock reads .123 and is 456us short.
+  test('a sub-millisecond stamp reads due up to 1 ms later than Python', () => {
+    const stamp = '2026-11-26T03:04:05.1234567Z';
+    expect(closedMarkerDue(stamp, new Date('2026-11-27T03:04:05.123Z'))).toBe(false);
+    expect(closedMarkerDue(stamp, new Date('2026-11-27T03:04:05.124Z'))).toBe(true);
+  });
+
+  test('an Invalid Date clock throws RangeError', () => {
+    expect(() => closedMarkerDue('2026-11-26T03:04:05Z', new Date(Number.NaN))).toThrow(RangeError);
+  });
 });
 
 describe('fix_closed lane replays reconcile_fix_prs', () => {
