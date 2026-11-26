@@ -11,10 +11,11 @@
  * - `append_work_record` (`crq.py:72`, best effort) and `event` (`crq.py:193`);
  * - the `_review` spawn (`subprocess.Popen([sys.executable, crq.py, "_review", run_id])`).
  *
- * NOT bound here (no adapter exists yet): the secret scans, the blocked
- * receipt, the author lease, the on-demand clone and the queue save. Each is a
- * REQUIRED injected seam, so a caller cannot build a launch that silently
- * skips one.
+ * NOT bound here: the secret scans, the blocked receipt, the author lease, the
+ * on-demand clone and the queue save. Each is a REQUIRED injected seam, so a
+ * caller cannot build a launch that silently skips one; `fileLaunchBindings`
+ * (`launchBindings.ts`) supplies a Python-faithful offline binding for all of
+ * them.
  */
 import { appendFile, mkdir, rm, stat } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
@@ -28,7 +29,7 @@ import { sameRepoIdentity } from '../../policy/crq/repoRegistry.js';
 import { launchBand, type ScheduleContext } from '../../policy/crq/tickSchedule.js';
 import { pythonJsonText } from '../../policy/crq/pythonJson.js';
 
-/** The seams with no adapter yet; each is required, none has a default. */
+/** The seams bound by `fileLaunchBindings`; each is required, none has a default here. */
 export type LaunchInjectedEffects = Pick<
   LaunchEffects,
   | 'scan'
