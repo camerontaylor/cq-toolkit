@@ -45,6 +45,8 @@ import type { GhFn } from '../forge-github/gh.js';
 import { composeTickPhases, type ComposeInput, type RemainingPhaseNames } from './composeTick.js';
 import { fileFixPrBacklogEffects } from './fixPrBacklogSource.js';
 import { createHarvestPhases, type LocalReviewJsonSeams } from './harvestWiring.js';
+import { fileHarvestReviewEffects, type HarvestReviewFileEffects } from './harvestReviewEffects.js';
+import type { GitPool } from './gitExec.js';
 import { fileHarvestRunReads } from './harvestRunReads.js';
 import { fileLocalReviewPublishEffects } from './localReviewPublish.js';
 import { readBackfillRollout } from './backfillRollout.js';
@@ -130,8 +132,9 @@ export const STAGED_GAPS: readonly TickGap[] = [
     phases: ['harvestItems', 'collectFinished'],
     python: 'harvest_review (crq.py:2619)',
     missing:
-      'no file-backed HarvestReviewEffects beyond the run-artifact reads: findings.md for non-local kinds, ' +
-      'removeWorktree, writeReceipt, repairEnqueue, backfillHarvest, requestPrReview and the coverage seam',
+      'fileHarvestReviewEffects binds findings.md for non-local kinds, removeWorktree, writeReceipt and ' +
+      'requestPrReview; repairEnqueue, backfillHarvest and the coverage seam stay injected: ' +
+      'repairEnqueue needs injected git and a TS port of crq_repair.findings (the pure repair port exists in repairBackfill.ts); backfillHarvest has no TS port of backfill_runtime.harvest; the coverage seam has no harvest-side implementation (start-one CoverageEffects)',
   },
   {
     id: 'repair-harvest-effects',
@@ -206,8 +209,18 @@ export interface TickCompositionInput {
   readonly harvest?: {
     readonly local: LocalReviewJsonSeams;
     readonly reviewReceiptKind: string;
-    /** Every `harvest_review` effect except the run-artifact reads this module binds. */
-    readonly review: Omit<HarvestReviewEffects, keyof ReturnType<typeof fileHarvestRunReads>>;
+    /** Where `removeWorktree` sweeps: the pool `worktrees` paths live under and their name prefix. */
+    readonly worktree: { readonly pool: GitPool; readonly worktreePrefix: string };
+    /**
+     * Every `harvest_review` effect except the run-artifact reads and the file-backed review
+     * effects (findings, removeWorktree, receipt, requestPrReview) this module binds.
+     */
+    readonly review: Omit<
+      HarvestReviewEffects,
+      | keyof ReturnType<typeof fileHarvestRunReads>
+      | keyof ReturnType<typeof fileHarvestReviewEffects>
+    > &
+      Partial<HarvestReviewFileEffects>;
     readonly repairHarvest: (q: Queue, item: Item) => Promise<string[]>;
   };
   readonly reporting?: Pick<ReportingInput, 'roots'>;
@@ -344,7 +357,7 @@ export function composeFullTick(input: TickCompositionInput): TickComposition {
       })
     : null;
 
-  // --- harvest: the run artifacts are read here; everything else is the caller's effect.
+  // --- harvest: the run artifacts are read here; everything else is the caller's effect (an injected file effect overrides the bound one).
   const rejectHarvest = input.harvest ? null : open(INPUT_GAPS.harvest);
   const harvest = input.harvest
     ? createHarvestPhases({
@@ -352,6 +365,12 @@ export function composeFullTick(input: TickCompositionInput): TickComposition {
         reviewReceiptKind: input.harvest.reviewReceiptKind,
         review: {
           ...fileHarvestRunReads({ stateRoot: input.stateRoot, nowMs: now }),
+          ...fileHarvestReviewEffects({
+            stateRoot: input.stateRoot,
+            pool: input.harvest.worktree.pool,
+            worktreePrefix: input.harvest.worktree.worktreePrefix,
+            primaryClone: input.clone,
+          }),
           ...input.harvest.review,
         } as HarvestReviewEffects,
         repairHarvest: input.harvest.repairHarvest,

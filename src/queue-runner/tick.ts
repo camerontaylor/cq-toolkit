@@ -68,7 +68,7 @@ import { PlannerUsageError, type Mutation, type Plan } from './runner.js';
  * `tick` or `slot` while it is not.
  */
 export const TICK_MISSING_EFFECTS: readonly string[] = [
-  'harvest-review-effects: harvest_review effects beyond the run-artifact reads (findings.md for non-local kinds, removeWorktree, writeReceipt, repairEnqueue, backfillHarvest, requestPrReview, coverage)',
+  'harvest-review-effects: fileHarvestReviewEffects binds findings.md for non-local kinds, removeWorktree, writeReceipt and requestPrReview; repairEnqueue, backfillHarvest and the coverage seam stay injected: repairEnqueue needs injected git and a TS port of crq_repair.findings (the pure repair port exists in repairBackfill.ts); backfillHarvest has no TS port of backfill_runtime.harvest; the coverage seam has no harvest-side implementation (start-one CoverageEffects)',
   'repair-harvest-effects: repair_tick.harvest queue side (worktree, verify, mechanical, markFindingOutcome, cleanupHarvested, publish)',
   'start-one-effects: CoverageEffects, and the injected scans, receipt, author lease, on-demand clone and queue save of the file LaunchEffects, for admit.startOne',
   'repair-parity: repair-side tick passes have no seeded differential against Python',

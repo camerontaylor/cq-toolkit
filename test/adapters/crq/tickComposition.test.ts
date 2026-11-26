@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { composeSlot } from '../../../src/adapters/crq/composeTick.js';
+import { GitPool } from '../../../src/adapters/crq/gitExec.js';
 import { fileHarvestRunReads } from '../../../src/adapters/crq/harvestRunReads.js';
 import {
   composeFullTick,
@@ -535,6 +536,7 @@ describe('Python child harvest (run artifacts)', () => {
           reconcileCompleted: async (q) => q,
         },
         reviewReceiptKind: 'review-receipt',
+        worktree: { pool: new GitPool(), worktreePrefix: 'wt-' },
         review: harvestEffects(sink),
         repairHarvest: async () => [],
       },
@@ -588,6 +590,7 @@ describe('Python child harvest (run artifacts)', () => {
           reconcileCompleted: async (q) => q,
         },
         reviewReceiptKind: 'review-receipt',
+        worktree: { pool: new GitPool(), worktreePrefix: 'wt-' },
         review: harvestEffects(sink),
         repairHarvest: async () => [],
       },
@@ -717,6 +720,7 @@ describe('interruption and restart', () => {
           reconcileCompleted: async (q) => q,
         },
         reviewReceiptKind: 'review-receipt',
+        worktree: { pool: new GitPool(), worktreePrefix: 'wt-' },
         review: {
           kinds: {
             localReview: 'local-review',
