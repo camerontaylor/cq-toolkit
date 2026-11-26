@@ -173,7 +173,9 @@ export function makeCoverageEffects(input: CoverageEffectsInput): Omit<CoverageE
       };
   const tick = input.tick ? bindTickSeams(input.tick) : undefined;
   const dispatch = input.dispatch ? bindBackfillDispatchConfigured(input.dispatch) : undefined;
-  const nowMs = tick?.nowMs ?? injected.nowMs ?? unbound('nowMs');
+  // The injected clock is called on `injected`, so a method that reads `this` keeps its receiver.
+  const nowMs =
+    tick?.nowMs ?? (injected.nowMs ? () => (injected.nowMs as () => number)() : unbound('nowMs'));
   return {
     select: injected.select,
     nowMs,

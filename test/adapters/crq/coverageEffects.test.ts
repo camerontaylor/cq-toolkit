@@ -99,6 +99,31 @@ describe('makeCoverageEffects', () => {
     }
   });
 
+  it('calls an injected clock on its owner when no tick seam is bound', () => {
+    const owner = {
+      select: unbound('select'),
+      fixedMs: Date.parse('2026-11-20T12:00:00Z'),
+      nowMs(this: { fixedMs: number }) {
+        return this.fixedMs;
+      },
+    };
+    const effects = makeCoverageEffects({
+      git: { git: () => Promise.resolve(''), pathExists: () => Promise.resolve(true) },
+      measure: { defaultRef: 'origin/main', minFileFocus: 0.25, iso: () => 'x' },
+      coverageConfig: {},
+      rank4: {
+        iso: () => 'x',
+        ordinaryEligible: unbound('ordinaryEligible'),
+        stateEvent: unbound('stateEvent') as never,
+        saveQueue: unbound('saveQueue') as never,
+      },
+      injected: owner as unknown as InjectedCoverageSeams,
+    });
+    // `this` is the injected object, not a detached call.
+    expect(effects.nowMs()).toBe(owner.fixedMs);
+    expect(effects.coverageCandidate({ items: [] } as unknown as Queue, 'abc123')).toBeNull();
+  });
+
   it('throws from a tick member that is neither bound nor injected', () => {
     const effects = makeCoverageEffects({
       git: { git: () => Promise.resolve(''), pathExists: () => Promise.resolve(true) },

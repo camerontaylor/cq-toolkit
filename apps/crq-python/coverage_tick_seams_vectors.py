@@ -68,7 +68,7 @@ PARSE_INPUTS: list[Any] = [
     "2026-1-2T3:4:5Z", "2026-02-30T00:00:00Z", "2026-11-20T24:00:00Z", "2026-11-20T23:59:60Z",
     "not a time", "2026-11-20", "", " 2026-11-20T12:00:00Z", "2026-11-20T12:00:00Z extra",
     "0001-01-01T00:00:00Z", "9999-12-31T23:59:59Z", "0000-01-01T00:00:00Z",
-    5, 1.5, True, ["2026-11-20T12:00:00Z"], {"a": 1}, None,
+    5, 1.5, True, ["2026-11-20T12:00:00Z"], {"a": 1}, None, 0, 0.0, False, [], {},
 ]
 
 
@@ -105,7 +105,8 @@ QUEUES: list[dict] = [
     {"name": "operator-priority-and-order", "items": [
         item("a", "merged", order=1), item("b", "merged", order=2, operator_priority=True),
         item("c", "merged", order=2), item("d", "merged", order=1, operator_priority=False),
-        item("e", "merged", operator_priority=True, order=50),
+        item("e", "merged", operator_priority=True, order=50), item("f", "merged", order=1.5),
+        item("g", "merged", order=0), item("h", "open", order=0), item("i", "open", order=5),
     ]},
     {"name": "optional-and-author-cycles", "items": [
         item("open0", "open", order=1), item("open1", "open", order=2, cycles=[{"n": 1}]),
@@ -247,6 +248,8 @@ SETTINGS: list[dict] = [
     {"name": "tiers-missing", "rollout": dump(rollout()), "policy": {"tiers": None}},
     {"name": "required-list-malformed", "rollout": dump(rollout()), "policy": {"required-list_text": "{"}},
     {"name": "limits-not-consulted-when-disabled", "rollout": dump(rollout(enabled=False)), "policy": {"limits_text": "{"}},
+    {"name": "state-root-is-a-file", "rollout": None, "state_kind": "file"},
+    {"name": "rollout-symlink-loop", "rollout": None, "state_kind": "loop"},
     {"name": "limits-not-consulted-when-absent", "rollout": None, "policy": {"limits_text": "{"}},
 ]
 
@@ -271,6 +274,11 @@ def settings_case(spec: dict) -> dict:
         state = root / "state"
         (root / "policy").mkdir()
         state.mkdir()
+        if spec.get("state_kind") == "file":  # `exists()` swallows ENOTDIR
+            state.rmdir()
+            state.write_text("", encoding="utf-8")
+        elif spec.get("state_kind") == "loop":  # ... and ELOOP
+            (state / "backfill-rollout.json").symlink_to("backfill-rollout.json")
         for name, text in files.items():
             if text is not None:
                 (root / "policy" / f"review-{name}.json").write_text(text, encoding="utf-8")

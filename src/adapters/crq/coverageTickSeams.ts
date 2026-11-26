@@ -45,8 +45,8 @@ export interface TickSeamsInput {
 }
 
 /** `now()` as epoch microseconds for the scheduler, from the injected millisecond clock. */
-function nowMicros(clock: () => number): bigint {
-  return BigInt(Math.trunc(clock())) * 1000n;
+function nowMicros(ms: number): bigint {
+  return BigInt(Math.trunc(ms)) * 1000n;
 }
 
 /**
@@ -55,14 +55,11 @@ function nowMicros(clock: () => number): bigint {
  * (AttributeError); a malformed string is `strptime`'s ValueError.
  */
 function parseIsoMs(value: string): number {
-  const raw = value as unknown as JsonValue;
+  const raw: unknown = value;
   if (typeof raw !== 'string') {
     // Falsy non-strings are `parse_iso`'s None; the rest reach `str.replace`.
     if (!pyTruthy(raw)) throw noneComparison();
-    throw new PyError(
-      'AttributeError',
-      `'${ledgerPythonTypeName(raw)}' object has no attribute 'replace'`,
-    );
+    throw new PyError('AttributeError', `'${pythonTypeOf(raw)}' object has no attribute 'replace'`);
   }
   try {
     const parsed = parseIso(raw);
@@ -74,18 +71,27 @@ function parseIsoMs(value: string): number {
   }
 }
 
-/** Python truthiness for a value that may be a plain record (an item field) or a JSON value. */
-function pyTruthy(value: JsonValue): boolean {
-  if (
-    value !== null &&
-    typeof value === 'object' &&
-    !Array.isArray(value) &&
-    !(value instanceof JsonNumber) &&
-    !(value instanceof JsonObject)
-  ) {
-    return Object.keys(value).length > 0;
+/** Python truthiness for any value an item field can hold: a JS scalar, a plain record or a retained JSON node. */
+function pyTruthy(value: unknown): boolean {
+  if (value === null || value === undefined || value === false) return false;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') return value !== '';
+  if (Array.isArray(value)) return value.length > 0;
+  if (value instanceof JsonNumber || value instanceof JsonObject) {
+    return pythonTruthy(value as JsonValue);
   }
-  return pythonTruthy(value);
+  if (typeof value === 'object') return Object.keys(value).length > 0;
+  return true;
+}
+
+/** The Python type name of a JS scalar, plain record or retained JSON node. */
+function pythonTypeOf(value: unknown): string {
+  if (typeof value === 'number') return Number.isInteger(value) ? 'int' : 'float';
+  if (Array.isArray(value)) return 'list';
+  if (value !== null && typeof value === 'object' && !(value instanceof JsonNumber)) {
+    return 'dict';
+  }
+  return ledgerPythonTypeName(value as JsonValue);
 }
 
 /** `None > now()`: what Python does with `parse_iso`'s None. */
@@ -96,17 +102,51 @@ function noneComparison(): PyError {
   );
 }
 
+/**
+ * `tickSchedule.ts` reads numbers with `typeof x === 'number'`, so a retained
+ * `JsonNumber` (the shape `composeTick`'s `viaPlain` carries) would read as
+ * absent: `order` 999, `author.cycle` not a cycle, `generation` never 1. The
+ * seam therefore hands the scheduler a shallow shadow of each item whose
+ * number-carrying fields are plain JS numbers, leaving `tickSchedule.ts`
+ * unchanged for its other callers. The originals are never copied back or
+ * mutated. A plain-number item passes through identically. An integer past
+ * 2^53 rounds in the shadow where Python compares exactly (not a schema value).
+ */
+function plainNumber(value: unknown): unknown {
+  if (!(value instanceof JsonNumber)) return value;
+  return value.kind === 'int' ? Number(value.integer) : value.float;
+}
+
+function shadow(item: Item): Item {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(item as Record<string, unknown>)) {
+    out[key] = plainNumber(value);
+  }
+  const author = out.author;
+  if (author !== null && typeof author === 'object' && !Array.isArray(author)) {
+    out.author = Object.fromEntries(
+      Object.entries(author).map(([key, value]) => [key, plainNumber(value)]),
+    );
+  }
+  return out as Item;
+}
+
 export function bindTickSeams(input: TickSeamsInput): TickSeams {
-  const context = () => ({ config: input.schedule, nowMicros: nowMicros(input.clock) });
+  // Call the clock on its owner, so a method that reads `this` keeps its receiver.
+  const context = () => ({ config: input.schedule, nowMicros: nowMicros(input.clock()) });
   return {
     nowMs: () => input.clock(),
     parseIsoMs,
     liveItems: (q: Queue): Item[] => liveItems(q) as Item[],
     compareItems: (a: Item, b: Item): number => {
       const at = context();
-      return compareSortKeys(sortKey(a, at), sortKey(b, at));
+      return compareSortKeys(sortKey(shadow(a), at), sortKey(shadow(b), at));
     },
-    depsMet: (q: Queue, item: Item): boolean => depsMet(q, item),
+    depsMet: (q: Queue, item: Item): boolean =>
+      depsMet(
+        { ...q, items: Array.isArray(q.items) ? q.items.map((i) => shadow(i as Item)) : q.items },
+        shadow(item),
+      ),
   };
 }
 
@@ -134,7 +174,12 @@ export function bindBackfillDispatchConfigured(
     try {
       bytes = readFileSync(join(input.stateRoot, 'backfill-rollout.json'));
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      // `Path.exists()` is False for these (and for a NUL in the path), not an error.
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR' || code === 'ELOOP' || code === 'EBADF') {
+        return false;
+      }
+      if (code === 'ERR_INVALID_ARG_VALUE') return false;
       throw error;
     }
     const value = ledgerLoads(bytes);
