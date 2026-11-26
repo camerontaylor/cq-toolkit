@@ -40,8 +40,12 @@ interface PyScenario {
 }
 interface Case {
   name: string;
-  /** Whether a worker may end before the next admission (a scheduling race both sides may win). */
-  racy?: boolean;
+  /**
+   * The fork lists either side may legitimately produce when a worker can end before the next
+   * admission (a scheduling race both sides may win). The stop bound is exact per scenario;
+   * the full input order is never in the set.
+   */
+  forkedAllowed?: string[][];
   order: string[];
   limit: number;
   marker?: boolean;
@@ -70,7 +74,8 @@ const BASE_CASES: Case[] = [
   { name: 'clean pass, six items, limit 3', order: ['a', 'b', 'c', 'd', 'e', 'f'], limit: 3 },
   {
     name: 'rate limit stops new admission',
-    racy: true,
+    // b may be admitted before a's exit is reaped; c never is (the reap latches the stop).
+    forkedAllowed: [['a'], ['a', 'b']],
     order: ['a', 'b', 'c'],
     limit: 2,
     scenarios: { a: { outcome: 'rate-limit' } },
@@ -98,22 +103,23 @@ const BASE_CASES: Case[] = [
   },
   {
     name: 'death by signal is a failure',
-    racy: true,
-    order: ['a', 'b'],
+    forkedAllowed: [['a'], ['a', 'b']],
+    order: ['a', 'b', 'c'],
     limit: 2,
     scenarios: { a: { crash: 'signal' } },
   },
   {
     name: 'a raised worker exits 1 and is a failure',
-    racy: true,
-    order: ['a', 'b'],
+    forkedAllowed: [['a'], ['a', 'b']],
+    order: ['a', 'b', 'c'],
     limit: 2,
     scenarios: { a: { crash: 'raise' } },
   },
   {
     name: 'a child-gate refusal is not a failure',
-    racy: true,
-    order: ['a', 'b'],
+    // The refusal is the barrier verdict: nothing after the refusing item may start.
+    forkedAllowed: [['a']],
+    order: ['a', 'b', 'c'],
     limit: 2,
     scenarios: { a: { gate: 'refuse' } },
   },
@@ -121,7 +127,9 @@ const BASE_CASES: Case[] = [
 
 /** A racy case is run five times: the assertions must hold whichever side wins the race. */
 const CASES: Case[] = BASE_CASES.flatMap((spec) =>
-  spec.racy ? [1, 2, 3, 4, 5].map((n) => ({ ...spec, name: `${spec.name} (run ${n})` })) : [spec],
+  spec.forkedAllowed
+    ? [1, 2, 3, 4, 5].map((n) => ({ ...spec, name: `${spec.name} (run ${n})` }))
+    : [spec],
 );
 const caseNamed = (name: string): PyResult | undefined =>
   results[CASES.findIndex((c) => c.name === name)];
@@ -195,13 +203,11 @@ describe('startWorker parity with the forking drain_items', () => {
       if (!py) throw new Error('missing oracle result');
       expect(py.error).toBeNull();
       const ts = await runTs(spec, py);
-      if (spec.racy) {
+      if (spec.forkedAllowed) {
         // Which later items start before the first worker is reaped is a race on both sides;
-        // each side must still have admitted a non-empty in-order prefix, never past the stop.
-        for (const forked of [ts.forked, py.forked]) {
-          expect(forked.length).toBeGreaterThan(0);
-          expect(forked).toEqual(spec.order.slice(0, forked.length));
-        }
+        // each side's fork list must be one of the scenario's explicitly allowed lists.
+        expect(spec.forkedAllowed).toContainEqual(ts.forked);
+        expect(spec.forkedAllowed).toContainEqual(py.forked);
       } else {
         expect(ts.forked).toEqual(py.forked);
       }
@@ -209,6 +215,12 @@ describe('startWorker parity with the forking drain_items', () => {
       expect([...ts.narration].sort()).toEqual([...py.narration].sort());
       expect(ownedWorkerCount()).toBe(0);
     });
+  });
+
+  test('no racy scenario allows the full input order', () => {
+    for (const spec of BASE_CASES.filter((c) => c.forkedAllowed)) {
+      expect(spec.forkedAllowed).not.toContainEqual(spec.order);
+    }
   });
 
   test('anchors: the Python results are the ones the table claims', () => {
