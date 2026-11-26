@@ -461,5 +461,53 @@ describe('finding disposition oracle vectors', () => {
   }
 });
 
+describe('port-only string guards before repo.carry', () => {
+  const found = cases
+    .map((raw) => obj(raw, 'case'))
+    .find((entry) => entry.get('name') === 'triage-confirmed-full-carry');
+  if (found === undefined) throw new Error('triage-confirmed-full-carry vector missing');
+  const base = found;
+
+  async function refuse(mutate: (row: Record<string, unknown>) => void) {
+    const spec = obj(base.get('spec'), 'spec');
+    const rows = toPlainJson(obj(spec.get('rows'), 'rows')) as Record<
+      string,
+      Record<string, unknown>
+    >;
+    for (const row of Object.values(rows)) mutate(row);
+    const edited = new JsonObject(
+      [...spec.entries].map(([key, value]) =>
+        key === 'rows' ? [key, parseJsonValue(JSON.stringify(rows))] : [key, value],
+      ),
+    );
+    const harness = await build(edited);
+    const repo = new FixtureRepo(optionalObject(edited.get('repo')));
+    const before = rowTexts(harness.files);
+    const step = obj(arr(edited.get('steps'), 'steps')[0], 'step');
+    const outcome = await runStep(harness, repo, step);
+    return { outcome, repo, harness, before };
+  }
+
+  test('a non-string row target raises TypeError before carry, with no spool or row write', async () => {
+    const { outcome, repo, harness, before } = await refuse((row) => {
+      row.target = ['x'];
+    });
+    expect(outcome.raises).toBe('TypeError');
+    expect(repo.calls.some((call) => call[0] === 'carry')).toBe(false);
+    expect(harness.outboxFiles.pending.size).toBe(0);
+    expect(rowTexts(harness.files)).toEqual(before);
+  });
+
+  test('a non-string anchor path raises TypeError before carry, with no spool or row write', async () => {
+    const { outcome, repo, harness, before } = await refuse((row) => {
+      (row.finding as Record<string, unknown>).path = ['src/a.ts'];
+    });
+    expect(outcome.raises).toBe('TypeError');
+    expect(repo.calls.some((call) => call[0] === 'carry')).toBe(false);
+    expect(harness.outboxFiles.pending.size).toBe(0);
+    expect(rowTexts(harness.files)).toEqual(before);
+  });
+});
+
 void decoder;
 void encoder;

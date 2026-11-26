@@ -352,6 +352,11 @@ export class FindingDispositions {
         recovered !== null ||
         ledgerValueEqual(ledgerSubscript(finding, 'anchor_status'), 'verified')
       ) {
+        // Port-only guards: Python hands `row["target"]` and `anchor["path"]` straight to
+        // `repo.carry`, where a non-string fails later (unhashable memo key) with a TypeError.
+        // Here the `FindingRepo` seam is typed, so the TypeError is raised before `carry`.
+        // Neither side spools or writes the row first, so no durable state differs; the
+        // oracle cannot pin this (its fake `carry` would trap), so a unit test does.
         const target = asString(ledgerSubscript(row, 'target'), 'target');
         const path = asString(ledgerSubscript(anchor, 'path'), 'path');
         const carried = await repo.carry(

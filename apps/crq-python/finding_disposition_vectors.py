@@ -391,6 +391,12 @@ def anchor_cases() -> List[Dict[str, Any]]:
         _case("anchor-artifact-swapped-after-verify", [_anchor(row, reviews)],
               artifacts={_reference(raw)["sha256"]: _artifact(raw, read="swapped", swapped_hex=_hex(raw + "x"))},
               repo=_repo(), rows={}),
+        # The swapped bytes are a *valid* run whose anchor differs (lines 2-3), so only the
+        # post-verify SHA recheck separates None from a recovered anchor.
+        _case("anchor-artifact-swapped-to-valid-run-with-other-anchor", [_anchor(row, reviews)],
+              artifacts={_reference(raw)["sha256"]: _artifact(
+                  raw, read="swapped", swapped_hex=_hex(event_raw(startLine=2, endLine=3)))},
+              repo=_repo(), rows={}),
         variant("anchor-path-fallback", event_raw(fileName=..., path="src/a.ts"), ),
         variant("anchor-body-fallback", event_raw(comment=..., body="Body")),
         variant("anchor-empty-comment-falls-to-body", event_raw(comment="", body="Body")),
@@ -507,6 +513,9 @@ def triage_cases() -> List[Dict[str, Any]]:
     t("triage-bad-timestamp-shape", FID, HEAD, "needs-human", "agent", "r", "2026-10-30T00:00:00+00:00")
     t("triage-bad-timestamp-calendar", FID, HEAD, "needs-human", "agent", "r", "2026-02-30T00:00:00Z")
     t("triage-bad-timestamp-month", FID, HEAD, "needs-human", "agent", "r", "2026-13-01T00:00:00Z")
+    t("triage-clears-context-error", row={**verified, "context_error": "old"})
+    t("triage-needs-human-clears-context-error", FID, HEAD, "needs-human", "agent", "unsure", AT,
+      row={**verified, "context_error": "old"})
     t("triage-numeric-reason", FID, HEAD, "needs-human", "agent", 7, AT)
     t("triage-structured-reason", FID, HEAD, "needs-human", "agent", {"why": ["é"]}, AT)
 
@@ -721,6 +730,18 @@ def outcome_cases() -> List[Dict[str, Any]]:
     del first
     o("outcome-retained-duplicate-token-is-idempotent", FID, "job-1", "fixed", "merged", AT,
       fixing_commit="fix", retained=[dup])
+    # The retained event does not chain onto the row (different predecessor), so recovery cannot
+    # apply it and only the source-key token check keeps the second event from being spooled.
+    evidence = {"repair_task": "job-1", "reason": "merged", "fix_pr": None,
+                "fixing_commit": "fix", "verification": "merged"}
+    off_chain = _finding_event("elsewhere", "fixed", evidence, actor="crq-repair",
+                               review_id=review_id, key="repair-outcome:" + token)
+    o("outcome-retained-token-off-chain-is-idempotent", FID, "job-1", "fixed", "merged", AT,
+      fixing_commit="fix", retained=[off_chain])
+    other_token = _finding_event("elsewhere", "fixed", evidence, actor="crq-repair",
+                                 review_id=review_id, key="repair-outcome:other")
+    o("outcome-retained-other-token-off-chain-spools", FID, "job-1", "fixed", "merged", AT,
+      fixing_commit="fix", retained=[other_token])
     cases.append(_case("outcome-replay-after-lost-row-write",
                        [_outcome(FID, "job-1", "fixed", "merged", AT, fixing_commit="fix"),
                         {"reset": {FID: base}},

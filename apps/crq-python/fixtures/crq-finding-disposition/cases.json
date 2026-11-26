@@ -2515,6 +2515,185 @@
    }
   },
   {
+   "name": "anchor-artifact-swapped-to-valid-run-with-other-anchor",
+   "result": {
+    "steps": [
+     {
+      "calls": [],
+      "kind": "none",
+      "pending": {},
+      "returns": null,
+      "rows": {},
+      "trace": []
+     }
+    ]
+   },
+   "spec": {
+    "artifacts": {
+     "50e1f93168ef2e028cf187322361b25fc7042e5d44777b571302717d9bd586b0": {
+      "hex": "7b2274797065223a20227374617274227d0a7b2274797065223a202266696e64696e67222c202266696c654e616d65223a20227372632f612e7473222c20227469746c65223a20225469746c65222c2022636f6d6d656e74223a2022426f6479222c202273746172744c696e65223a20312c2022656e644c696e65223a20327d0a7b2274797065223a2022636f6d706c657465227d0a",
+      "read": "swapped",
+      "swapped_hex": "7b2274797065223a202266696e64696e67222c202266696c654e616d65223a20227372632f612e7473222c20227469746c65223a20225469746c65222c2022636f6d6d656e74223a2022426f6479222c202273746172744c696e65223a20322c2022656e644c696e65223a20337d0a"
+     }
+    },
+    "repo": {
+     "blobs": {
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": "6f6e650a74776f0a74687265650a",
+      "dddddddddddddddddddddddddddddddddddddddd": "6f6e650a74776f0a74687265650a"
+     },
+     "carry": [],
+     "entries": {
+      "1111111111111111111111111111111111111111": {
+       "src/a.ts": {
+        "blob": "dddddddddddddddddddddddddddddddddddddddd"
+       }
+      },
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+       "src/a.ts": {
+        "blob": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+       }
+      }
+     },
+     "resolve": {
+      "1111111111111111111111111111111111111111": "1111111111111111111111111111111111111111",
+      "fix": "3333333333333333333333333333333333333333",
+      "main": "1111111111111111111111111111111111111111",
+      "next": "2222222222222222222222222222222222222222"
+     }
+    },
+    "rows": {},
+    "steps": [
+     {
+      "args": [
+       {
+        "canonical_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "finding": {
+         "anchor_status": "unverified",
+         "blob": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+         "body": "Body",
+         "id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+         "intervals": [],
+         "path": "src/a.ts",
+         "severity": "major",
+         "source_id": null,
+         "status": "untriaged",
+         "title": "Title"
+        },
+        "previous_event_id": null,
+        "review_id": "1d3c5a90f269c0a98aa93b6894473819238a567b19e74173cff41e5a7648715f",
+        "status": "untriaged",
+        "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+       },
+       [
+        {
+         "event_type": "review",
+         "id": "1d3c5a90f269c0a98aa93b6894473819238a567b19e74173cff41e5a7648715f",
+         "occurred_at": "2026-10-30T00:00:00Z",
+         "payload": {
+          "artifacts": [
+           {
+            "location": "/fixtures/artifacts/sha256/50e1f93168ef2e028cf187322361b25fc7042e5d44777b571302717d9bd586b0",
+            "sha256": "50e1f93168ef2e028cf187322361b25fc7042e5d44777b571302717d9bd586b0"
+           }
+          ],
+          "attempt_id": "subject:0:1",
+          "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "completion": {
+           "errors": [],
+           "exit_code": 0,
+           "scope_verified": true,
+           "skipped": false,
+           "terminal": true
+          },
+          "findings": [
+           {
+            "anchor_status": "unverified",
+            "blob": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "body": "Body",
+            "id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "intervals": [],
+            "path": "src/a.ts",
+            "severity": "major",
+            "source_id": null,
+            "status": "untriaged",
+            "title": "Title"
+           }
+          ],
+          "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "head_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "input_scope": [
+           {
+            "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "intervals": [
+             [
+              1,
+              2
+             ]
+            ],
+            "path": "src/a.ts"
+           }
+          ],
+          "job_id": "subject:0",
+          "outcome": "completed",
+          "paths": [
+           {
+            "baseline": {},
+            "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "disposition": "included",
+            "mode": "100644",
+            "path": "src/a.ts",
+            "reason": "verified"
+           }
+          ],
+          "policy_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "repo": "camerontaylor/cq-toolkit",
+          "requested_scope": [
+           {
+            "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "intervals": [
+             [
+              1,
+              2
+             ]
+            ],
+            "path": "src/a.ts"
+           }
+          ],
+          "reviewed_scope": [
+           {
+            "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "intervals": [
+             [
+              1,
+              2
+             ]
+            ],
+            "path": "src/a.ts"
+           }
+          ],
+          "scope_digest": "5df73034504e89834f0676b7a127814b91d8183bd5572979160913688a4a6039",
+          "source": {
+           "authenticated": true,
+           "id": "run-1",
+           "producer": "crq-runner-app",
+           "repo": "camerontaylor/cq-toolkit",
+           "type": "crq-run"
+          },
+          "subject_id": "subject",
+          "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "target_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+         },
+         "schema": "cq.review-ledger/v1",
+         "source_key": "camerontaylor/cq-toolkit:crq-runner-app:run-1"
+        }
+       ]
+      ],
+      "method": "recovered_anchor"
+     }
+    ]
+   }
+  },
+  {
    "name": "anchor-path-fallback",
    "result": {
     "steps": [
@@ -11952,6 +12131,262 @@
        "agent",
        "r",
        "2026-13-01T00:00:00Z"
+      ],
+      "kwargs": {},
+      "method": "triage"
+     }
+    ]
+   }
+  },
+  {
+   "name": "triage-clears-context-error",
+   "result": {
+    "steps": [
+     {
+      "calls": [
+       [
+        "resolve",
+        "1111111111111111111111111111111111111111"
+       ],
+       [
+        "carry",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "1111111111111111111111111111111111111111",
+        "src/a.ts",
+        [
+         1,
+         2
+        ]
+       ]
+      ],
+      "kind": "json",
+      "pending": {
+       "c4a4269ce2e38161f6ce06f9746a99cf539d3df2e8448ab1c9fa14028a904a1d": "{\"event_type\":\"finding-event\",\"id\":\"c4a4269ce2e38161f6ce06f9746a99cf539d3df2e8448ab1c9fa14028a904a1d\",\"occurred_at\":\"2026-10-30T00:00:00Z\",\"payload\":{\"action\":\"confirmed\",\"actor\":\"agent\",\"evidence\":{\"anchor_verified\":true,\"mapped_intervals\":[[1,2]],\"mapped_path\":\"src/a.ts\",\"reason\":\"looks real\",\"target\":\"1111111111111111111111111111111111111111\"},\"finding_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"previous_event_id\":null,\"review_id\":\"9999999999999999999999999999999999999999999999999999999999999999\"},\"schema\":\"cq.review-ledger/v1\",\"source_key\":\"finding:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee:944ecc3ac65b120c64044d253460921a9663dc400db10983a9b9e0a4e7ca9634\"}"
+      },
+      "returns": "{\"event_type\":\"finding-event\",\"id\":\"c4a4269ce2e38161f6ce06f9746a99cf539d3df2e8448ab1c9fa14028a904a1d\",\"occurred_at\":\"2026-10-30T00:00:00Z\",\"payload\":{\"action\":\"confirmed\",\"actor\":\"agent\",\"evidence\":{\"anchor_verified\":true,\"mapped_intervals\":[[1,2]],\"mapped_path\":\"src/a.ts\",\"reason\":\"looks real\",\"target\":\"1111111111111111111111111111111111111111\"},\"finding_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"previous_event_id\":null,\"review_id\":\"9999999999999999999999999999999999999999999999999999999999999999\"},\"schema\":\"cq.review-ledger/v1\",\"source_key\":\"finding:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee:944ecc3ac65b120c64044d253460921a9663dc400db10983a9b9e0a4e7ca9634\"}",
+      "rows": {
+       "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee": "{\"canonical_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"failure_class\":null,\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"body\":\"Body\",\"id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"intervals\":[[1,2]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"Title\"},\"mapped_intervals\":[[1,2]],\"mapped_path\":\"src/a.ts\",\"previous_event_id\":\"c4a4269ce2e38161f6ce06f9746a99cf539d3df2e8448ab1c9fa14028a904a1d\",\"review_id\":\"9999999999999999999999999999999999999999999999999999999999999999\",\"status\":\"confirmed\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"target_current\":\"1111111111111111111111111111111111111111\"}"
+      },
+      "trace": [
+       "retained",
+       "lock:findings.lock",
+       "unlock:findings.lock",
+       "lock:findings.lock",
+       "spool",
+       "lock:outbox.lock",
+       "write:pending/c4a4269ce2e38161f6ce06f9746a99cf539d3df2e8448ab1c9fa14028a904a1d.json",
+       "unlock:outbox.lock",
+       "write:triage/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.json",
+       "unlock:findings.lock"
+      ]
+     }
+    ]
+   },
+   "spec": {
+    "repo": {
+     "blobs": {
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": "6f6e650a74776f0a74687265650a",
+      "dddddddddddddddddddddddddddddddddddddddd": "6f6e650a74776f0a74687265650a"
+     },
+     "carry": [
+      {
+       "lines": [
+        1,
+        2
+       ],
+       "mapped": [
+        1,
+        2
+       ],
+       "name": "src/a.ts",
+       "next": "1111111111111111111111111111111111111111",
+       "old": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "path": "src/a.ts"
+      }
+     ],
+     "entries": {
+      "1111111111111111111111111111111111111111": {
+       "src/a.ts": {
+        "blob": "dddddddddddddddddddddddddddddddddddddddd"
+       }
+      },
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+       "src/a.ts": {
+        "blob": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+       }
+      }
+     },
+     "resolve": {
+      "1111111111111111111111111111111111111111": "1111111111111111111111111111111111111111",
+      "fix": "3333333333333333333333333333333333333333",
+      "main": "1111111111111111111111111111111111111111",
+      "next": "2222222222222222222222222222222222222222"
+     }
+    },
+    "rows": {
+     "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee": {
+      "canonical_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "context_error": "old",
+      "finding": {
+       "anchor_status": "verified",
+       "blob": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+       "body": "Body",
+       "id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+       "intervals": [
+        [
+         1,
+         2
+        ]
+       ],
+       "path": "src/a.ts",
+       "severity": "major",
+       "source_id": null,
+       "status": "untriaged",
+       "title": "Title"
+      },
+      "previous_event_id": null,
+      "review_id": "9999999999999999999999999999999999999999999999999999999999999999",
+      "status": "untriaged",
+      "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     }
+    },
+    "steps": [
+     {
+      "args": [
+       "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+       "1111111111111111111111111111111111111111",
+       "confirmed",
+       "agent",
+       "looks real",
+       "2026-10-30T00:00:00Z"
+      ],
+      "kwargs": {},
+      "method": "triage"
+     }
+    ]
+   }
+  },
+  {
+   "name": "triage-needs-human-clears-context-error",
+   "result": {
+    "steps": [
+     {
+      "calls": [
+       [
+        "resolve",
+        "1111111111111111111111111111111111111111"
+       ],
+       [
+        "carry",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "1111111111111111111111111111111111111111",
+        "src/a.ts",
+        [
+         1,
+         2
+        ]
+       ]
+      ],
+      "kind": "json",
+      "pending": {
+       "2685a2be73055b3afccae34fc749cb8fa19e287003026bfc9fd18bcf128e1a31": "{\"event_type\":\"finding-event\",\"id\":\"2685a2be73055b3afccae34fc749cb8fa19e287003026bfc9fd18bcf128e1a31\",\"occurred_at\":\"2026-10-30T00:00:00Z\",\"payload\":{\"action\":\"needs-human\",\"actor\":\"agent\",\"evidence\":{\"anchor_verified\":true,\"mapped_intervals\":[[1,2]],\"mapped_path\":\"src/a.ts\",\"reason\":\"unsure\",\"target\":\"1111111111111111111111111111111111111111\"},\"finding_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"previous_event_id\":null,\"review_id\":\"9999999999999999999999999999999999999999999999999999999999999999\"},\"schema\":\"cq.review-ledger/v1\",\"source_key\":\"finding:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee:38a102cb09dfb37c2f82fc5f1e38ef59efc59b0628c7581f6c6a7470184be1ca\"}"
+      },
+      "returns": "{\"event_type\":\"finding-event\",\"id\":\"2685a2be73055b3afccae34fc749cb8fa19e287003026bfc9fd18bcf128e1a31\",\"occurred_at\":\"2026-10-30T00:00:00Z\",\"payload\":{\"action\":\"needs-human\",\"actor\":\"agent\",\"evidence\":{\"anchor_verified\":true,\"mapped_intervals\":[[1,2]],\"mapped_path\":\"src/a.ts\",\"reason\":\"unsure\",\"target\":\"1111111111111111111111111111111111111111\"},\"finding_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"previous_event_id\":null,\"review_id\":\"9999999999999999999999999999999999999999999999999999999999999999\"},\"schema\":\"cq.review-ledger/v1\",\"source_key\":\"finding:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee:38a102cb09dfb37c2f82fc5f1e38ef59efc59b0628c7581f6c6a7470184be1ca\"}",
+      "rows": {
+       "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee": "{\"canonical_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"failure_class\":null,\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"body\":\"Body\",\"id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"intervals\":[[1,2]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"Title\"},\"mapped_intervals\":[[1,2]],\"mapped_path\":\"src/a.ts\",\"previous_event_id\":\"2685a2be73055b3afccae34fc749cb8fa19e287003026bfc9fd18bcf128e1a31\",\"review_id\":\"9999999999999999999999999999999999999999999999999999999999999999\",\"status\":\"needs-human\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"target_current\":\"1111111111111111111111111111111111111111\"}"
+      },
+      "trace": [
+       "retained",
+       "lock:findings.lock",
+       "unlock:findings.lock",
+       "lock:findings.lock",
+       "spool",
+       "lock:outbox.lock",
+       "write:pending/2685a2be73055b3afccae34fc749cb8fa19e287003026bfc9fd18bcf128e1a31.json",
+       "unlock:outbox.lock",
+       "write:triage/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.json",
+       "unlock:findings.lock"
+      ]
+     }
+    ]
+   },
+   "spec": {
+    "repo": {
+     "blobs": {
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": "6f6e650a74776f0a74687265650a",
+      "dddddddddddddddddddddddddddddddddddddddd": "6f6e650a74776f0a74687265650a"
+     },
+     "carry": [
+      {
+       "lines": [
+        1,
+        2
+       ],
+       "mapped": [
+        1,
+        2
+       ],
+       "name": "src/a.ts",
+       "next": "1111111111111111111111111111111111111111",
+       "old": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "path": "src/a.ts"
+      }
+     ],
+     "entries": {
+      "1111111111111111111111111111111111111111": {
+       "src/a.ts": {
+        "blob": "dddddddddddddddddddddddddddddddddddddddd"
+       }
+      },
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+       "src/a.ts": {
+        "blob": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+       }
+      }
+     },
+     "resolve": {
+      "1111111111111111111111111111111111111111": "1111111111111111111111111111111111111111",
+      "fix": "3333333333333333333333333333333333333333",
+      "main": "1111111111111111111111111111111111111111",
+      "next": "2222222222222222222222222222222222222222"
+     }
+    },
+    "rows": {
+     "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee": {
+      "canonical_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "context_error": "old",
+      "finding": {
+       "anchor_status": "verified",
+       "blob": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+       "body": "Body",
+       "id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+       "intervals": [
+        [
+         1,
+         2
+        ]
+       ],
+       "path": "src/a.ts",
+       "severity": "major",
+       "source_id": null,
+       "status": "untriaged",
+       "title": "Title"
+      },
+      "previous_event_id": null,
+      "review_id": "9999999999999999999999999999999999999999999999999999999999999999",
+      "status": "untriaged",
+      "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     }
+    },
+    "steps": [
+     {
+      "args": [
+       "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+       "1111111111111111111111111111111111111111",
+       "needs-human",
+       "agent",
+       "unsure",
+       "2026-10-30T00:00:00Z"
       ],
       "kwargs": {},
       "method": "triage"
@@ -24607,6 +25042,204 @@
       },
       "schema": "cq.review-ledger/v1",
       "source_key": "repair-outcome:cde338a33fa8317722174e04eeff997540e9eac78feb5253f93d63d691b543b7"
+     }
+    ],
+    "rows": {
+     "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee": {
+      "canonical_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "finding": {
+       "anchor_status": "verified",
+       "blob": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+       "body": "Body",
+       "id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+       "intervals": [
+        [
+         1,
+         2
+        ]
+       ],
+       "path": "src/a.ts",
+       "severity": "major",
+       "source_id": null,
+       "status": "untriaged",
+       "title": "Title"
+      },
+      "previous_event_id": "p0",
+      "receipt": {
+       "acknowledgement": "ack",
+       "repair_task": "job-1"
+      },
+      "review_id": "9999999999999999999999999999999999999999999999999999999999999999",
+      "status": "delivered",
+      "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     }
+    },
+    "steps": [
+     {
+      "args": [
+       "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+       "job-1",
+       "fixed",
+       "merged",
+       "2026-10-30T00:00:00Z"
+      ],
+      "kwargs": {
+       "fixing_commit": "fix"
+      },
+      "method": "repair_outcome"
+     }
+    ]
+   }
+  },
+  {
+   "name": "outcome-retained-token-off-chain-is-idempotent",
+   "result": {
+    "steps": [
+     {
+      "calls": [],
+      "kind": "none",
+      "pending": {
+       "7e61f7b7fc530fa7fe5e9aab98dbb2cd500ed4ee4a9b28fbbfd76f3872b9d862": "{\"event_type\":\"finding-event\",\"id\":\"7e61f7b7fc530fa7fe5e9aab98dbb2cd500ed4ee4a9b28fbbfd76f3872b9d862\",\"occurred_at\":\"2026-10-30T00:00:00Z\",\"payload\":{\"action\":\"fixed\",\"actor\":\"crq-repair\",\"evidence\":{\"fix_pr\":null,\"fixing_commit\":\"fix\",\"reason\":\"merged\",\"repair_task\":\"job-1\",\"verification\":\"merged\"},\"finding_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"previous_event_id\":\"elsewhere\",\"review_id\":\"9999999999999999999999999999999999999999999999999999999999999999\"},\"schema\":\"cq.review-ledger/v1\",\"source_key\":\"repair-outcome:cde338a33fa8317722174e04eeff997540e9eac78feb5253f93d63d691b543b7\"}"
+      },
+      "returns": null,
+      "rows": {
+       "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee": "{\"canonical_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"body\":\"Body\",\"id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"intervals\":[[1,2]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"Title\"},\"previous_event_id\":\"p0\",\"receipt\":{\"acknowledgement\":\"ack\",\"repair_task\":\"job-1\"},\"review_id\":\"9999999999999999999999999999999999999999999999999999999999999999\",\"status\":\"delivered\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
+      },
+      "trace": [
+       "retained",
+       "lock:findings.lock",
+       "unlock:findings.lock",
+       "lock:findings.lock",
+       "retained",
+       "unlock:findings.lock"
+      ]
+     }
+    ]
+   },
+   "spec": {
+    "retained": [
+     {
+      "event_type": "finding-event",
+      "id": "7e61f7b7fc530fa7fe5e9aab98dbb2cd500ed4ee4a9b28fbbfd76f3872b9d862",
+      "occurred_at": "2026-10-30T00:00:00Z",
+      "payload": {
+       "action": "fixed",
+       "actor": "crq-repair",
+       "evidence": {
+        "fix_pr": null,
+        "fixing_commit": "fix",
+        "reason": "merged",
+        "repair_task": "job-1",
+        "verification": "merged"
+       },
+       "finding_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+       "previous_event_id": "elsewhere",
+       "review_id": "9999999999999999999999999999999999999999999999999999999999999999"
+      },
+      "schema": "cq.review-ledger/v1",
+      "source_key": "repair-outcome:cde338a33fa8317722174e04eeff997540e9eac78feb5253f93d63d691b543b7"
+     }
+    ],
+    "rows": {
+     "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee": {
+      "canonical_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "finding": {
+       "anchor_status": "verified",
+       "blob": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+       "body": "Body",
+       "id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+       "intervals": [
+        [
+         1,
+         2
+        ]
+       ],
+       "path": "src/a.ts",
+       "severity": "major",
+       "source_id": null,
+       "status": "untriaged",
+       "title": "Title"
+      },
+      "previous_event_id": "p0",
+      "receipt": {
+       "acknowledgement": "ack",
+       "repair_task": "job-1"
+      },
+      "review_id": "9999999999999999999999999999999999999999999999999999999999999999",
+      "status": "delivered",
+      "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     }
+    },
+    "steps": [
+     {
+      "args": [
+       "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+       "job-1",
+       "fixed",
+       "merged",
+       "2026-10-30T00:00:00Z"
+      ],
+      "kwargs": {
+       "fixing_commit": "fix"
+      },
+      "method": "repair_outcome"
+     }
+    ]
+   }
+  },
+  {
+   "name": "outcome-retained-other-token-off-chain-spools",
+   "result": {
+    "steps": [
+     {
+      "calls": [],
+      "kind": "none",
+      "pending": {
+       "79f33e2c90eb28815e6da79e1d5e3670ee2a9aa7df8212279913a459b31c28c9": "{\"event_type\":\"finding-event\",\"id\":\"79f33e2c90eb28815e6da79e1d5e3670ee2a9aa7df8212279913a459b31c28c9\",\"occurred_at\":\"2026-10-30T00:00:00Z\",\"payload\":{\"action\":\"fixed\",\"actor\":\"crq-repair\",\"evidence\":{\"fix_pr\":null,\"fixing_commit\":\"fix\",\"reason\":\"merged\",\"repair_task\":\"job-1\",\"verification\":\"merged\"},\"finding_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"previous_event_id\":\"elsewhere\",\"review_id\":\"9999999999999999999999999999999999999999999999999999999999999999\"},\"schema\":\"cq.review-ledger/v1\",\"source_key\":\"repair-outcome:other\"}",
+       "de329e94776c356595031d82d7f6cb15c53c35d7c7a32ad20a3cfb2eb92b5e3c": "{\"event_type\":\"finding-event\",\"id\":\"de329e94776c356595031d82d7f6cb15c53c35d7c7a32ad20a3cfb2eb92b5e3c\",\"occurred_at\":\"2026-10-30T00:00:00Z\",\"payload\":{\"action\":\"fixed\",\"actor\":\"crq-repair\",\"evidence\":{\"fix_pr\":null,\"fixing_commit\":\"fix\",\"reason\":\"merged\",\"repair_task\":\"job-1\",\"verification\":\"merged\"},\"finding_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"previous_event_id\":\"p0\",\"review_id\":\"9999999999999999999999999999999999999999999999999999999999999999\"},\"schema\":\"cq.review-ledger/v1\",\"source_key\":\"repair-outcome:cde338a33fa8317722174e04eeff997540e9eac78feb5253f93d63d691b543b7\"}"
+      },
+      "returns": null,
+      "rows": {
+       "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee": "{\"canonical_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"failure_class\":null,\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"body\":\"Body\",\"id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"intervals\":[[1,2]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"Title\"},\"previous_event_id\":\"de329e94776c356595031d82d7f6cb15c53c35d7c7a32ad20a3cfb2eb92b5e3c\",\"receipt\":{\"acknowledgement\":\"ack\",\"repair_task\":\"job-1\"},\"review_id\":\"9999999999999999999999999999999999999999999999999999999999999999\",\"status\":\"fixed\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
+      },
+      "trace": [
+       "retained",
+       "lock:findings.lock",
+       "unlock:findings.lock",
+       "lock:findings.lock",
+       "retained",
+       "spool",
+       "lock:outbox.lock",
+       "write:pending/de329e94776c356595031d82d7f6cb15c53c35d7c7a32ad20a3cfb2eb92b5e3c.json",
+       "unlock:outbox.lock",
+       "write:triage/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.json",
+       "unlock:findings.lock"
+      ]
+     }
+    ]
+   },
+   "spec": {
+    "retained": [
+     {
+      "event_type": "finding-event",
+      "id": "79f33e2c90eb28815e6da79e1d5e3670ee2a9aa7df8212279913a459b31c28c9",
+      "occurred_at": "2026-10-30T00:00:00Z",
+      "payload": {
+       "action": "fixed",
+       "actor": "crq-repair",
+       "evidence": {
+        "fix_pr": null,
+        "fixing_commit": "fix",
+        "reason": "merged",
+        "repair_task": "job-1",
+        "verification": "merged"
+       },
+       "finding_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+       "previous_event_id": "elsewhere",
+       "review_id": "9999999999999999999999999999999999999999999999999999999999999999"
+      },
+      "schema": "cq.review-ledger/v1",
+      "source_key": "repair-outcome:other"
      }
     ],
     "rows": {

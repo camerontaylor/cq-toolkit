@@ -33,10 +33,15 @@
  *    depth-bounded well before either limit.
  * 2. The patch is byte-faithful, but the shared scanners parse it
  *    differently: Python `secret_scan_diff` uses `splitlines()` and the TS
- *    `makeRepairScan` splits on LF only. They agree on every patch whose
- *    path contains no Python line-break character (content lines never do:
- *    they are already `splitlines()` output). The oracle's real-scanner pass
- *    uses such paths only.
+ *    `makeRepairScan` splits on LF only. Content lines never differ (they are
+ *    already `splitlines()` output), so only the path can. With a Python
+ *    line-break character in the path, Python loses the path from the
+ *    synthetic `diff --git` header and never flags the hunk. The TS scanner
+ *    agrees for LF, CR, CRLF, U+2028, U+2029 and a forged `+++ b/node_modules/...`
+ *    header line, and is stricter (it flags the hunk) for VT, FF, FS, GS, RS and
+ *    NEL. Both are pinned by the `real` vectors; the stricter set is
+ *    `TS_STRICTER` in the test. A schema-valid context path comes from the
+ *    repository tree, never from the judge.
  */
 import { JsonObject, type JsonValue } from './jsonValue.js';
 import { pythonIsSpace, pythonTruthy } from './repairBinding.js';

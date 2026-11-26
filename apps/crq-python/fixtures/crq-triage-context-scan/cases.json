@@ -1097,6 +1097,132 @@
     "denylist_hits": 0,
     "gitleaks": "not-run"
    }
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a\\nb.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"pk-ABCDEFGH12\"]}",
+   "name": "path with LF: planted key is not flagged",
+   "result": {
+    "clean": true,
+    "denylist_hits": 0,
+    "gitleaks": "not-run"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a\\r\\nb.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"pk-ABCDEFGH12\"]}",
+   "name": "path with CRLF: planted key is not flagged",
+   "result": {
+    "clean": true,
+    "denylist_hits": 0,
+    "gitleaks": "not-run"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a\\rb.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"pk-ABCDEFGH12\"]}",
+   "name": "path with CR: planted key is not flagged",
+   "result": {
+    "clean": true,
+    "denylist_hits": 0,
+    "gitleaks": "not-run"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a\\u2028b.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"pk-ABCDEFGH12\"]}",
+   "name": "path with U+2028: planted key is not flagged",
+   "result": {
+    "clean": true,
+    "denylist_hits": 0,
+    "gitleaks": "not-run"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a\\u2029b.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"pk-ABCDEFGH12\"]}",
+   "name": "path with U+2029: planted key is not flagged",
+   "result": {
+    "clean": true,
+    "denylist_hits": 0,
+    "gitleaks": "not-run"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a\\u0085b.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"pk-ABCDEFGH12\"]}",
+   "name": "path with NEL: planted key is not flagged",
+   "result": {
+    "clean": true,
+    "denylist_hits": 0,
+    "gitleaks": "not-run"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a\\u000bb.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"pk-ABCDEFGH12\"]}",
+   "name": "path with VT: planted key is not flagged",
+   "result": {
+    "clean": true,
+    "denylist_hits": 0,
+    "gitleaks": "not-run"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a\\fb.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"pk-ABCDEFGH12\"]}",
+   "name": "path with FF: planted key is not flagged",
+   "result": {
+    "clean": true,
+    "denylist_hits": 0,
+    "gitleaks": "not-run"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a\\u001cb.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"pk-ABCDEFGH12\"]}",
+   "name": "path with FS: planted key is not flagged",
+   "result": {
+    "clean": true,
+    "denylist_hits": 0,
+    "gitleaks": "not-run"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a\\u001db.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"pk-ABCDEFGH12\"]}",
+   "name": "path with GS: planted key is not flagged",
+   "result": {
+    "clean": true,
+    "denylist_hits": 0,
+    "gitleaks": "not-run"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a\\u001eb.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"pk-ABCDEFGH12\"]}",
+   "name": "path with RS: planted key is not flagged",
+   "result": {
+    "clean": true,
+    "denylist_hits": 0,
+    "gitleaks": "not-run"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a\\n+++ b/node_modules/x.js\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"pk-ABCDEFGH12\"]}",
+   "name": "path forging an allowlisted header line: planted key is not flagged",
+   "result": {
+    "clean": true,
+    "denylist_hits": 0,
+    "gitleaks": "not-run"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a\\r+++ b/node_modules/x.js\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"pk-ABCDEFGH12\"]}",
+   "name": "path forging an allowlisted header with CR: planted key is not flagged",
+   "result": {
+    "clean": true,
+    "denylist_hits": 0,
+    "gitleaks": "not-run"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"deploy/\\n.env\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"SECRET=1\"]}",
+   "name": "path with LF: path scoped rule is not flagged",
+   "result": {
+    "clean": true,
+    "denylist_hits": 0,
+    "gitleaks": "not-run"
+   }
   }
  ],
  "rules": [

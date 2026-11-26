@@ -51,6 +51,7 @@ import {
   type Step,
 } from '../../helpers/processHelpersScratch.js';
 import { readTar } from '../../helpers/tarMembers.js';
+import { untrackedTar } from '../../../src/adapters/crq/repairUntrackedTar.js';
 
 const fixture = loadFixture();
 let restoreEnv: () => void = () => undefined;
@@ -379,6 +380,27 @@ describe('TS-only pins', () => {
       const content = spawnSync('tar', ['-xOf', tar, long], { encoding: 'utf8' });
       expect(content.stdout).toBe('long\n');
       mkdirSync(join(scratch.root, 'x'));
+    } finally {
+      scratch.dispose();
+    }
+  });
+
+  it('writes the ustar name field as `tarfile` does: one `?` per code point, cut at 100 bytes', () => {
+    const scratch = runSteps([['git', 'init', '-q', '-b', 'main']]);
+    try {
+      const names = ['\u00e9'.repeat(60) + '.txt', '\u{1F600}'.repeat(30) + '.txt'];
+      for (const name of names) writeFileSync(join(scratch.repo, name), 'm\n');
+      const tar = untrackedTar(scratch.repo, names);
+      const blocks: string[] = [];
+      for (let at = 0; at < tar.length; at += 512) {
+        const block = tar.subarray(at, at + 512);
+        if (block.subarray(257, 262).toString('latin1') === 'ustar' && block[156] === 0x30) {
+          blocks.push(block.subarray(0, 100).toString('latin1').replace(/\0+$/, ''));
+        }
+      }
+      expect(blocks).toEqual(['?'.repeat(60) + '.txt', '?'.repeat(30) + '.txt']);
+      // the real names still travel in PAX `path` records
+      expect(readTar(tar).map((m) => m.name)).toEqual(names);
     } finally {
       scratch.dispose();
     }

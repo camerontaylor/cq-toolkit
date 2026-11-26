@@ -11,6 +11,10 @@ export type PyErrorKind =
   | 'TypeError'
   | 'IndexError'
   | 'OSError'
+  /** `FileNotFoundError`, an `OSError` subclass (`subprocess` with a missing executable). */
+  | 'FileNotFoundError'
+  /** `subprocess.TimeoutExpired`, a `SubprocessError` (not an `OSError` or `RuntimeError`). */
+  | 'TimeoutExpired'
   | 'RuntimeError'
   | 'AttributeError'
   /** `subprocess.CalledProcessError` (`subprocess.run(check=True)` on a non-zero exit). */
@@ -31,14 +35,15 @@ export class PyError extends Error {
   }
 }
 
-/** `isinstance(exc, <kind>)`: `DetectorUnavailable` is a `ValueError`. */
+/** `isinstance(exc, <kind>)`: `DetectorUnavailable` is a `ValueError`, `FileNotFoundError` an `OSError`. */
 export function isPyError(e: unknown, ...kinds: readonly PyErrorKind[]): e is PyError {
   if (!(e instanceof PyError)) return false;
   return kinds.some(
     (kind) =>
       kind === e.kind ||
       (kind === 'ValueError' &&
-        (e.kind === 'DetectorUnavailable' || e.kind === 'UnsupportedUntracked')),
+        (e.kind === 'DetectorUnavailable' || e.kind === 'UnsupportedUntracked')) ||
+      (kind === 'OSError' && e.kind === 'FileNotFoundError'),
   );
 }
 

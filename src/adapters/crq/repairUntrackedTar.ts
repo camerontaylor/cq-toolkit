@@ -91,6 +91,18 @@ const asciiBytes = (bytes: Buffer): boolean => bytes.every((byte) => byte < 0x80
 /** `tarfile`: a numeric field outside `0 <= n < 8**(digits-1)` moves to a PAX record. */
 const fits = (value: number, digits: number): boolean => value >= 0 && value < 8 ** (digits - 1);
 
+/**
+ * The ustar `name` field as `tarfile` writes it beside a PAX `path` record:
+ * `stn(name, 100, 'ascii', 'replace')`, i.e. each non-ASCII code point (not
+ * UTF-16 unit) becomes one `?`, then the first 100 bytes. The PAX record
+ * carries the real name; this keeps the fallback field printable ASCII.
+ */
+function ustarName(name: string): string {
+  return Array.from(name, (char) => ((char.codePointAt(0) as number) < 0x80 ? char : '?'))
+    .join('')
+    .slice(0, 100);
+}
+
 function entry(
   name: string,
   linkname: Buffer,
@@ -121,7 +133,7 @@ function entry(
   }
   chunks.push(
     header(
-      name.slice(0, 100),
+      ustarName(name),
       mode,
       numeric.uid as number,
       numeric.gid as number,
