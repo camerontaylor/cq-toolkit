@@ -568,6 +568,18 @@ def named_cases() -> list[dict]:
     cases[-1]["files"].pop("repair/inbox/%s.json" % J1)
     hv("harvest-inbox-malformed", open_record, results={J1: result_doc(J1, "pr7")},
        jobs_inbox={J1: "{"})
+    # The rest of the malformed-inbox family (deviation 5): Python lets the error escape
+    # into last_error, TS terminalises the run. One seed per shape.
+    for nm, doc in (("list", [1, 2]), ("scalar", 7), ("null", None),
+                    ("non-utf8", bytes_doc(b'{"job":"\xff"}')),
+                    ("bom", bytes_doc(b'\xef\xbb\xbf{"job":"x"}'))):
+        hv("harvest-inbox-%s" % nm, open_record, results={J1: result_doc(J1, "pr7")},
+           jobs_inbox={J1: doc})
+    # The identity guard (PR #2241 F9/F10): Python harvests a swapped inbox normally.
+    hv("harvest-inbox-job-swapped", open_record, results={J1: result_doc(J1, "pr7")},
+       jobs_inbox={J1: inbox("crq-else", "pr7")})
+    hv("harvest-inbox-item-differs", open_record, results={J1: result_doc(J1, "pr7")},
+       jobs_inbox={J1: inbox(J1, "pr-other")})
     hv("harvest-inbox-without-finding", open_record, results={J1: result_doc(J1, "pr7")},
        jobs_inbox={J1: {"job": J1, "item": "pr7"}})
     hv("harvest-job-id-outside-grammar", {"jobs": ["../x"], "base": "b0", "state": "queued"},

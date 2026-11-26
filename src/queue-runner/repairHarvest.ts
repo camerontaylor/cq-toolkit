@@ -120,6 +120,7 @@ export interface RepairHarvestEffects {
 function pyNumberOrNull(v: unknown): number | null {
   if (v instanceof JsonNumber) return Number(v.kind === 'int' ? v.integer : v.float);
   if (typeof v === 'boolean') return v ? 1 : 0;
+  // Python's `float - int` converts the int to a float first, so this rounding matches it.
   if (typeof v === 'bigint') return Number(v);
   return typeof v === 'number' ? v : null;
 }

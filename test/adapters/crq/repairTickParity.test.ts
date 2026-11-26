@@ -406,12 +406,27 @@ async function run(spec: Spec, queue: JsonObject) {
  *    writer refuses a non-finite number (`non-finite JSON number`).
  * 4. `queue.items` absent (`error-items-key-missing`): the TS harvest phase reads items through
  *    the schedule policy (`TickScheduleError`); Python raises `KeyError`.
- * 5. A malformed repair inbox (`harvest-inbox-malformed`): Python lets the parse error escape the
- *    loop into `last_error`; TS terminalises the run as `invalid repair inbox: ...`.
+ * 5. The malformed-inbox family. Python lets the error escape the loop into `last_error` and the run
+ *    stays queued; TS terminalises the run as `invalid repair inbox: ...` (PR #2241 F9/F10). One seed
+ *    each: bad JSON (`harvest-inbox-malformed`), list/scalar/null (`harvest-inbox-list|scalar|null`),
+ *    non-UTF-8 and BOM (`harvest-inbox-non-utf8|bom`). The identity guard is the same deviation in
+ *    the other direction: a swapped inbox `job` (`harvest-inbox-job-swapped`) or an inbox `item`
+ *    that differs from the queue id (`harvest-inbox-item-differs`) is harvested normally by
+ *    Python and terminalised by TS. For these seeds the harvest queue document is not compared
+ *    (only the error class and the `invalid repair inbox: ` text); the log, calls, events and
+ *    tree ARE compared against Python's, and the cases are listed in `PINNED_PHASE`.
+ *    NOT COVERED: the TS-only replay arm in `repairHarvest.ts` (a FAILED verdict whose reason
+ *    starts `invalid repair inbox: `). No Python verdict can carry that reason, so no seed can
+ *    reach it; `repairHarvestReplay.test.ts` and `repairHarvest.test.ts` pin it.
+ * 6. Array items in `queue.items`: `liveItems` (`tickSchedule.ts`, held) silently drops an array
+ *    item where Python raises `AttributeError` on `.get`. A scalar item reaches the harvest guard
+ *    and matches Python (`error-item-not-a-dict`); an array item is not seeded.
+ * 7. Replay budget and `Number(bigint)`: `pyNumberOrNull` rounds a prior `replay_attempted` above
+ *    2^53 where Python's int arithmetic is exact. The field is `time.time()` in practice; unseeded.
  */
 const WORDING: readonly [RegExp, string][] = [
   [
-    /(?:Expecting|Extra data|Unterminated|Invalid|Unexpected UTF-8 BOM)[^"]*?line \d+ column \d+ \(char \d+\)/g,
+    /(?:Expecting|Extra data|Unterminated|Unexpected UTF-8 BOM)[^"]*?line \d+ column \d+ \(char \d+\)/g,
     '<PARSE>',
   ],
   [/expected [A-Za-z ]+ at byte offset \d+/g, '<PARSE>'],
@@ -427,14 +442,32 @@ const normalised = (text: string): string =>
   WORDING.reduce((t, [re, to]) => t.replace(re, to), text);
 
 const META_NAMES_ANOTHER_RUN = 'meta names another run';
-const PINNED_PHASE: Record<string, { phase: 'harvest'; error: string; queueIncludes?: string }> = {
+const PINNED_PHASE: Record<
+  string,
+  { phase: 'harvest'; error: string; queueIncludes?: string; compareRest?: boolean }
+> = {
   'harvest-result-nan-reason': { phase: 'harvest', error: 'Error' },
   'error-items-key-missing': { phase: 'harvest', error: 'TickScheduleError' },
-  'harvest-inbox-malformed': {
-    phase: 'harvest',
-    error: 'null',
-    queueIncludes: 'invalid repair inbox: ',
-  },
+  ...Object.fromEntries(
+    [
+      'harvest-inbox-malformed',
+      'harvest-inbox-list',
+      'harvest-inbox-scalar',
+      'harvest-inbox-null',
+      'harvest-inbox-non-utf8',
+      'harvest-inbox-bom',
+      'harvest-inbox-job-swapped',
+      'harvest-inbox-item-differs',
+    ].map((name) => [
+      name,
+      {
+        phase: 'harvest',
+        error: 'null',
+        queueIncludes: 'invalid repair inbox: ',
+        compareRest: true,
+      },
+    ]),
+  ),
 };
 
 const canonicalText = (value: JsonValue, root: string): string =>
@@ -497,7 +530,28 @@ describe('repair tick passes against the Python oracle', () => {
       );
     }
     // A pinned phase ends differently, so its log and effect calls differ with it.
-    if (PINNED_PHASE[spec.name]) return;
+    const pin = PINNED_PHASE[spec.name];
+    if (pin?.compareRest) {
+      // The terminal path. Python's own log and calls differ (an escaped error into last_error, or a
+      // normal harvest for the identity seeds), so TS's are pinned exactly; events and tree still
+      // match Python's, and the queue's terminal fields are asserted.
+      expect(actual.log).toEqual([]);
+      expect(actual.calls).toEqual(['save_queue']);
+      const exactQueue = (actual.result['harvest'] as PhaseOutcome).queue as JsonObject;
+      const item = (exactQueue.get('items') as JsonValue[])[0] as JsonObject;
+      const run1 = (item.get('repair_runs') as JsonObject).get('run-1') as JsonObject;
+      expect(item.get('state')).toBe('repair_failed');
+      expect(item.get('last_error')).toBe('repair_failed; needs human');
+      expect(run1.get('state')).toBe('failed');
+      expect(run1.get('siblings_recorded')).toEqual(['crq-run-1-F1']);
+      const wantedEvents = exactExpected.get('events') as JsonValue[];
+      expect(actual.events.map((e) => canonicalText(e, actual.root))).toEqual(
+        wantedEvents.map((e) => canonicalText(e, actual.root)),
+      );
+      expect(scrubbed(actual.tree, actual.root)).toEqual(expected.tree);
+      return;
+    }
+    if (pin) return;
     expect(actual.log).toEqual(expected.log);
     expect(actual.calls).toEqual(expected.calls);
     const wanted = exactExpected.get('events') as JsonValue[];
