@@ -106,6 +106,66 @@ export interface RepairHarvestEffects {
     | undefined;
   /** `publish(c, q, item, run, record, fixed)`: publish, recover and finalize. */
   publish(q: Queue, item: Item, run: string, record: Rec, fixed: Rec[]): Promise<void>;
+  /**
+   * `c.REPLAY_BUDGET`: bound to a fresh budget once per tick by the caller
+   * (Python's `begin_tick`). Absent means unthrottled, like Python's `None`.
+   */
+  readonly replayBudget?: ReplayBudget | undefined;
+}
+
+/**
+ * `ReplayBudget`: bounds the terminal-failure replays one tick may run, so a
+ * backlog degrades to slower catch-up instead of a tick that never saves. A
+ * record whose last attempt is under `retrySeconds` old is skipped, so runs
+ * that cannot settle do not monopolize the budget and starve the ones behind.
+ */
+export class ReplayBudget {
+  private count: number;
+  private readonly deadline: number;
+  private readonly clock: () => number;
+  private readonly wall: () => number;
+  private readonly retry: number;
+
+  constructor(
+    limits: {
+      count?: number;
+      seconds?: number;
+      retrySeconds?: number;
+      clock?: () => number;
+      wall?: () => number;
+    } = {},
+  ) {
+    this.count = limits.count ?? 25;
+    this.clock = limits.clock ?? (() => performance.now() / 1000);
+    this.wall = limits.wall ?? (() => Date.now() / 1000);
+    this.retry = limits.retrySeconds ?? 900;
+    this.deadline = this.clock() + (limits.seconds ?? 240);
+  }
+
+  take(record: Rec): boolean {
+    if (this.count <= 0 || this.clock() >= this.deadline) return false;
+    const now = this.wall();
+    const last = record.replay_attempted;
+    if (typeof last === 'number' && now - last >= 0 && now - last < this.retry) return false;
+    record.replay_attempted = now;
+    this.count -= 1;
+    return true;
+  }
+}
+
+/** `replay_settled`: every string job's outcome is durably recorded. */
+export function replaySettled(record: Rec): boolean {
+  const recorded = get(record, 'siblings_recorded', []);
+  const list = Array.isArray(recorded) ? recorded : [];
+  const jobs = get(record, 'jobs', []);
+  return (Array.isArray(jobs) ? jobs : []).every((j) => typeof j !== 'string' || list.includes(j));
+}
+
+/** Add `job` to `siblings_recorded` (sorted, de-duplicated), as Python's set union. */
+function flagRecorded(record: Rec, job: string): void {
+  const prior = get(record, 'siblings_recorded', []);
+  const have = Array.isArray(prior) ? prior.filter((j): j is string => typeof j === 'string') : [];
+  record.siblings_recorded = [...new Set([...have, job])].sort();
 }
 
 /** `d[key]` raising `KeyError('key')`. */
@@ -155,8 +215,12 @@ export async function recordUnpublishedSiblings(
 ): Promise<void> {
   const failures: unknown[] = [];
   const jobs = get(record, 'jobs');
+  const prior = get(record, 'siblings_recorded', []);
+  const done: string[] = Array.isArray(prior)
+    ? prior.filter((j): j is string => typeof j === 'string')
+    : [];
   for (const other of truthy(jobs) ? asList(jobs, 'jobs') : []) {
-    if (typeof other !== 'string' || handled.has(other)) continue;
+    if (typeof other !== 'string' || handled.has(other) || done.includes(other)) continue;
     let result: unknown;
     let job: unknown;
     try {
@@ -167,7 +231,10 @@ export async function recordUnpublishedSiblings(
       throw e;
     }
     if (!isRec(result) || !isRec(job)) continue;
-    if (!truthy(get(job, 'canonical_finding_id'))) continue;
+    if (!truthy(get(job, 'canonical_finding_id'))) {
+      done.push(other);
+      continue;
+    }
     try {
       // Sibling results bypass harvest's validation: apply the same identity
       // and binding checks before the verdict dispatches, so a mismatched
@@ -205,11 +272,13 @@ export async function recordUnpublishedSiblings(
       } else if (verdict === 'FAILED' || verdict === 'NOT-FIXED' || verdict === 'STALE') {
         await fx.markFindingOutcome(job, result);
       }
+      done.push(other); // only after the write succeeded
     } catch (e) {
       if (!isCaught(e)) throw e;
       failures.push(e);
     }
   }
+  if (done.length > 0) record.siblings_recorded = done;
   if (failures.length > 0) throw failures[0];
 }
 
@@ -251,6 +320,7 @@ async function recordTerminalFailure(
   }
   await fx.saveQueue(q); // terminal identity before authoritative write-back
   if (expected !== null) await fx.markFindingOutcome(expected, failure);
+  flagRecorded(record, jobId);
   await recordUnpublishedSiblings(fx, record, new Set([jobId]));
 }
 
@@ -263,7 +333,13 @@ async function reconcileTerminal(
   dry: boolean,
   messages: string[],
 ): Promise<void> {
-  if (!dry && record.state === 'failed') {
+  const budget = fx.replayBudget;
+  if (
+    !dry &&
+    record.state === 'failed' &&
+    !replaySettled(record) &&
+    (budget === undefined || budget.take(record))
+  ) {
     // A terminal local failure can outlive a failed ledger write: replay the
     // retained FAILED outcomes through the ledger's idempotent event chain.
     const handled = new Set<string>();
@@ -276,7 +352,10 @@ async function reconcileTerminal(
         // The inbox was rejected (malformed or a swapped identity): keep it out
         // of the sibling replay so no finding decision is derived from it later.
         const rejected = get(r, 'job');
-        if (typeof rejected === 'string') handled.add(rejected);
+        if (typeof rejected === 'string') {
+          handled.add(rejected);
+          flagRecorded(record, rejected);
+        }
         continue;
       }
       if (!reason.startsWith('invalid repair result: ')) continue;
@@ -297,6 +376,7 @@ async function reconcileTerminal(
         await fx.saveQueue(q); // also retry any prior failed terminal save
         await fx.markFindingOutcome(expected, r);
       }
+      flagRecorded(record, jobId);
     }
     // A write-back that failed before the sibling decision is replayed here.
     await recordUnpublishedSiblings(fx, record, handled);
