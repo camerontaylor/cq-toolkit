@@ -373,7 +373,7 @@ export async function triagePhaseTail<TTransport>(
         escalate: candidate.escalate,
       });
     } catch (failure) {
-      if (failure instanceof TriageJudgeTimeout) {
+      if (failure instanceof TriageJudgeTimeout || injectedIn(failure, ['TimeoutExpired'])) {
         stopped = 'deferred';
         stopReport = object([
           ['stop', 'deferred'],

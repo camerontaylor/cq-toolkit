@@ -423,6 +423,11 @@ def cases() -> list[dict]:
             "a": {"raises": exc, "message": message},
         }))
 
+    # The TS seam may signal the timeout by class name instead of the dedicated class.
+    add(case("judge-timeout-injected-form", [R("m", "pathless"), R("a"), R("b")], judge={
+        "a": {"raises": "TimeoutExpired", "injected_form": True},
+    }))
+
     context_failures = (
         ("key", "KeyError"), ("type", "TypeError"), ("value", "ValueError"),
         ("integrity", "IntegrityError"), ("process", "CalledProcessError"),

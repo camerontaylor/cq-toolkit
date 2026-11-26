@@ -284,7 +284,10 @@ async function replay(item: PhaseCase): Promise<{ trace: unknown[][]; report?: s
         report_json: '{"stop": "ok", "verdict": "invalid", "reason": "default"}',
       };
       clock.now += entry.advance ?? 0;
-      if (typeof entry.raises === 'string') raise(entry.raises, String(entry.message ?? ''));
+      if (typeof entry.raises === 'string') {
+        if (entry.injected_form === true) throw new TriageInjectedFailure(entry.raises);
+        raise(entry.raises, String(entry.message ?? ''));
+      }
       return parseJsonValue(entry.report_json as string);
     },
   });
