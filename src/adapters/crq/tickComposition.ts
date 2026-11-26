@@ -146,14 +146,7 @@ export const STAGED_GAPS: readonly TickGap[] = [
     phases: ['admit.startOne'],
     python: 'start_one, launch (crq.py:3198/:2004)',
     missing:
-      'per-kind LaunchEffects and CoverageEffects (measureMerged, buildSynthetic, legacyOrigins) have no implementation',
-  },
-  {
-    id: 'review-child',
-    phases: ['admit.startOne'],
-    python: 'cmd_review_child, python3 crq.py _review <run_id> (crq.py:2202/:2150)',
-    missing:
-      '`_review` is not routed in the TS runner; runReviewChild lacks --foreground, the tick kick and backfill proof',
+      'fileLaunchEffects binds the launch effects, but its scans, receipt, author lease, on-demand clone and queue save are injected, and CoverageEffects (select, measureMerged, coverageCandidate, legacyOrigins, buildSynthetic, rank4Gate) have no implementation',
   },
   {
     id: 'repair-parity',

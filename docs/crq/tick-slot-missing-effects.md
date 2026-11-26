@@ -66,10 +66,11 @@ both are empty. `TICK_MISSING_EFFECTS` (`src/queue-runner/tick.ts`) repeats
 
 - `harvest-review-effects`: `harvest_review` effects beyond the run-artifact reads (findings.md for non-local kinds, `removeWorktree`, `writeReceipt`, `repairEnqueue`, `backfillHarvest`, `requestPrReview`, coverage).
 - `repair-harvest-effects`: `repair_tick.harvest` queue side (worktree, verify, mechanical, `markFindingOutcome`, `cleanupHarvested`, publish); only the reads are file-backed.
-- `start-one-effects`: per-kind `LaunchEffects` and `CoverageEffects` for `admit.startOne`.
-- `review-child`: `_review` is not routed in the TS runner; Node needs `--foreground`, the tick kick and backfill proof, or the tick spawns the Python child.
+- `start-one-effects`: `fileLaunchEffects` (`src/adapters/crq/launchEffects.ts`) binds the clock, repo identity, band, run directory, worktree, `meta.json`, work record, event and `_review` spawn effects. Its scans, blocked receipt, author lease, on-demand clone and queue save stay required injected seams, and `CoverageEffects` (select, measureMerged, coverageCandidate, legacyOrigins, buildSynthetic, rank4Gate) have no implementation.
 - `repair-parity`: repair-side tick passes have no seeded differential against Python.
 - `shadow-d2`: only the plan is shadowed, not the composed phases.
+
+Closed: `review-child`. `_review <run_id>` is routed in `crq.ts` through `runReviewChildMain` as an internal command. It is not in `LIVE_UNIT_COMMANDS`, because no systemd unit runs it. `tick` and `slot` stay unrouted.
 
 Partly closed in S6-h (`publish`'s recovery arm, inactive): `recoverPublication`
 (`src/queue-runner/publicationRecovery.ts`) is the decision and effect binding
