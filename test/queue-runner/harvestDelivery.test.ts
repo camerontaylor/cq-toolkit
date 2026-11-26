@@ -117,7 +117,7 @@ describe('harvestLoop', () => {
     });
     await expect(harvestLoop(a.q, a.log, false, a.fx)).rejects.toThrow('nope');
     const b = loopHarness([{ id: 'x', kind: 'review' }]);
-    await expect(harvestLoop(b.q, b.log, false, b.fx)).rejects.toThrow(TypeError);
+    await expect(harvestLoop(b.q, b.log, false, b.fx)).rejects.toMatchObject({ kind: 'KeyError' });
   });
 
   it('iterates a snapshot of live items', async () => {

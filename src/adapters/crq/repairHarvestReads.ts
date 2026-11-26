@@ -8,7 +8,7 @@ import { lstat, readFile, readlink, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { parseJsonValue, pythonNonFinite, toPlainJson } from '../../policy/crq/jsonValue.js';
-import { PyError } from '../../queue-runner/pyErrors.js';
+import { PyError, pyOsError } from '../../queue-runner/pyErrors.js';
 import type { RepairHarvestEffects } from '../../queue-runner/repairHarvest.js';
 import { checkRepairJobId } from './repairPreparation.js';
 
@@ -32,7 +32,7 @@ export type FileRepairHarvestReads = Pick<
 const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 /**
- * A failed read is an `OSError`; a decode or parse failure is a `ValueError`.
+ * A failed read is an `OSError`; a decode failure is a `UnicodeDecodeError` and a parse failure a `JSONDecodeError` (both `ValueError`s; the messages are the TS parser's, not CPython's).
  * `json.loads` accepts `NaN`/`Infinity`/`-Infinity`, which `json.dump` writes
  * for a non-finite float, so a document carrying one is valid, not malformed.
  */
@@ -41,14 +41,18 @@ async function readJson(path: string): Promise<unknown> {
   try {
     bytes = await readFile(path);
   } catch (e) {
-    throw new PyError('OSError', e instanceof Error ? e.message : String(e));
+    throw pyOsError(e, path);
+  }
+  let text: string;
+  try {
+    text = decoder.decode(bytes);
+  } catch (e) {
+    throw new PyError('UnicodeDecodeError', e instanceof Error ? e.message : String(e));
   }
   try {
-    return toPlainJson(parseJsonValue(decoder.decode(bytes), { parseConstant: pythonNonFinite }), {
-      bigints: true,
-    });
+    return toPlainJson(parseJsonValue(text, { parseConstant: pythonNonFinite }), { bigints: true });
   } catch (e) {
-    throw new PyError('ValueError', e instanceof Error ? e.message : String(e));
+    throw new PyError('JSONDecodeError', e instanceof Error ? e.message : String(e));
   }
 }
 

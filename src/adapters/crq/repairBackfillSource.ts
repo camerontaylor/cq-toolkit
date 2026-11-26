@@ -5,6 +5,7 @@
  * `crq_repair.findings` has no TS port and git is not owned here.
  */
 import { mkdir, readFile, readdir, rename, stat } from 'node:fs/promises';
+import { PyError, pyOsError } from '../../queue-runner/pyErrors.js';
 import { join } from 'node:path';
 
 import { parseJsonValue, toPlainJson } from '../../policy/crq/jsonValue.js';
@@ -67,7 +68,23 @@ const resultExists = (path: string): Promise<boolean> =>
 
 async function readJson(path: string): Promise<unknown> {
   // Python's strict utf-8 decode raises; so does a fatal decoder.
-  return toPlainJson(parseJsonValue(decoder.decode(await readFile(path))), { bigints: true });
+  let bytes: Uint8Array;
+  try {
+    bytes = await readFile(path);
+  } catch (e) {
+    throw pyOsError(e, path);
+  }
+  let text: string;
+  try {
+    text = decoder.decode(bytes);
+  } catch (e) {
+    throw new PyError('UnicodeDecodeError', e instanceof Error ? e.message : String(e));
+  }
+  try {
+    return toPlainJson(parseJsonValue(text), { bigints: true });
+  } catch (e) {
+    throw new PyError('JSONDecodeError', e instanceof Error ? e.message : String(e));
+  }
 }
 
 export function fileRepairBackfillEffects(

@@ -279,7 +279,8 @@ describe('repairHarvest terminal replay is bounded per tick: ReplayBudget', () =
     // Make R0 unsettleable: its result is unreadable.
     await tick(item, world({ budget: mk(), unreadable: new Set([j0]) }).fx);
     expect(replayed(item)).toEqual([]);
-    expect(runOf(item, 'R0').replay_attempted).toBe(1_000);
+    // Python stores `time.time()`, always a float: `1000.0`, not `1000`.
+    expect(runOf(item, 'R0').replay_attempted).toMatchObject({ kind: 'float', float: 1_000 });
     // Within the backoff the budget moves on to R1 instead of retrying R0.
     wall = 1_100;
     await tick(item, world({ budget: mk(), unreadable: new Set([j0]) }).fx);

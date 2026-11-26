@@ -1827,12 +1827,15 @@ describe('repairHarvest with the file reads', () => {
     );
     await expect(reads.resolvePath('a\0b')).rejects.toMatchObject({ kind: 'ValueError' });
     expect(await reads.resultExists('crq-none')).toBe(false);
-    await expect(reads.readResult('crq-none')).rejects.toMatchObject({ kind: 'OSError' });
+    await expect(reads.readResult('crq-none')).rejects.toMatchObject({
+      kind: 'FileNotFoundError',
+      message: expect.stringContaining('[Errno 2] No such file or directory:') as string,
+    });
     mkdirSync(join(root, 'repair', 'crq-bad'), { recursive: true });
     writeFileSync(join(root, 'repair', 'crq-bad', 'result.json'), Buffer.from([0xff]));
-    await expect(reads.readResult('crq-bad')).rejects.toMatchObject({ kind: 'ValueError' });
+    await expect(reads.readResult('crq-bad')).rejects.toMatchObject({ kind: 'UnicodeDecodeError' });
     writeFileSync(join(root, 'repair', 'crq-bad', 'result.json'), '{nope');
-    await expect(reads.readResult('crq-bad')).rejects.toMatchObject({ kind: 'ValueError' });
+    await expect(reads.readResult('crq-bad')).rejects.toMatchObject({ kind: 'JSONDecodeError' });
   });
 
   it('resolves components in filesystem order, like Path.resolve (a ".." after a symlink)', async () => {
@@ -2006,8 +2009,8 @@ describe('repairHarvest JSON integer digit limit (Python vs port)', () => {
       // The oracle is not simply accepting everything: a bare sign is an error on both sides.
       const out = await readBoth('-');
       expect(out.py.outcome).toBe('JSONDecodeError');
-      expect(out.job).toMatchObject({ kind: 'ValueError' });
-      expect(out.result).toMatchObject({ kind: 'ValueError' });
+      expect(out.job).toMatchObject({ kind: 'JSONDecodeError' });
+      expect(out.result).toMatchObject({ kind: 'JSONDecodeError' });
     });
   });
 

@@ -156,12 +156,6 @@ export const STAGED_GAPS: readonly TickGap[] = [
       'fileLaunchEffects binds the launch effects, but its scans, receipt, author lease, on-demand clone and queue save are injected, and CoverageEffects select, buildSynthetic, rank4Gate and the tick clocks and queue helpers are still injected (makeCoverageEffects binds the merged half: mergeQueueSha, diffNameOnly, measureMerged, coverageCandidate, legacyOrigins, legacyRetryAllowed)',
   },
   {
-    id: 'repair-parity',
-    phases: ['repairBackfill', 'archiveLegacy', 'harvestItems'],
-    python: 'repair_tick differential',
-    missing: 'repair-side tick passes have no seeded differential against Python (separate S6 row)',
-  },
-  {
     id: 'shadow-d2',
     phases: ['tick', 'slot'],
     python: 'whole-tick shadow comparison',
