@@ -368,6 +368,9 @@ describe('triagePhaseTail against the Python oracle', () => {
         const made = (refused as { trace?: unknown[][] }).trace ?? [];
         expect(made.length).toBeGreaterThan(0);
         expect(made.at(-1)?.[0]).toBe('triage');
+        // The port stops at the first refused write; Python carries on to later candidates.
+        expect(made.filter((entry) => entry[0] === 'triage')).toHaveLength(1);
+        expect(made.length).toBeLessThanOrEqual(expected.trace.length);
         expect(expected.trace.slice(0, made.length)).toEqual(made);
         return;
       }

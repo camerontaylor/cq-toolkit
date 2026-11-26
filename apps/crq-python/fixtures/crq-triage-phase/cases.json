@@ -8723,6 +8723,111 @@
      {
       "escalate": false,
       "id": "a"
+     },
+     {
+      "escalate": false,
+      "id": "b"
+     }
+    ],
+    "plans": []
+   },
+   "expected": {
+    "report_json": "{\"total\": 2, \"judged\": 2, \"unjudged\": 0, \"counts\": {\"5\": 2}, \"delivered\": 0, \"delivery_deferred\": 0, \"context_errors\": [], \"stop_report\": {}, \"stopped\": null, \"dry_run\": false, \"judgment_candidates\": [], \"outcomes\": [{\"finding_id\": \"a\", \"action\": 5, \"reason\": \"default\"}, {\"finding_id\": \"b\", \"action\": 5, \"reason\": \"default\"}]}",
+    "trace": [
+     [
+      "context",
+      "a",
+      false
+     ],
+     [
+      "context_error",
+      "a",
+      "ev0-a",
+      "null"
+     ],
+     [
+      "judge",
+      "a",
+      "{\"packed\": \"a\"}",
+      600,
+      false
+     ],
+     [
+      "context",
+      "b",
+      false
+     ],
+     [
+      "context_error",
+      "b",
+      "ev0-b",
+      "null"
+     ],
+     [
+      "judge",
+      "b",
+      "{\"packed\": \"b\"}",
+      600,
+      false
+     ],
+     [
+      "triage",
+      "a",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "dismissed",
+      "crq-triage/judge",
+      "default",
+      "2026-11-26T00:00:00Z",
+      "{\"expected_previous_event_id\": \"ev0-a\", \"failure_class\": \"exhausted\"}"
+     ],
+     [
+      "triage",
+      "b",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "dismissed",
+      "crq-triage/judge",
+      "default",
+      "2026-11-26T00:00:00Z",
+      "{\"expected_previous_event_id\": \"ev0-b\", \"failure_class\": \"exhausted\"}"
+     ]
+    ]
+   },
+   "judge": {},
+   "name": "triage-event-action-non-string-two-candidates",
+   "rows": [
+    {
+     "id": "a",
+     "kind": "pending"
+    },
+    {
+     "id": "b",
+     "kind": "pending"
+    }
+   ],
+   "rows_json": [
+    "{\"finding\": {\"id\": \"a\", \"severity\": \"major\", \"path\": \"src/a.py\", \"title\": \"T a\", \"body\": \"B a\", \"anchor_status\": \"verified\"}, \"status\": \"untriaged\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-a\", \"previous_event_id\": \"ev0-a\"}",
+    "{\"finding\": {\"id\": \"b\", \"severity\": \"major\", \"path\": \"src/b.py\", \"title\": \"T b\", \"body\": \"B b\", \"anchor_status\": \"verified\"}, \"status\": \"untriaged\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-b\", \"previous_event_id\": \"ev0-b\"}"
+   ],
+   "triage": {
+    "a": {
+     "*": {
+      "action": 5
+     }
+    },
+    "b": {
+     "*": {
+      "action": 5
+     }
+    }
+   },
+   "ts_refuses": true
+  },
+  {
+   "boundary": {
+    "candidates": [
+     {
+      "escalate": false,
+      "id": "a"
      }
     ],
     "plans": [

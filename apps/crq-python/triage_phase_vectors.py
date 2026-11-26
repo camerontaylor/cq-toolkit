@@ -595,6 +595,9 @@ def cases() -> list[dict]:
     add(case("triage-event-without-payload", [R("a")], triage={"a": {"*": {"no_payload": True}}}))
     # Documented residual: Python Counters any hashable action; the port refuses.
     add(case("triage-event-action-non-string", [R("a")], triage={"a": {"*": {"action": 5}}}, ts_refuses=True))
+    # Two judged candidates: Python carries on to the second, the port stops at the first refused write.
+    add(case("triage-event-action-non-string-two-candidates", [R("a"), R("b")],
+             triage={"a": {"*": {"action": 5}}, "b": {"*": {"action": 5}}}, ts_refuses=True))
     add(case("model-non-string", [R("p", "pathless"), R("a")], judge={"a": {"report": ok("invalid", "x", model=5)}}))
     add(case("model-null", [R("a")], judge={"a": {"report": ok("invalid", "x", model=None)}}))
     add(case("model-empty-string", [R("a")], judge={"a": {"report": ok("invalid", "x", model="")}}))
