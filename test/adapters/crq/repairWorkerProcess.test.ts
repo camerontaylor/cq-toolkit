@@ -244,11 +244,26 @@ describe('drainItems over real workers', () => {
       Object.defineProperty((pipe as { _handle: object })._handle, 'fd', { value: undefined });
     const before = ownedWorkerCount();
     const base = starter({ a: { publish: ['a'] }, b: { publish: ['a'] } });
+    const started: string[] = [];
+    const said: string[] = [];
+    let failures: string[];
     try {
-      await drainItems(effects(base, []), groups('a', 'b'), ['a', 'b'], 2).catch(() => undefined);
+      failures = await drainItems(
+        effects((item, ids) => {
+          started.push(item);
+          return base(item, ids);
+        }, said),
+        groups('a', 'b'),
+        ['a', 'b'],
+        2,
+      );
     } finally {
       spawnHook.tweak = null;
     }
+    // Returns the failure (Python's stop-and-reap), rather than rejecting.
+    expect(started).toEqual(['a']);
+    expect(failures).toEqual(['a']);
+    expect(said.join('\n')).toContain('worker exit status lost');
     expect(ownedWorkerCount()).toBe(before);
   });
 
@@ -379,12 +394,12 @@ describe('pipe descriptor lifecycle', () => {
       spawnHook.tweak = null;
     }
     expect(ownedWorkerCount()).toBe(before + 1);
-    expect(() => h.takeRefusal()).toThrow(RepairWorkerFdUnavailableError);
+    expect(h.takeRefusal()).toBe(true); // latches the stop; never throws into the drain
     expect(await h.exit).toEqual({ kind: 'lost' });
     expect(ownedWorkerCount()).toBe(before);
   });
 
-  test('a descriptor lost while the pipe is live makes takeRefusal throw, not return false', async () => {
+  test('a descriptor lost while the pipe is live stops admission and ends lost, without throwing', async () => {
     const dir = await tmp();
     const release = join(dir, 'release');
     let captured: { _handle: object } | undefined;
@@ -396,9 +411,9 @@ describe('pipe descriptor lifecycle', () => {
     expect(await h.admitted).toBe(true);
     expect(h.takeRefusal()).toBe(false);
     Object.defineProperty(captured!._handle, 'fd', { value: undefined });
-    expect(() => h.takeRefusal()).toThrow(RepairWorkerFdUnavailableError);
+    expect(h.takeRefusal()).toBe(true);
     await writeFile(release, '');
-    await h.exit;
+    expect(await h.exit).toEqual({ kind: 'lost' });
   });
 
   test('an unrecognised signal name is a signal death, not a lost exit', () => {

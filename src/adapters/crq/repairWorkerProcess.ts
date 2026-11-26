@@ -176,7 +176,7 @@ export function fileRepairWorkerStarter(
     }
 
     let settled = false;
-    let startupFault = false;
+    let descriptorFault = false;
     const exit = new Promise<WorkerExit>((resolve) => {
       const settle = (value: WorkerExit): void => {
         if (settled) return;
@@ -193,7 +193,7 @@ export function fileRepairWorkerStarter(
           // an unavailable fd is reported by takeRefusal, not here
         }
         pipe?.destroy();
-        settle(startupFault ? { kind: 'lost' } : workerExitFromStatus(code, signal));
+        settle(descriptorFault ? { kind: 'lost' } : workerExitFromStatus(code, signal));
       });
       child.once('error', () => {
         channel.close();
@@ -202,20 +202,28 @@ export function fileRepairWorkerStarter(
     });
     // Startup self-check. The child is already running and is never killed, so throwing here
     // would orphan it (the caller never gets a handle to reap). Instead the handle is returned
-    // so `drainItems` registers and reaps it, and the fault is loud twice: every `takeRefusal`
-    // throws (the pipe stays live, so `livePipeFd` keeps throwing) and the exit is `lost`.
+    // so `drainItems` registers and reaps it. The pass does not abort (Python's drain stops
+    // admitting and reaps): `takeRefusal` reports a refusal, which latches the stop, and the
+    // exit is `lost`, which is a worker failure in the returned status. Never a rejection.
     if (pipe) {
       try {
         livePipeFd(pipe);
       } catch {
-        startupFault = true;
+        descriptorFault = true;
       }
     }
     return {
       admitted: channel.admitted,
       takeRefusal: () => {
-        drainPending();
-        return channel.takeRefusal();
+        if (!descriptorFault) {
+          try {
+            drainPending();
+          } catch (error) {
+            if (!(error instanceof RepairWorkerFdUnavailableError)) throw error;
+            descriptorFault = true; // the descriptor vanished from a live pipe: same handling
+          }
+        }
+        return descriptorFault || channel.takeRefusal();
       },
       exit,
     };
