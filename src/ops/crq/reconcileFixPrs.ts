@@ -12,7 +12,8 @@
  *
  * - a receipt-kind item is examined even when the lane skips everything;
  * - an eligible repair run is examined only when it has an unmerged, open fix
- *   PR (`fix_pr` truthy and neither `fix_merged` nor `fix_closed` set);
+ *   PR (`fix_pr` truthy, `fix_merged` unset, and `fix_closed` unset or past its
+ *   24h `closedMarkerDue` recheck);
  * - `projected` increments only for a run the effect advanced;
  * - `starved` is `RefreshExhausted`; everything else is `deferred`.
  */
@@ -23,6 +24,7 @@ import {
   recordGet,
   type JsonRecordLike,
 } from '../../policy/crq/queueDoc.js';
+import { closedMarkerDue } from '../../policy/crq/closedMarker.js';
 import {
   countExamined,
   countProjected,
@@ -58,19 +60,20 @@ export interface ReconcileFixPrEffects {
    * outcomes that are not errors.
    */
   advanceFixRun(item: JsonRecordLike, entry: ReconcileFixRun): Promise<'projected' | 'skipped'>;
+  /** The clock for the closed-marker recheck; defaults to the wall clock. */
+  now?(): Date;
 }
 
 /**
- * `if not pr or record.get("fix_merged") or record.get("fix_closed"): continue`
- * as one predicate, so the traversal and the count use the same rule.
+ * `if not pr or record.get("fix_merged"): continue` followed by
+ * `if record.get("fix_closed") and not closed_marker_due(record["fix_closed"]):
+ * continue`, as one predicate, so the traversal and the count use the same rule.
  */
-export function fixRunEligible(record: JsonRecordLike): boolean {
-  const fixPr = recordGet(record, 'fix_pr');
-  return (
-    pyTruthy(fixPr) &&
-    !pyTruthy(recordGet(record, 'fix_merged')) &&
-    !pyTruthy(recordGet(record, 'fix_closed'))
-  );
+export function fixRunEligible(record: JsonRecordLike, now: Date = new Date()): boolean {
+  if (!pyTruthy(recordGet(record, 'fix_pr'))) return false;
+  if (pyTruthy(recordGet(record, 'fix_merged'))) return false;
+  const closed = recordGet(record, 'fix_closed');
+  return !pyTruthy(closed) || closedMarkerDue(closed, now);
 }
 
 /** `item.get("repair_runs", {})` as ordered run entries. */
@@ -100,7 +103,7 @@ export async function runReconcileFixPrs(effects: ReconcileFixPrEffects): Promis
       continue;
     }
     for (const entry of effects.repairRuns(item)) {
-      if (!fixRunEligible(entry.record)) continue;
+      if (!fixRunEligible(entry.record, effects.now?.() ?? new Date())) continue;
       countExamined(stats);
       try {
         const outcome = await effects.advanceFixRun(item, entry);

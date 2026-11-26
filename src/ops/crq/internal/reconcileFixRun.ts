@@ -90,10 +90,14 @@ export async function reconcileFixRun(
   const state = info.get('state') ?? null;
   let record = withObjectKeys(original, [['fix_pr', withObjectKeys(fixPr, [['state', state]])]]);
   if (state === 'CLOSED') {
-    // Terminal marker: an abandoned fix PR must not cost a forge call per tick.
+    // Bounded marker, not terminal: an abandoned fix PR must not cost a forge
+    // call per tick, but a closed PR can reopen, so the stamp is rechecked once
+    // per CLOSED_FIX_RECHECK (`closedMarkerDue`).
     record = withObjectKeys(record, [['fix_closed', effects.now()]]);
     return { kind: 'closed', item: put(item, run, record) };
   }
+  // Reopened or merged: the closed marker expired.
+  record = withoutObjectKey(record, 'fix_closed');
   const mergeCommit = info.get('mergeCommit');
   const merge =
     state === 'MERGED' && mergeCommit instanceof JsonObject ? mergeCommit.get('oid') : undefined;

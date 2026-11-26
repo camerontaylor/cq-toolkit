@@ -28,6 +28,8 @@ export interface FixRunAdapterInput {
   reconcile(item: JsonObject, run: string): Promise<FixRunAdvance>;
   /** Durably store the item the body returned, before any error is surfaced. */
   persist(item: JsonObject, run: string): Promise<void>;
+  /** The clock for the closed-marker recheck; defaults to the wall clock. */
+  now?(): Date;
 }
 
 export interface FixRunAdapter {
@@ -40,6 +42,7 @@ export function makeFixRunAdapter(input: FixRunAdapterInput): FixRunAdapter {
   const latest = new Map<JsonRecordLike, JsonRecordLike>();
   const effects: ReconcileFixPrEffects = {
     items: () => input.items,
+    now: () => input.now?.() ?? new Date(),
     isReceipt: (item) => input.isReceipt(item),
     reconcileReceipt: (item) => input.reconcileReceipt(item),
     repairRuns: (item): readonly ReconcileFixRun[] => repairRunEntries(item),
