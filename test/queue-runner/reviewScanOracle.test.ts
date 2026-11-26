@@ -56,4 +56,15 @@ describe('review scan header parsing against the Python oracle', () => {
       expect(report).toBe(c.expected.artifact);
     });
   }
+
+  // The pre-#2385 TS guarded this (a logical fragment of hunk content is not a header);
+  // Python does not, so the fixture records a CLEAN result: Python's fail-open weakness,
+  // copied for parity and tracked in #2389. Fix both engines before any routing.
+  it('copies the Python U+2028 fake-header fail-open the old TS guard blocked (#2389)', () => {
+    const c = fixture.cases.find((x) =>
+      x.name.includes('fake header and hides the next added line'),
+    );
+    expect(c?.expected.ok).toBe(true);
+    expect(c?.diff).toContain('\u2028');
+  });
 });

@@ -135,7 +135,7 @@ def build_cases() -> None:
                                            "@@ -0,0 +1 @@\r", "+" + SECRET + "\r"])
     add("a trailing U+2028 leaves an empty logical line", ["diff --git a/x b/x", "--- a/x", "+++ b/x", "@@ -1 +1 @@",
                                                            "+one ", "+" + SECRET])
-    add("a U+2028 in a hunk line cannot open a header", ["diff --git a/x b/x", "--- a/x", "+++ b/x", "@@ -1 +1 @@",
+    add("a U+2028 in a hunk line opens a fake header and hides the next added line (Python weakness copied, #2389)", ["diff --git a/x b/x", "--- a/x", "+++ b/x", "@@ -1 +1 @@",
                                                          "+one diff --git a/evil b/evil", "+" + SECRET])
     add("a U+2028 in a hunk line cannot open a hunk", ["diff --git a/x b/x", "--- a/x", "+++ b/x", "@@ -1 +1 @@",
                                                        "+one @@ -1 +1 @@", "+" + SECRET])

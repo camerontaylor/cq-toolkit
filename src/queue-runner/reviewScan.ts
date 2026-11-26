@@ -77,6 +77,11 @@ export async function scanReviewDiff(
   // after `+++ `/`--- ` taken byte for byte. Git's trailing tab for a spaced name
   // and its C-quoting of an odd name (quotes included) stay in the path, so the
   // path rules, the allowlist and the exemption globs see exactly what Python's do.
+  // Two Python weaknesses are copied on purpose (parity; tracked in #2389, to be
+  // fixed in both engines before any routing): (1) a quoted name is never decoded,
+  // so path-scoped rules and exemptions never match it; (2) `splitlines` also cuts
+  // at U+2028/U+0085/etc., so a hunk line such as `+one<U+2028>diff --git a/x b/y`
+  // opens a fake header and the next added line is skipped unscanned (fail-open).
   for (const [index, line] of pythonSplitlines(input.diff).entries()) {
     const diffLine = index + 1;
     if (line.startsWith('diff --git')) {
