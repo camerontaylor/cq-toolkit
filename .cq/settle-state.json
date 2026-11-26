@@ -251,13 +251,13 @@
     },
     "2363": {
       "tuple": {
-        "head": "6cf540222d17fb04fc3f9498d9ff70b134de98ed",
+        "head": "8ac25d7c851b64b99e26b3b529b309028b790174",
         "base": "4d5187e5a57add384506eef345992c801c86476d",
         "forcePushEpoch": 0
       },
       "observations": [
         {
-          "observedAt": "2026-11-26T10:30:51.639Z",
+          "observedAt": "2026-11-26T10:59:05.765Z",
           "by": "self-merge-prs:observe"
         }
       ]
