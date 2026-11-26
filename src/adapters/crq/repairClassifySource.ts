@@ -177,9 +177,10 @@ function started(stateRoot: string, jobId: string): boolean {
 
 function spawnGitSync(clone: string): RunGitSync {
   return (args) => {
-    // `cwd` as well as `-C`: Python's `command(..., cwd=clone)` raises for a missing clone, and a
-    // `git -C <missing>` exit 128 would otherwise read as the ordinary "absent" observation.
-    const call = spawnSync('git', ['-C', clone, ...GIT_HARDEN, ...args], {
+    // `cwd`, not `-C`: Python's `command(..., cwd=clone)` raises for a missing clone (a
+    // `git -C <missing>` exit 128 would read as the ordinary "absent" observation), and a
+    // relative clone is resolved once, against the process directory, as `subprocess` does.
+    const call = spawnSync('git', [...GIT_HARDEN, ...args], {
       cwd: clone,
       env: gitEnv(),
       encoding: 'utf8',

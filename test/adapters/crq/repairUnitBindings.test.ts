@@ -7,7 +7,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
 import { fileRepairUnit } from '../../../src/adapters/crq/repairUnit.js';
@@ -963,6 +963,26 @@ describe('fileRepairUnit drain bindings against crq_repair.py (Python 3.14)', ()
       expect(at('open PR resumed with its branch gone')).toMatchObject({ status: 'run' });
       // The bound job carries the pin the seed produced: the ids are reproducible across sides.
       expect(at('bound at the pin').job).toMatchObject({ source_sha: PA });
+    });
+
+    it('a relative clone path is resolved once, against the process directory', async () => {
+      const tmp = mkdtempSync(join(tmpdir(), 'crq-unit-rel-'));
+      cleanups.push(tmp);
+      const clone = makeClone(tmp);
+      const [pin] = seedClone(clone, seedA);
+      const stateRoot = join(tmp, 'state');
+      await mkdir(join(stateRoot, 'repair', 'inbox'), { recursive: true });
+      await writeFile(
+        join(stateRoot, 'repair', 'inbox', `${ID}.json`),
+        JSON.stringify(jobBody(pin as string)),
+      );
+      const { drain } = fileRepairUnit({
+        stateRoot,
+        clone: relative(process.cwd(), clone),
+        narrate: () => undefined,
+      });
+      const outcome = await drain.classifyJob(toJson(queueOf(queued(pin as string))), ID);
+      expect(outcome.status).toBe('run');
     });
 
     it('a failing git read throws, as Python raises, instead of reporting stale', async () => {
