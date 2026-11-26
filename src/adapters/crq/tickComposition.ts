@@ -149,9 +149,11 @@ export const STAGED_GAPS: readonly TickGap[] = [
       'file-backed: markFindingOutcome and recordUnpublishedFixedSibling (fileRepairOutcomeEffects) ' +
       'and cleanupHarvested (fileRepairCleanup), none composed into the tick; the job/result reads ' +
       'are bound in repairHarvestReads.ts; ' +
-      'still unbound: makeWorktree/removeWorktree, verify, mechanical, requireCanonicalDelivery, saveQueue, ' +
-      'publish (push, PR create, hack detector) and replayBudget, which need TS ports of the repair ' +
-      'worktree, verify and detector runners and the publish path',
+      'bound offline, none composed into the tick or routed: makeWorktree/removeWorktree, verify and ' +
+      'mechanical (repairHarvestRunners.ts), requireCanonicalDelivery, saveQueue and replayBudget ' +
+      '(repairHarvestState.ts), publish (repairHarvestPublish.ts); ' +
+      'still injected: the forge reads and writes (gh pr view|list|create), newItem, the clock and the ' +
+      'gitleaks binary; the admission-history compaction log is not ported',
   },
   {
     id: 'start-one-effects',
