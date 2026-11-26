@@ -34,14 +34,6 @@ from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-# Keep every git command inside the temporary repositories: drop the caller's
-# repository-location overrides and pin the locale so git's diagnostics are stable.
-for _name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
-              "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_NAMESPACE", "GIT_PREFIX"):
-    os.environ.pop(_name, None)
-os.environ["LC_ALL"] = "C"
-os.environ["GIT_CONFIG_GLOBAL"] = "/dev/null"
-os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
 import crq  # noqa: E402
 import review_ledger as ledger  # noqa: E402
 
@@ -305,9 +297,20 @@ def run_scenario(spec: dict) -> dict:
         return {"name": spec["name"], "spec": spec, "target": target, "preseed": preseed, "results": results}
 
 
+GIT_LOCATION = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_NAMESPACE", "GIT_PREFIX")
+
+
 def build() -> dict:
-    return {"schema": SCHEMA, "source": "apps/crq-python/crq.py:1102", "histories": HISTORIES,
-            "cases": [run_scenario(spec) for spec in SCENARIOS]}
+    """Run every scenario with git confined to the temp repositories: the caller's
+    repository-location variables are dropped and the locale pinned, only for the
+    duration of the run (``mock.patch.dict`` restores ``os.environ`` on exit, so
+    other modules in the same process never see the scrub)."""
+    with mock.patch.dict(os.environ, {"LC_ALL": "C", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}):
+        for name in GIT_LOCATION:
+            os.environ.pop(name, None)
+        return {"schema": SCHEMA, "source": "apps/crq-python/crq.py:1102", "histories": HISTORIES,
+                "cases": [run_scenario(spec) for spec in SCENARIOS]}
 
 
 def tagged(value: Any) -> Any:

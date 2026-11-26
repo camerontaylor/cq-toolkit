@@ -14,6 +14,7 @@ import os
 import subprocess
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import build_synthetic_vectors as emitter
@@ -37,6 +38,26 @@ class BuildSyntheticVectorsTest(unittest.TestCase):
             {"KeyError", "TypeError", "AttributeError", "RuntimeError"}
             <= {o["raises"] for o in outcomes if "raises" in o}
         )
+
+    def test_environment_is_restored_after_import_and_run(self) -> None:
+        poisoned = {"GIT_INDEX_FILE": "/nonexistent/index", "GIT_DIR": "/nonexistent/dir", "LC_ALL": "fr_FR.UTF-8"}
+        with mock.patch.dict(os.environ, poisoned):
+            before = dict(os.environ)
+            emitter.build()
+            self.assertEqual(dict(os.environ), before)
+        done = subprocess.run(
+            [sys.executable, "-c",
+             "import os; b = dict(os.environ); import build_synthetic_vectors; "
+             "assert dict(os.environ) == b, 'import changed os.environ'"],
+            cwd=Path(__file__).parent, capture_output=True, text=True,
+        )
+        self.assertEqual(done.returncode, 0, done.stderr)
+
+    def test_run_ignores_caller_git_location(self) -> None:
+        with mock.patch.dict(os.environ, {"GIT_INDEX_FILE": "/nonexistent/index", "GIT_DIR": "/nonexistent/dir"}):
+            self.assertEqual(
+                emitter.FIXTURE.read_text(encoding="utf-8"), emitter.render(emitter.build())
+            )
 
     def test_output_is_independent_of_hash_seed(self) -> None:
         here = Path(__file__).parent
