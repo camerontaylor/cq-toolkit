@@ -149,12 +149,12 @@ function splitLines(text: string): string[] {
 const ARTIFACTS = ['meta.json', 'review.ndjson', 'exit.json', 'secret-scan.json'] as const;
 
 /** `crq.current_document(item, outcome, meta=, cls=, rdir=)` for a harvested run. */
-async function currentDocument(
+export async function currentDocument(
   rdir: string,
   item: Record<string, unknown>,
   outcome: string,
-  meta: Record<string, unknown>,
-  cls: Record<string, unknown>,
+  meta: Record<string, unknown> | null,
+  cls: Record<string, unknown> | null,
 ): Promise<JsonObject> {
   const artifacts: [string, JsonValue][] = [];
   for (const name of ARTIFACTS) {
@@ -188,9 +188,13 @@ async function currentDocument(
   const id = member(item, 'id');
   const source = member(item, 'subject');
   const capture = member(item, 'capture');
-  const counted = py(cls) && py(member(cls, 'counted'));
+  const counted = cls !== null && py(cls) && py(member(cls, 'counted'));
   // `(meta or {}).get(...)`: a truthy value that is not a dict has no `.get`.
-  if (py(meta) && (typeof meta !== 'object' || Array.isArray(meta) || meta instanceof JsonNumber))
+  if (
+    meta !== null &&
+    py(meta) &&
+    (typeof meta !== 'object' || Array.isArray(meta) || meta instanceof JsonNumber)
+  )
     throw new PyError('AttributeError', `'${pyTypeName(meta)}' object has no attribute 'get'`);
   return new JsonObject([
     ['version', JsonNumber.int(1)],
@@ -202,8 +206,8 @@ async function currentDocument(
     ['classification', fromPlainJson(cls)],
     ['counted', counted],
     ['findings', findings],
-    ['run_id', fromPlainJson(meta.run_id ?? null)],
-    ['started_at', fromPlainJson(meta.started_at ?? null)],
+    ['run_id', fromPlainJson(meta?.run_id ?? null)],
+    ['started_at', fromPlainJson(meta?.started_at ?? null)],
     ['artifacts', new JsonObject(artifacts)],
     ['remediation', 'disabled/deferred'],
     ['independent_acceptance', false],

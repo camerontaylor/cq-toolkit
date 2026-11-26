@@ -29,6 +29,8 @@ export type PyErrorKind =
   | 'CalledProcessError'
   /** `crq_repair.retain.UnsupportedUntracked`, a `ValueError` subclass. */
   | 'UnsupportedUntracked'
+  /** `review_ledger.IntegrityError`, a `ValueError` subclass. */
+  | 'IntegrityError'
   /** `crq_repair.DetectorUnavailable`, a `ValueError` subclass. */
   | 'DetectorUnavailable';
 
@@ -52,6 +54,7 @@ export function isPyError(e: unknown, ...kinds: readonly PyErrorKind[]): e is Py
       (kind === 'ValueError' &&
         (e.kind === 'DetectorUnavailable' ||
           e.kind === 'UnsupportedUntracked' ||
+          e.kind === 'IntegrityError' ||
           e.kind === 'UnicodeEncodeError' ||
           e.kind === 'JSONDecodeError' ||
           e.kind === 'UnicodeDecodeError')) ||
