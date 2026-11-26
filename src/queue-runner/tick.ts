@@ -71,7 +71,7 @@ export const TICK_MISSING_EFFECTS: readonly string[] = [
   'harvest-review-effects: fileHarvestReviewEffects binds findings.md for non-local kinds, removeWorktree, writeReceipt and requestPrReview; repairEnqueue, backfillHarvest and the coverage seam stay injected: repairEnqueue needs injected git and a TS port of crq_repair.findings (the pure repair port exists in repairBackfill.ts); backfillHarvest has no TS port of backfill_runtime.harvest; the coverage seam has no harvest-side implementation (start-one CoverageEffects)',
   'repair-harvest-effects: repair_tick.harvest queue side; markFindingOutcome, recordUnpublishedFixedSibling and cleanupHarvested are file-backed but not composed into the tick; makeWorktree/removeWorktree, verify, mechanical, requireCanonicalDelivery, saveQueue, publish and replayBudget are unbound',
   'start-one-effects: CoverageEffects select, buildSynthetic and rank4Gate, and the injected scans, receipt, author lease, on-demand clone and queue save of the file LaunchEffects, for admit.startOne',
-  'shadow-d2: the composed phases are not shadowed, only the plan',
+  'shadow-d2: the composed tick is shadowed offline (runComposedShadow, composedShadow.test.ts) but not the slot, the XDG summary.json, the paseo schedule probe, merged discovery, gh-backed enrollment or start_one (stubbed alike on both sides), and one divergence is explained rather than fixed (the superseded-open retirement is not persisted)',
 ];
 
 /** The `complete: false` reason a shadow plan carries. */

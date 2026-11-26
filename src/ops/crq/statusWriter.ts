@@ -656,7 +656,6 @@ export function statusJsonDocument(
       // decorated Markdown column (`"open t1"`, `"delta new"`).
       kind: raw['kind'] === undefined ? null : raw['kind'],
       state: row.state,
-      repo: row.repo,
       prior_cycles: memberOr(raw, 'prior_cycles'),
       cycles: memberOr(raw, 'cycles'),
       operator_priority: memberOr(raw, 'operator_priority'),
@@ -665,6 +664,8 @@ export function statusJsonDocument(
       last_error: memberOr(raw, 'last_error'),
       wait_reason: memberOr(raw, 'wait_reason'),
       gate_stalled_at: memberOr(raw, 'gate_stalled_at'),
+      // Python appends `repo` after the copied keys, so it is the last member.
+      repo: row.repo,
     })),
   };
 }
@@ -741,7 +742,8 @@ export function assembleStatusMarkdown(parts: StatusMarkdownParts): string {
     '## Repair and utilization',
     '',
     '```json',
-    indentedJsonText(jsonScalar(parts.repairUtilization)),
+    // Python's markdown block is `json.dumps(indent=2)` with no trailing newline.
+    indentedJsonText(jsonScalar(parts.repairUtilization)).replace(/\n$/, ''),
     '```',
     '',
   ];
