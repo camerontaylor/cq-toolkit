@@ -19,12 +19,15 @@ import {
   dict,
   get,
   isRec,
+  list,
+  pyTypeName,
   pyEq,
   REVIEW_RECEIPT_KIND,
   truthy,
   type Item,
   type Queue,
 } from './repairBackfill.js';
+import { JsonNumber } from '../policy/crq/jsonValue.js';
 import { clip300, excText, isPyError, PyError } from './pyErrors.js';
 
 type Rec = Record<string, unknown>;
@@ -113,6 +116,15 @@ export interface RepairHarvestEffects {
   readonly replayBudget?: ReplayBudget | undefined;
 }
 
+/** A Python `int`/`float` (bool included) as a JS number, else `null`. */
+function pyNumberOrNull(v: unknown): number | null {
+  if (v instanceof JsonNumber) return Number(v.kind === 'int' ? v.integer : v.float);
+  if (typeof v === 'boolean') return v ? 1 : 0;
+  // Any int this large makes `now - last` far below zero on both sides, so the rounding cannot change the comparison.
+  if (typeof v === 'bigint') return Number(v);
+  return typeof v === 'number' ? v : null;
+}
+
 /**
  * `ReplayBudget`: bounds the terminal-failure replays one tick may run, so a
  * backlog degrades to slower catch-up instead of a tick that never saves. A
@@ -159,9 +171,11 @@ export class ReplayBudget {
   take(record: Rec): boolean {
     if (this.exhausted()) return false;
     const now = this.wall();
-    const last = record.replay_attempted;
-    if (typeof last === 'number' && now - last >= 0 && now - last < this.retry) return false;
-    record.replay_attempted = now;
+    // `isinstance(last, (int, float))`: a bool counts, and a stored number is a `JsonNumber`.
+    const last = pyNumberOrNull(record.replay_attempted);
+    if (last !== null && now - last >= 0 && now - last < this.retry) return false;
+    // `time.time()` is always a float, so `1700000000.0` stays a float in the queue.
+    record.replay_attempted = JsonNumber.float(now);
     this.count -= 1;
     return true;
   }
@@ -170,15 +184,16 @@ export class ReplayBudget {
 /** `replay_settled`: every string job's outcome is durably recorded. */
 export function replaySettled(record: Rec): boolean {
   const recorded = get(record, 'siblings_recorded', []);
-  const list = Array.isArray(recorded) ? recorded : [];
   const jobs = get(record, 'jobs', []);
-  return (Array.isArray(jobs) ? jobs : []).every((j) => typeof j !== 'string' || list.includes(j));
+  return (Array.isArray(jobs) ? jobs : []).every(
+    (j) => typeof j !== 'string' || pyContains(recorded, j),
+  );
 }
 
 /** Add `job` to `siblings_recorded` (sorted, de-duplicated), as Python's set union. */
 function flagRecorded(record: Rec, job: string): void {
   const prior = get(record, 'siblings_recorded', []);
-  const have = Array.isArray(prior) ? prior.filter((j): j is string => typeof j === 'string') : [];
+  const have = (truthy(prior) ? list(prior) : []).filter((j): j is string => typeof j === 'string');
   record.siblings_recorded = [...new Set([...have, job])].sort();
 }
 
@@ -188,15 +203,6 @@ function pyReq(o: Rec, key: string): unknown {
   return o[key];
 }
 
-function pyTypeName(v: unknown): string {
-  if (v === null || v === undefined) return 'NoneType';
-  if (typeof v === 'boolean') return 'bool';
-  if (typeof v === 'number') return Number.isInteger(v) ? 'int' : 'float';
-  if (typeof v === 'bigint') return 'int';
-  if (typeof v === 'string') return 'str';
-  return Array.isArray(v) ? 'list' : 'dict';
-}
-
 /** `Path(value)` argument check (CPython 3.12+ wording). */
 function pathArg(value: unknown): string {
   if (typeof value === 'string') return value;
@@ -204,6 +210,39 @@ function pathArg(value: unknown): string {
     'TypeError',
     `argument should be a str or an os.PathLike object where __fspath__ returns a str, not '${pyTypeName(value)}'`,
   );
+}
+
+/** `value.<attr>` on a value that has no such attribute. */
+const attrError = (v: unknown, attr: string): PyError =>
+  new PyError('AttributeError', `'${pyTypeName(v)}' object has no attribute '${attr}'`);
+
+/** `value['key']` on a value that is not a dict (a str, list or scalar). */
+function subscriptError(v: unknown): PyError {
+  if (typeof v === 'string')
+    return new PyError('TypeError', "string indices must be integers, not 'str'");
+  if (Array.isArray(v)) {
+    return new PyError('TypeError', 'list indices must be integers or slices, not str');
+  }
+  return new PyError('TypeError', `'${pyTypeName(v)}' object is not subscriptable`);
+}
+
+/** `x + '.json'` where `x` is not a str. */
+function plusStrError(v: unknown): PyError {
+  if (Array.isArray(v))
+    return new PyError('TypeError', 'can only concatenate list (not "str") to list');
+  return new PyError(
+    'TypeError',
+    `unsupported operand type(s) for +: '${pyTypeName(v)}' and 'str'`,
+  );
+}
+
+/** `job in container`: list equality, str substring or dict key; a falsy container is empty. */
+function pyContains(container: unknown, job: string): boolean {
+  if (!truthy(container)) return false;
+  if (typeof container === 'string') return container.includes(job);
+  if (Array.isArray(container)) return container.some((e) => pyEq(e, job));
+  if (isRec(container)) return Object.hasOwn(container, job);
+  throw new PyError('TypeError', `argument of type '${pyTypeName(container)}' is not iterable`);
 }
 
 const asList = (v: unknown, what: string): unknown[] => {
@@ -357,11 +396,12 @@ async function reconcileTerminal(
     // A terminal local failure can outlive a failed ledger write: replay the
     // retained FAILED outcomes through the ledger's idempotent event chain.
     const handled = new Set<string>();
-    for (const result of asList(get(record, 'verdicts', []), 'verdicts')) {
-      const r = dict(result, 'verdict');
+    for (const result of list(get(record, 'verdicts', []))) {
+      if (!isRec(result)) throw attrError(result, 'get');
+      const r = result;
       if (get(r, 'verdict') !== 'FAILED') continue;
       const reason = get(r, 'reason', '');
-      if (typeof reason !== 'string') throw new TypeError('reason must be a str');
+      if (typeof reason !== 'string') throw attrError(reason, 'startswith');
       if (reason.startsWith('invalid repair inbox: ')) {
         // The inbox was rejected (malformed or a swapped identity): keep it out
         // of the sibling replay so no finding decision is derived from it later.
@@ -380,7 +420,7 @@ async function reconcileTerminal(
         throw new PyError('ValueError', 'terminal repair outcome identity mismatch');
       }
       const jobId = pyReq(r, 'job');
-      if (typeof jobId !== 'string') throw new TypeError('job must be a str');
+      if (typeof jobId !== 'string') throw plusStrError(jobId);
       const expected = dict(await fx.readJob(jobId), 'inbox job');
       if (!pyEq(get(expected, 'job'), jobId) || !pyEq(get(expected, 'item'), pyReq(item, 'id'))) {
         throw new PyError('ValueError', 'terminal repair job identity mismatch');
@@ -504,9 +544,10 @@ export async function repairHarvest(
 ): Promise<string[]> {
   const messages: string[] = [];
   const runs = get(item, 'repair_runs', {});
-  if (!isRec(runs)) throw new TypeError('repair_runs must be a dict');
+  if (!isRec(runs)) throw attrError(runs, 'items');
   for (const [run, rawRecord] of Object.entries(runs)) {
-    const record = dict(rawRecord, 'repair record');
+    if (!isRec(rawRecord)) throw subscriptError(rawRecord);
+    const record = rawRecord;
     const state = pyReq(record, 'state');
     if (typeof state === 'string' && TERMINAL.includes(state)) {
       await reconcileTerminal(fx, q, item, record, dry, messages);
@@ -518,7 +559,12 @@ export async function repairHarvest(
     let predecessor: unknown = pyReq(record, 'base');
     const jobs = asList(pyReq(record, 'jobs'), 'jobs');
     for (const jobId of jobs) {
-      if (typeof jobId !== 'string') throw new TypeError('job id must be a str');
+      if (typeof jobId !== 'string') {
+        throw new PyError(
+          'TypeError',
+          `unsupported operand type(s) for /: 'PosixPath' and '${pyTypeName(jobId)}'`,
+        );
+      }
       if (!(await fx.resultExists(jobId))) break;
       let expected: Rec;
       try {
@@ -530,7 +576,12 @@ export async function repairHarvest(
         // still harvest. An OSError is not a content defect (descriptor
         // exhaustion, a transient I/O fault): it propagates so the tick retries
         // the read, as Python's uncaught read error does.
-        if (!isPyError(e, 'ValueError') && !(e instanceof TypeError)) throw e;
+        if (
+          !isPyError(e, 'ValueError', 'TypeError', 'AttributeError') &&
+          !(e instanceof TypeError)
+        ) {
+          throw e;
+        }
         if (!dry) await recordTerminalFailure(fx, q, item, record, verdicts, null, jobId, e);
         break;
       }

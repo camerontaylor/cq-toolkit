@@ -15,6 +15,10 @@ export type PyErrorKind =
   | 'IsADirectoryError'
   /** `UnicodeEncodeError`, a `ValueError` subclass (`write_text` of a lone surrogate). */
   | 'UnicodeEncodeError'
+  /** `json.JSONDecodeError`, a `ValueError` subclass (`json.loads` of malformed text). */
+  | 'JSONDecodeError'
+  /** `UnicodeDecodeError`, a `ValueError` subclass (`read_text` of non-UTF-8 bytes). */
+  | 'UnicodeDecodeError'
   /** `FileNotFoundError`, an `OSError` subclass (`subprocess` with a missing executable). */
   | 'FileNotFoundError'
   /** `subprocess.TimeoutExpired`, a `SubprocessError` (not an `OSError` or `RuntimeError`). */
@@ -48,7 +52,9 @@ export function isPyError(e: unknown, ...kinds: readonly PyErrorKind[]): e is Py
       (kind === 'ValueError' &&
         (e.kind === 'DetectorUnavailable' ||
           e.kind === 'UnsupportedUntracked' ||
-          e.kind === 'UnicodeEncodeError')) ||
+          e.kind === 'UnicodeEncodeError' ||
+          e.kind === 'JSONDecodeError' ||
+          e.kind === 'UnicodeDecodeError')) ||
       (kind === 'OSError' && (e.kind === 'FileNotFoundError' || e.kind === 'IsADirectoryError')),
   );
 }
@@ -62,4 +68,15 @@ export function excText(e: unknown): string {
 export function clip300(text: string): string {
   const points = Array.from(text);
   return points.length <= 300 ? text : points.slice(0, 300).join('');
+}
+
+/** The `OSError` Python raises for a failed `open(path)`, with its errno wording. */
+export function pyOsError(e: unknown, path: string): PyError {
+  const code = (e as { code?: string } | null)?.code;
+  const q = `'${path}'`;
+  if (code === 'ENOENT')
+    return new PyError('FileNotFoundError', `[Errno 2] No such file or directory: ${q}`);
+  if (code === 'EISDIR') return new PyError('IsADirectoryError', `[Errno 21] Is a directory: ${q}`);
+  if (code === 'EACCES') return new PyError('OSError', `[Errno 13] Permission denied: ${q}`);
+  return new PyError('OSError', e instanceof Error ? e.message : String(e));
 }
