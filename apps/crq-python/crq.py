@@ -3384,6 +3384,7 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
         # State persists before admission so a crash cannot re-enroll a range.
         log += push_current.discover(sys.modules[__name__], q, dry)
     starts_before = len(q.get("starts", []))
+    repair_tick.begin_tick(sys.modules[__name__])
     for item in list(live_items(q)):
         if not dry and item.get("kind") == local_review_runtime.KIND and item.get("publication_pending"):
             local_review_runtime.republish(sys.modules[__name__], q, item)

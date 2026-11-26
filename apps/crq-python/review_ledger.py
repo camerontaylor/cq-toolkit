@@ -86,6 +86,9 @@ def digest(value):
     return hashlib.sha256(canonical(value)).hexdigest()
 
 
+_VALIDATED_PENDING = {}  # pending path -> (size, mtime_ns) that passed `loads`
+
+
 def loads(raw):
     def pairs(values):
         result = {}
@@ -479,8 +482,23 @@ class Outbox:
         return value["id"]
 
     def retained(self):
-        """Acknowledged events remain recovery authority after local state loss."""
-        return [loads(p.read_bytes()) for p in sorted((self.root / "pending").glob("*.json"))]
+        """Acknowledged events remain recovery authority after local state loss.
+
+        Pending files are content-addressed and immutable, so a file whose
+        (size, mtime) is unchanged since it last passed the strict `loads`
+        check is only re-decoded, not re-canonicalised (pure-Python, the
+        dominant cost on a large outbox)."""
+        values = []
+        for p in sorted((self.root / "pending").glob("*.json"), key=os.fspath):
+            stat = p.stat()
+            raw = p.read_bytes()
+            key = (stat.st_size, stat.st_mtime_ns)
+            if _VALIDATED_PENDING.get(str(p)) == key and len(raw) == stat.st_size:
+                values.append(json.loads(raw))
+            else:
+                values.append(loads(raw))
+                _VALIDATED_PENDING[str(p)] = key
+        return values
 
     def pending(self):
         return [value for value in self.retained()
