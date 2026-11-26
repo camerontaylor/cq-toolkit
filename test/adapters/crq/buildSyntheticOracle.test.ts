@@ -124,12 +124,17 @@ function play(work: string, ops: readonly Op[]): void {
   }
 }
 
-/** Decode the emitter's lossless tags: `{"$int": "..."}` and `{"$float": "..."}`. */
+/**
+ * Decode the emitter's lossless tags: `{"$int": "..."}` and `{"$float": "..."}`.
+ * Every Python number becomes a {@link JsonNumber}, as in production, where a
+ * parsed queue document never holds a plain JS number.
+ */
 function decode(value: unknown, work: string): unknown {
   if (Array.isArray(value)) return value.map((entry) => decode(entry, work));
+  if (typeof value === 'number') return JsonNumber.int(value);
   if (typeof value !== 'object' || value === null) return value;
   const record = value as Record<string, unknown>;
-  if (typeof record.$int === 'string') return BigInt(record.$int);
+  if (typeof record.$int === 'string') return JsonNumber.int(record.$int);
   if (typeof record.$float === 'string') return JsonNumber.float(Number(record.$float));
   if (typeof record.$rev === 'string') {
     let sha = sh(work, 'rev-parse', `${record.$rev}^{commit}`);

@@ -55,8 +55,27 @@ export interface BuildSyntheticDeps {
 
 export type SyntheticSubject = { base: string; head: string; paths: number };
 
+/**
+ * Python type name that also knows the production number wrapper: `pyCompat`
+ * sees a {@link JsonNumber} as a dict, so a JSON `5` or `5.0` must be named here.
+ */
+function typeOf(value: unknown): string {
+  return value instanceof JsonNumber ? value.kind : pyTypeName(value);
+}
+
+/** `d.get(key)`: a {@link JsonNumber} is an int or float, which has no `get`. */
+function getOf(value: unknown, key: string): unknown {
+  if (value instanceof JsonNumber) {
+    throw new PyError('AttributeError', `'${value.kind}' object has no attribute 'get'`);
+  }
+  return pyGet(value, key);
+}
+
 /** `merge = item["merge_commit"]`: Python's subscript message per container type. */
 function subscript(item: unknown, key: string): unknown {
+  if (item instanceof JsonNumber) {
+    throw new PyError('TypeError', `'${item.kind}' object is not subscriptable`);
+  }
   if (Array.isArray(item)) {
     throw new PyError('TypeError', 'list indices must be integers or slices, not str');
   }
@@ -83,7 +102,7 @@ function argvStr(value: unknown): string {
   if (typeof value !== 'string') {
     throw new PyError(
       'TypeError',
-      `expected str, bytes or os.PathLike object, not ${pyTypeName(value)}`,
+      `expected str, bytes or os.PathLike object, not ${typeOf(value)}`,
     );
   }
   return value;
@@ -97,8 +116,11 @@ export async function buildSynthetic(
 ): Promise<SyntheticSubject> {
   await deps.accounting.resolve(target);
   const merge = subscript(item, 'merge_commit');
-  const measure = pyTruthy(pyGet(item, 'measure')) ? pyGet(item, 'measure') : {};
-  const supplied = pyGet(measure, 'synthetic_paths');
+  const measure = pyTruthy(getOf(item, 'measure')) ? getOf(item, 'measure') : {};
+  const supplied = getOf(measure, 'synthetic_paths');
+  if (supplied instanceof JsonNumber && pyTruthy(supplied)) {
+    throw new PyError('TypeError', `'${supplied.kind}' object is not iterable`);
+  }
   const candidates: unknown[] = pyTruthy(supplied)
     ? pyIter(supplied)
     : await synthPaths(deps.git, argvStr(merge), target);

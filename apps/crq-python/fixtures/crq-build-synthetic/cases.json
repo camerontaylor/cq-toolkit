@@ -993,6 +993,552 @@
    "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
   },
   {
+   "name": "supplied-float-is-type-error",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "'float' object is not iterable",
+      "raises": "TypeError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": {
+      "synthetic_paths": {
+       "$float": "5.0"
+      }
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "supplied-float-is-type-error",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "supplied-fraction-is-type-error",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "'float' object is not iterable",
+      "raises": "TypeError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": {
+      "synthetic_paths": {
+       "$float": "0.5"
+      }
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "supplied-fraction-is-type-error",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "supplied-big-int-is-type-error",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "'int' object is not iterable",
+      "raises": "TypeError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": {
+      "synthetic_paths": {
+       "$int": "1180591620717411303424"
+      }
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "supplied-big-int-is-type-error",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "supplied-negative-int-is-type-error",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "'int' object is not iterable",
+      "raises": "TypeError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": {
+      "synthetic_paths": -3
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "supplied-negative-int-is-type-error",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "supplied-zero-float-falls-back",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "829adafb71fdd27111292dae45f6eb6fd97c0623",
+       "head": "9e95bc8e00fdf83d586b9b8a1461a95266c90998",
+       "paths": 3
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/base 829adafb71fdd27111292dae45f6eb6fd97c0623",
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/head 9e95bc8e00fdf83d586b9b8a1461a95266c90998",
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/target b123d9c4f246529390a1cdd5a7388281261fa9a9"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree 516a0cd6a4339ee628f723fb87cbc28a7791d622\nparent b123d9c4f246529390a1cdd5a7388281261fa9a9\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md"
+       ]
+      },
+      "head": {
+       "commit": "tree 051c2fce2ec5f02553ba35b8d58b0fb34ae9840b\nparent 829adafb71fdd27111292dae45f6eb6fd97c0623\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 4cb29ea38f70d7c61b2a3a25b02e3bdf44905402 a.txt",
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      }
+     }
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": {
+      "synthetic_paths": {
+       "$float": "0.0"
+      }
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "supplied-zero-float-falls-back",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "measure-int-is-attribute-error",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "'int' object has no attribute 'get'",
+      "raises": "AttributeError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": 5,
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "measure-int-is-attribute-error",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "measure-float-is-attribute-error",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "'float' object has no attribute 'get'",
+      "raises": "AttributeError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": {
+      "$float": "5.5"
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "measure-float-is-attribute-error",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "measure-zero-float-is-falsy",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "829adafb71fdd27111292dae45f6eb6fd97c0623",
+       "head": "9e95bc8e00fdf83d586b9b8a1461a95266c90998",
+       "paths": 3
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/base 829adafb71fdd27111292dae45f6eb6fd97c0623",
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/head 9e95bc8e00fdf83d586b9b8a1461a95266c90998",
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/target b123d9c4f246529390a1cdd5a7388281261fa9a9"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree 516a0cd6a4339ee628f723fb87cbc28a7791d622\nparent b123d9c4f246529390a1cdd5a7388281261fa9a9\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md"
+       ]
+      },
+      "head": {
+       "commit": "tree 051c2fce2ec5f02553ba35b8d58b0fb34ae9840b\nparent 829adafb71fdd27111292dae45f6eb6fd97c0623\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 4cb29ea38f70d7c61b2a3a25b02e3bdf44905402 a.txt",
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      }
+     }
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": {
+      "$float": "0.0"
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "measure-zero-float-is-falsy",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "float-merge-commit",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "expected str, bytes or os.PathLike object, not float",
+      "raises": "TypeError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "merge_commit": {
+      "$float": "7.5"
+     },
+     "pr": 1
+    },
+    "name": "float-merge-commit",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "big-int-merge-commit",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "expected str, bytes or os.PathLike object, not int",
+      "raises": "TypeError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "merge_commit": {
+      "$int": "1180591620717411303424"
+     },
+     "pr": 1
+    },
+    "name": "big-int-merge-commit",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "item-int",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "'int' object is not subscriptable",
+      "raises": "TypeError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": 5,
+    "name": "item-int",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "item-float",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "'float' object is not subscriptable",
+      "raises": "TypeError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "$float": "5.5"
+    },
+    "name": "item-float",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "float-id-with-supplied-paths",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "unsupported canonical JSON value",
+      "raises": "IntegrityError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": {
+      "$float": "1.5"
+     },
+     "kind": "merged",
+     "measure": {
+      "synthetic_paths": [
+       "a.txt"
+      ]
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "float-id-with-supplied-paths",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "big-int-id-with-supplied-paths",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "integer outside interoperable JSON range",
+      "raises": "IntegrityError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": {
+      "$int": "1180591620717411303424"
+     },
+     "kind": "merged",
+     "measure": {
+      "synthetic_paths": [
+       "a.txt"
+      ]
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "big-int-id-with-supplied-paths",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
    "name": "measure-string-is-attribute-error",
    "preseed": [],
    "results": [
