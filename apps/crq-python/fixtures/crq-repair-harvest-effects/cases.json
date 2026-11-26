@@ -1,0 +1,2300 @@
+{
+ "schema": "cq.crq-repair-harvest-effects-vector/v1",
+ "seed_events": [
+  {
+   "schema": "cq.review-ledger/v1",
+   "event_type": "finding-event",
+   "source_key": "confirmed:seed-root",
+   "occurred_at": "2026-11-12T00:00:00Z",
+   "payload": {
+    "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "previous_event_id": null,
+    "action": "confirmed",
+    "evidence": {
+     "target": "promoted-main",
+     "anchor_verified": true
+    },
+    "actor": "cq-review"
+   },
+   "id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c"
+  }
+ ],
+ "seed_head": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+ "item": "it-1",
+ "job": "job-1",
+ "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+ "at": "2026-11-12T00:00:00Z",
+ "max_finding_retries": 2,
+ "cleanup_cases": [
+  {
+   "name": "fixed-clean-proven-removes",
+   "spec": {
+    "snapshots": [
+     {
+      "kind": "good"
+     }
+    ]
+   },
+   "expected": {
+    "returned": true,
+    "error": null,
+    "survivors": []
+   }
+  },
+  {
+   "name": "not-fixed-clean-proven-removes",
+   "spec": {
+    "verdict": "NOT-FIXED",
+    "snapshots": [
+     {
+      "kind": "good"
+     }
+    ]
+   },
+   "expected": {
+    "returned": true,
+    "error": null,
+    "survivors": []
+   }
+  },
+  {
+   "name": "failed-verdict-keeps",
+   "spec": {
+    "verdict": "FAILED",
+    "snapshots": [
+     {
+      "kind": "good"
+     }
+    ]
+   },
+   "expected": {
+    "returned": false,
+    "error": null,
+    "survivors": [
+     "crq-repair-it-1-job-1"
+    ]
+   }
+  },
+  {
+   "name": "stale-verdict-keeps",
+   "spec": {
+    "verdict": "STALE",
+    "snapshots": [
+     {
+      "kind": "good"
+     }
+    ]
+   },
+   "expected": {
+    "returned": false,
+    "error": null,
+    "survivors": [
+     "crq-repair-it-1-job-1"
+    ]
+   }
+  },
+  {
+   "name": "no-snapshot-keeps",
+   "spec": {},
+   "expected": {
+    "returned": false,
+    "error": null,
+    "survivors": [
+     "crq-repair-it-1-job-1"
+    ]
+   }
+  },
+  {
+   "name": "dirty-untracked-keeps",
+   "spec": {
+    "dirty": "untracked",
+    "snapshots": [
+     {
+      "kind": "good"
+     }
+    ]
+   },
+   "expected": {
+    "returned": false,
+    "error": null,
+    "survivors": [
+     "crq-repair-it-1-job-1"
+    ]
+   }
+  },
+  {
+   "name": "dirty-ignored-keeps",
+   "spec": {
+    "dirty": "ignored",
+    "snapshots": [
+     {
+      "kind": "good"
+     }
+    ]
+   },
+   "expected": {
+    "returned": false,
+    "error": null,
+    "survivors": [
+     "crq-repair-it-1-job-1"
+    ]
+   }
+  },
+  {
+   "name": "dirty-staged-keeps",
+   "spec": {
+    "dirty": "staged",
+    "snapshots": [
+     {
+      "kind": "good"
+     }
+    ]
+   },
+   "expected": {
+    "returned": false,
+    "error": null,
+    "survivors": [
+     "crq-repair-it-1-job-1"
+    ]
+   }
+  },
+  {
+   "name": "bad-head-keeps",
+   "spec": {
+    "snapshots": [
+     {
+      "kind": "bad-head"
+     }
+    ]
+   },
+   "expected": {
+    "returned": false,
+    "error": null,
+    "survivors": [
+     "crq-repair-it-1-job-1"
+    ]
+   }
+  },
+  {
+   "name": "bad-base-keeps",
+   "spec": {
+    "snapshots": [
+     {
+      "kind": "bad-base"
+     }
+    ]
+   },
+   "expected": {
+    "returned": false,
+    "error": null,
+    "survivors": [
+     "crq-repair-it-1-job-1"
+    ]
+   }
+  },
+  {
+   "name": "tampered-archive-keeps",
+   "spec": {
+    "snapshots": [
+     {
+      "kind": "tamper"
+     }
+    ]
+   },
+   "expected": {
+    "returned": false,
+    "error": null,
+    "survivors": [
+     "crq-repair-it-1-job-1"
+    ]
+   }
+  },
+  {
+   "name": "missing-archive-keeps",
+   "spec": {
+    "snapshots": [
+     {
+      "kind": "missing-archive"
+     }
+    ]
+   },
+   "expected": {
+    "returned": false,
+    "error": null,
+    "survivors": [
+     "crq-repair-it-1-job-1"
+    ]
+   }
+  },
+  {
+   "name": "malformed-manifest-keeps",
+   "spec": {
+    "snapshots": [
+     {
+      "kind": "bad-json"
+     }
+    ]
+   },
+   "expected": {
+    "returned": false,
+    "error": null,
+    "survivors": [
+     "crq-repair-it-1-job-1"
+    ]
+   }
+  },
+  {
+   "name": "list-manifest-keeps",
+   "spec": {
+    "snapshots": [
+     {
+      "kind": "list-manifest"
+     }
+    ]
+   },
+   "expected": {
+    "returned": false,
+    "error": null,
+    "survivors": [
+     "crq-repair-it-1-job-1"
+    ]
+   }
+  },
+  {
+   "name": "manifest-without-digests-keeps",
+   "spec": {
+    "snapshots": [
+     {
+      "kind": "no-sha"
+     }
+    ]
+   },
+   "expected": {
+    "returned": false,
+    "error": null,
+    "survivors": [
+     "crq-repair-it-1-job-1"
+    ]
+   }
+  },
+  {
+   "name": "misnamed-snapshot-keeps",
+   "spec": {
+    "snapshots": [
+     {
+      "kind": "misnamed"
+     }
+    ]
+   },
+   "expected": {
+    "returned": false,
+    "error": null,
+    "survivors": [
+     "crq-repair-it-1-job-1"
+    ]
+   }
+  },
+  {
+   "name": "bad-then-good-removes",
+   "spec": {
+    "snapshots": [
+     {
+      "kind": "bad-head"
+     },
+     {
+      "kind": "good",
+      "where": "nested"
+     }
+    ]
+   },
+   "expected": {
+    "returned": true,
+    "error": null,
+    "survivors": []
+   }
+  },
+  {
+   "name": "nested-snapshot-removes",
+   "spec": {
+    "snapshots": [
+     {
+      "kind": "good",
+      "where": "nested"
+     }
+    ]
+   },
+   "expected": {
+    "returned": true,
+    "error": null,
+    "survivors": []
+   }
+  },
+  {
+   "name": "non-utf8-directory-snapshot-removes",
+   "spec": {
+    "snapshots": [
+     {
+      "kind": "good",
+      "where": "non-utf8"
+     }
+    ]
+   },
+   "expected": {
+    "returned": true,
+    "error": null,
+    "survivors": []
+   }
+  },
+  {
+   "name": "snapshot-beyond-symlinked-directory-keeps",
+   "spec": {
+    "snapshots": [
+     {
+      "kind": "good",
+      "where": "under-symlink"
+     }
+    ]
+   },
+   "expected": {
+    "returned": false,
+    "error": null,
+    "survivors": [
+     "crq-repair-it-1-job-1"
+    ]
+   }
+  },
+  {
+   "name": "symlinked-snapshot-directory-removes",
+   "spec": {
+    "snapshots": [
+     {
+      "kind": "good",
+      "where": "symlinked-snapshot"
+     }
+    ]
+   },
+   "expected": {
+    "returned": true,
+    "error": null,
+    "survivors": []
+   }
+  },
+  {
+   "name": "result-without-repair-base-keeps",
+   "spec": {
+    "snapshots": [
+     {
+      "kind": "good"
+     }
+    ],
+    "drop_base": true
+   },
+   "expected": {
+    "returned": false,
+    "error": null,
+    "survivors": [
+     "crq-repair-it-1-job-1"
+    ]
+   }
+  },
+  {
+   "name": "result-worktree-absent-keeps",
+   "spec": {
+    "snapshots": [
+     {
+      "kind": "good"
+     }
+    ],
+    "result_worktree": "absent"
+   },
+   "expected": {
+    "returned": false,
+    "error": null,
+    "survivors": [
+     "crq-repair-it-1-job-1"
+    ]
+   }
+  },
+  {
+   "name": "result-worktree-outside-root-keeps",
+   "spec": {
+    "snapshots": [
+     {
+      "kind": "good"
+     }
+    ],
+    "result_worktree": "outside"
+   },
+   "expected": {
+    "returned": false,
+    "error": null,
+    "survivors": [
+     "crq-repair-it-1-job-1"
+    ]
+   }
+  },
+  {
+   "name": "result-worktree-symlink-keeps",
+   "spec": {
+    "snapshots": [
+     {
+      "kind": "good"
+     }
+    ],
+    "result_worktree": "symlink"
+   },
+   "expected": {
+    "returned": false,
+    "error": null,
+    "survivors": [
+     "crq-repair-it-1-job-1"
+    ]
+   }
+  },
+  {
+   "name": "alternate-names-missing-sibling-keeps",
+   "spec": {
+    "snapshots": [
+     {
+      "kind": "good"
+     }
+    ],
+    "alternate": true
+   },
+   "expected": {
+    "returned": false,
+    "error": null,
+    "survivors": [
+     "crq-repair-it-1-job-1"
+    ]
+   }
+  },
+  {
+   "name": "a2-tree-removes",
+   "spec": {
+    "dir": "a2",
+    "snapshots": [
+     {
+      "kind": "good"
+     }
+    ]
+   },
+   "expected": {
+    "returned": true,
+    "error": null,
+    "survivors": []
+   }
+  },
+  {
+   "name": "a2-tree-alternate-flips-to-missing-keeps",
+   "spec": {
+    "dir": "a2",
+    "snapshots": [
+     {
+      "kind": "good"
+     }
+    ],
+    "alternate": true
+   },
+   "expected": {
+    "returned": false,
+    "error": null,
+    "survivors": [
+     "crq-repair-it-1-job-1-A2"
+    ]
+   }
+  },
+  {
+   "name": "a2-result-alternate-flips-to-base-tree-removes",
+   "spec": {
+    "snapshots": [
+     {
+      "kind": "good"
+     }
+    ],
+    "result_worktree": "a2",
+    "alternate": true
+   },
+   "expected": {
+    "returned": true,
+    "error": null,
+    "survivors": []
+   }
+  },
+  {
+   "name": "a2-result-without-alternate-missing-keeps",
+   "spec": {
+    "snapshots": [
+     {
+      "kind": "good"
+     }
+    ],
+    "result_worktree": "a2"
+   },
+   "expected": {
+    "returned": false,
+    "error": null,
+    "survivors": [
+     "crq-repair-it-1-job-1"
+    ]
+   }
+  },
+  {
+   "name": "locked-worktree-refuses-removal",
+   "spec": {
+    "snapshots": [
+     {
+      "kind": "good"
+     }
+    ],
+    "locked": true
+   },
+   "expected": {
+    "returned": false,
+    "error": null,
+    "survivors": [
+     "crq-repair-it-1-job-1"
+    ]
+   }
+  }
+ ],
+ "outcome_cases": [
+  {
+   "name": "failed-exhausted",
+   "op": "mark",
+   "job": {
+    "job": "crq-repair-F1",
+    "item": "pr1-merged",
+    "canonical_finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+    "finding": {
+     "id": "thread-1",
+     "path": "src/a.ts"
+    }
+   },
+   "result": {
+    "verdict": "FAILED",
+    "reason": "stopped"
+   },
+   "expected": {
+    "error": null,
+    "row_before": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "row_after": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "failure_class": "exhausted",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "9366541bac5e0143a965c95da76a8f8f325acee41ca6eae004c302f548b4ab0b",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "needs-retriage"
+    },
+    "events": [
+     {
+      "event_type": "finding-event",
+      "id": "9366541bac5e0143a965c95da76a8f8f325acee41ca6eae004c302f548b4ab0b",
+      "occurred_at": "2026-11-12T00:00:00Z",
+      "payload": {
+       "action": "needs-retriage",
+       "actor": "crq-repair",
+       "evidence": {
+        "failure_class": "exhausted",
+        "fix_pr": null,
+        "reason": "stopped",
+        "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+        "repair_task": "crq-repair-F1"
+       },
+       "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+       "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "schema": "cq.review-ledger/v1",
+      "source_key": "repair-outcome:6d925c8af50986e36d606ab5f7d5d75d2c7efe3edc55ad9fade91b244db9372f"
+     }
+    ]
+   }
+  },
+  {
+   "name": "failed-owner-decision-needs-human",
+   "op": "mark",
+   "job": {
+    "job": "crq-repair-F1",
+    "item": "pr1-merged",
+    "canonical_finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+    "finding": {
+     "id": "thread-1",
+     "path": "src/a.ts"
+    }
+   },
+   "result": {
+    "verdict": "FAILED",
+    "failure_class": "owner-decision",
+    "reason": "pick one"
+   },
+   "expected": {
+    "error": null,
+    "row_before": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "row_after": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "failure_class": "owner-decision",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "b91f55344cf3222dcb071ed2c6627b3686710180b0286bb1c771aec31a848315",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "needs-human"
+    },
+    "events": [
+     {
+      "event_type": "finding-event",
+      "id": "b91f55344cf3222dcb071ed2c6627b3686710180b0286bb1c771aec31a848315",
+      "occurred_at": "2026-11-12T00:00:00Z",
+      "payload": {
+       "action": "needs-human",
+       "actor": "crq-repair",
+       "evidence": {
+        "failure_class": "owner-decision",
+        "fix_pr": null,
+        "reason": "pick one",
+        "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+        "repair_task": "crq-repair-F1"
+       },
+       "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+       "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "schema": "cq.review-ledger/v1",
+      "source_key": "repair-outcome:ddec880ca24a4e3ac59823f3fcaf96b4914a5d50eab248ebfbc21d9ae65cae46"
+     }
+    ]
+   }
+  },
+  {
+   "name": "failed-non-string-class-normalizes",
+   "op": "mark",
+   "job": {
+    "job": "crq-repair-F1",
+    "item": "pr1-merged",
+    "canonical_finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+    "finding": {
+     "id": "thread-1",
+     "path": "src/a.ts"
+    }
+   },
+   "result": {
+    "verdict": "FAILED",
+    "failure_class": 5,
+    "reason": "odd class"
+   },
+   "expected": {
+    "error": null,
+    "row_before": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "row_after": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "failure_class": "exhausted",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "d985c9d5df180919a567712fe106f0d6f75e9b37cb877a276817a1b77e7af863",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "needs-retriage"
+    },
+    "events": [
+     {
+      "event_type": "finding-event",
+      "id": "d985c9d5df180919a567712fe106f0d6f75e9b37cb877a276817a1b77e7af863",
+      "occurred_at": "2026-11-12T00:00:00Z",
+      "payload": {
+       "action": "needs-retriage",
+       "actor": "crq-repair",
+       "evidence": {
+        "failure_class": "exhausted",
+        "fix_pr": null,
+        "reason": "odd class",
+        "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+        "repair_task": "crq-repair-F1"
+       },
+       "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+       "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "schema": "cq.review-ledger/v1",
+      "source_key": "repair-outcome:76d0e853f93a5427af3b6ca19a3a136f8f559229983921c399e60abd4cbc12c9"
+     }
+    ]
+   }
+  },
+  {
+   "name": "failed-list-class-normalizes",
+   "op": "mark",
+   "job": {
+    "job": "crq-repair-F1",
+    "item": "pr1-merged",
+    "canonical_finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+    "finding": {
+     "id": "thread-1",
+     "path": "src/a.ts"
+    }
+   },
+   "result": {
+    "verdict": "FAILED",
+    "failure_class": [
+     "x"
+    ],
+    "reason": "list class"
+   },
+   "expected": {
+    "error": null,
+    "row_before": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "row_after": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "failure_class": "exhausted",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "a63c92c0d40c231952d224b27d2c7714b4b3925b8518af168be73fa69b352d89",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "needs-retriage"
+    },
+    "events": [
+     {
+      "event_type": "finding-event",
+      "id": "a63c92c0d40c231952d224b27d2c7714b4b3925b8518af168be73fa69b352d89",
+      "occurred_at": "2026-11-12T00:00:00Z",
+      "payload": {
+       "action": "needs-retriage",
+       "actor": "crq-repair",
+       "evidence": {
+        "failure_class": "exhausted",
+        "fix_pr": null,
+        "reason": "list class",
+        "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+        "repair_task": "crq-repair-F1"
+       },
+       "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+       "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "schema": "cq.review-ledger/v1",
+      "source_key": "repair-outcome:15c5b9facd70c0a073914428f9dfc38cbb24f4bbd1aafefac30c590e68a0d887"
+     }
+    ]
+   }
+  },
+  {
+   "name": "failed-empty-reason-uses-verdict",
+   "op": "mark",
+   "job": {
+    "job": "crq-repair-F1",
+    "item": "pr1-merged",
+    "canonical_finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+    "finding": {
+     "id": "thread-1",
+     "path": "src/a.ts"
+    }
+   },
+   "result": {
+    "verdict": "FAILED",
+    "reason": ""
+   },
+   "expected": {
+    "error": null,
+    "row_before": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "row_after": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "failure_class": "exhausted",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "75b511a4d7ab71f92711c6f47b2541dee3a2d00522ff66830fc43bed050c1681",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "needs-retriage"
+    },
+    "events": [
+     {
+      "event_type": "finding-event",
+      "id": "75b511a4d7ab71f92711c6f47b2541dee3a2d00522ff66830fc43bed050c1681",
+      "occurred_at": "2026-11-12T00:00:00Z",
+      "payload": {
+       "action": "needs-retriage",
+       "actor": "crq-repair",
+       "evidence": {
+        "failure_class": "exhausted",
+        "fix_pr": null,
+        "reason": "FAILED",
+        "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+        "repair_task": "crq-repair-F1"
+       },
+       "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+       "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "schema": "cq.review-ledger/v1",
+      "source_key": "repair-outcome:a6ac088a32fe3017a2d2bbeb90f013665d679ae450b60126cda211918e10c44c"
+     }
+    ]
+   }
+  },
+  {
+   "name": "failed-zero-reason-uses-verdict",
+   "op": "mark",
+   "job": {
+    "job": "crq-repair-F1",
+    "item": "pr1-merged",
+    "canonical_finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+    "finding": {
+     "id": "thread-1",
+     "path": "src/a.ts"
+    }
+   },
+   "result": {
+    "verdict": "FAILED",
+    "reason": 0
+   },
+   "expected": {
+    "error": null,
+    "row_before": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "row_after": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "failure_class": "exhausted",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "75b511a4d7ab71f92711c6f47b2541dee3a2d00522ff66830fc43bed050c1681",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "needs-retriage"
+    },
+    "events": [
+     {
+      "event_type": "finding-event",
+      "id": "75b511a4d7ab71f92711c6f47b2541dee3a2d00522ff66830fc43bed050c1681",
+      "occurred_at": "2026-11-12T00:00:00Z",
+      "payload": {
+       "action": "needs-retriage",
+       "actor": "crq-repair",
+       "evidence": {
+        "failure_class": "exhausted",
+        "fix_pr": null,
+        "reason": "FAILED",
+        "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+        "repair_task": "crq-repair-F1"
+       },
+       "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+       "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "schema": "cq.review-ledger/v1",
+      "source_key": "repair-outcome:a6ac088a32fe3017a2d2bbeb90f013665d679ae450b60126cda211918e10c44c"
+     }
+    ]
+   }
+  },
+  {
+   "name": "failed-non-string-reason",
+   "op": "mark",
+   "job": {
+    "job": "crq-repair-F1",
+    "item": "pr1-merged",
+    "canonical_finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+    "finding": {
+     "id": "thread-1",
+     "path": "src/a.ts"
+    }
+   },
+   "result": {
+    "verdict": "FAILED",
+    "reason": 7
+   },
+   "expected": {
+    "error": null,
+    "row_before": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "row_after": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "failure_class": "exhausted",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "adcd156ac4ffe44d3446a954d94f4df31a3d7f902b947c681ccfcfacbe8475db",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "needs-retriage"
+    },
+    "events": [
+     {
+      "event_type": "finding-event",
+      "id": "adcd156ac4ffe44d3446a954d94f4df31a3d7f902b947c681ccfcfacbe8475db",
+      "occurred_at": "2026-11-12T00:00:00Z",
+      "payload": {
+       "action": "needs-retriage",
+       "actor": "crq-repair",
+       "evidence": {
+        "failure_class": "exhausted",
+        "fix_pr": null,
+        "reason": 7,
+        "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+        "repair_task": "crq-repair-F1"
+       },
+       "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+       "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "schema": "cq.review-ledger/v1",
+      "source_key": "repair-outcome:8b30ea74f99b85bb362848836804c0f32686ac5ca5b19698ad1479cc8b429c44"
+     }
+    ]
+   }
+  },
+  {
+   "name": "not-fixed-truthy-text-evidence-dismisses",
+   "op": "mark",
+   "job": {
+    "job": "crq-repair-F1",
+    "item": "pr1-merged",
+    "canonical_finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+    "finding": {
+     "id": "thread-1",
+     "path": "src/a.ts"
+    }
+   },
+   "result": {
+    "verdict": "NOT-FIXED",
+    "reason": "r",
+    "unchanged_evidence": "seen"
+   },
+   "expected": {
+    "error": null,
+    "row_before": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "row_after": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "failure_class": "exhausted",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "a10e0c159ec78c2bb96f54a6be970a380ad5657c11927f502f48e34eb4b78b77",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "dismissed"
+    },
+    "events": [
+     {
+      "event_type": "finding-event",
+      "id": "a10e0c159ec78c2bb96f54a6be970a380ad5657c11927f502f48e34eb4b78b77",
+      "occurred_at": "2026-11-12T00:00:00Z",
+      "payload": {
+       "action": "dismissed",
+       "actor": "crq-repair",
+       "evidence": {
+        "failure_class": "exhausted",
+        "fix_pr": null,
+        "reason": "r",
+        "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+        "repair_task": "crq-repair-F1",
+        "source_evidence": "seen"
+       },
+       "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+       "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "schema": "cq.review-ledger/v1",
+      "source_key": "repair-outcome:47d7d2550c0e217b0880645cd8a7b7dbfb6b85f6ccbdea7b65666775c6d54b17"
+     }
+    ]
+   }
+  },
+  {
+   "name": "not-fixed-empty-dict-evidence-retriages",
+   "op": "mark",
+   "job": {
+    "job": "crq-repair-F1",
+    "item": "pr1-merged",
+    "canonical_finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+    "finding": {
+     "id": "thread-1",
+     "path": "src/a.ts"
+    }
+   },
+   "result": {
+    "verdict": "NOT-FIXED",
+    "reason": "r",
+    "unchanged_evidence": {}
+   },
+   "expected": {
+    "error": null,
+    "row_before": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "row_after": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "failure_class": "exhausted",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "eb65325595c52806daf513fb966972aee721e8570f3488f0cc80cbef3609173b",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "needs-retriage"
+    },
+    "events": [
+     {
+      "event_type": "finding-event",
+      "id": "eb65325595c52806daf513fb966972aee721e8570f3488f0cc80cbef3609173b",
+      "occurred_at": "2026-11-12T00:00:00Z",
+      "payload": {
+       "action": "needs-retriage",
+       "actor": "crq-repair",
+       "evidence": {
+        "failure_class": "exhausted",
+        "fix_pr": null,
+        "reason": "r",
+        "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+        "repair_task": "crq-repair-F1"
+       },
+       "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+       "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "schema": "cq.review-ledger/v1",
+      "source_key": "repair-outcome:d095a5a9edfdb4dbd564bf7bc18791427c70e5a360d466622ab5a7b2be524b49"
+     }
+    ]
+   }
+  },
+  {
+   "name": "not-fixed-zero-evidence-owner-needs-human",
+   "op": "mark",
+   "job": {
+    "job": "crq-repair-F1",
+    "item": "pr1-merged",
+    "canonical_finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+    "finding": {
+     "id": "thread-1",
+     "path": "src/a.ts"
+    }
+   },
+   "result": {
+    "verdict": "NOT-FIXED",
+    "failure_class": "owner-decision",
+    "unchanged_evidence": 0
+   },
+   "expected": {
+    "error": null,
+    "row_before": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "row_after": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "failure_class": "owner-decision",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "54bdcc2bdd23329792c1a6ad89b9de14152b3d9576b372aa4da19726e4b555ac",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "needs-human"
+    },
+    "events": [
+     {
+      "event_type": "finding-event",
+      "id": "54bdcc2bdd23329792c1a6ad89b9de14152b3d9576b372aa4da19726e4b555ac",
+      "occurred_at": "2026-11-12T00:00:00Z",
+      "payload": {
+       "action": "needs-human",
+       "actor": "crq-repair",
+       "evidence": {
+        "failure_class": "owner-decision",
+        "fix_pr": null,
+        "reason": "NOT-FIXED",
+        "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+        "repair_task": "crq-repair-F1"
+       },
+       "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+       "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "schema": "cq.review-ledger/v1",
+      "source_key": "repair-outcome:5d820a6e6a6e2c2b0c6398af4c7753ecf87500340afa8dcba62a9d32c0279af6"
+     }
+    ]
+   }
+  },
+  {
+   "name": "stale-retriages",
+   "op": "mark",
+   "job": {
+    "job": "crq-repair-F1",
+    "item": "pr1-merged",
+    "canonical_finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+    "finding": {
+     "id": "thread-1",
+     "path": "src/a.ts"
+    }
+   },
+   "result": {
+    "verdict": "STALE"
+   },
+   "expected": {
+    "error": null,
+    "row_before": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "row_after": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "failure_class": "exhausted",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "5c110364f1be535083780aa53792d428fe2d03ad27fb31de1e00c446af65db6e",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "needs-retriage"
+    },
+    "events": [
+     {
+      "event_type": "finding-event",
+      "id": "5c110364f1be535083780aa53792d428fe2d03ad27fb31de1e00c446af65db6e",
+      "occurred_at": "2026-11-12T00:00:00Z",
+      "payload": {
+       "action": "needs-retriage",
+       "actor": "crq-repair",
+       "evidence": {
+        "failure_class": "exhausted",
+        "fix_pr": null,
+        "reason": "STALE",
+        "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+        "repair_task": "crq-repair-F1"
+       },
+       "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+       "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "schema": "cq.review-ledger/v1",
+      "source_key": "repair-outcome:379e1e82e45571dd57eaf4711ccf44311837506916716b9cdd77a8d6041f8b34"
+     }
+    ]
+   }
+  },
+  {
+   "name": "fixed-writes-nothing",
+   "op": "mark",
+   "job": {
+    "job": "crq-repair-F1",
+    "item": "pr1-merged",
+    "canonical_finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+    "finding": {
+     "id": "thread-1",
+     "path": "src/a.ts"
+    }
+   },
+   "result": {
+    "job": "crq-repair-F1",
+    "item": "pr1-merged",
+    "verdict": "FIXED",
+    "reason": "ready"
+   },
+   "expected": {
+    "error": null,
+    "row_before": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "row_after": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "events": []
+   }
+  },
+  {
+   "name": "unknown-verdict-writes-nothing",
+   "op": "mark",
+   "job": {
+    "job": "crq-repair-F1",
+    "item": "pr1-merged",
+    "canonical_finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+    "finding": {
+     "id": "thread-1",
+     "path": "src/a.ts"
+    }
+   },
+   "result": {
+    "verdict": "WEIRD"
+   },
+   "expected": {
+    "error": null,
+    "row_before": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "row_after": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "events": []
+   }
+  },
+  {
+   "name": "lowercase-verdict-writes-nothing",
+   "op": "mark",
+   "job": {
+    "job": "crq-repair-F1",
+    "item": "pr1-merged",
+    "canonical_finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+    "finding": {
+     "id": "thread-1",
+     "path": "src/a.ts"
+    }
+   },
+   "result": {
+    "verdict": "failed"
+   },
+   "expected": {
+    "error": null,
+    "row_before": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "row_after": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "events": []
+   }
+  },
+  {
+   "name": "null-verdict-writes-nothing",
+   "op": "mark",
+   "job": {
+    "job": "crq-repair-F1",
+    "item": "pr1-merged",
+    "canonical_finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+    "finding": {
+     "id": "thread-1",
+     "path": "src/a.ts"
+    }
+   },
+   "result": {
+    "verdict": null
+   },
+   "expected": {
+    "error": null,
+    "row_before": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "row_after": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "events": []
+   }
+  },
+  {
+   "name": "missing-verdict-key-error",
+   "op": "mark",
+   "job": {
+    "job": "crq-repair-F1",
+    "item": "pr1-merged",
+    "canonical_finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+    "finding": {
+     "id": "thread-1",
+     "path": "src/a.ts"
+    }
+   },
+   "result": {
+    "reason": "x"
+   },
+   "expected": {
+    "error": "KeyError",
+    "row_before": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "row_after": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "events": []
+   }
+  },
+  {
+   "name": "list-verdict-unhashable",
+   "op": "mark",
+   "job": {
+    "job": "crq-repair-F1",
+    "item": "pr1-merged",
+    "canonical_finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+    "finding": {
+     "id": "thread-1",
+     "path": "src/a.ts"
+    }
+   },
+   "result": {
+    "verdict": [
+     "FAILED"
+    ]
+   },
+   "expected": {
+    "error": "TypeError",
+    "row_before": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "row_after": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "events": []
+   }
+  },
+  {
+   "name": "dict-verdict-unhashable",
+   "op": "mark",
+   "job": {
+    "job": "crq-repair-F1",
+    "item": "pr1-merged",
+    "canonical_finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+    "finding": {
+     "id": "thread-1",
+     "path": "src/a.ts"
+    }
+   },
+   "result": {
+    "verdict": {
+     "a": 1
+    }
+   },
+   "expected": {
+    "error": "TypeError",
+    "row_before": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "row_after": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "events": []
+   }
+  },
+  {
+   "name": "no-finding-id-writes-nothing",
+   "op": "mark",
+   "job": {
+    "job": "crq-repair-F1",
+    "item": "pr1-merged",
+    "canonical_finding_id": null,
+    "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+    "finding": {
+     "id": "thread-1",
+     "path": "src/a.ts"
+    }
+   },
+   "result": {
+    "verdict": "FAILED"
+   },
+   "expected": {
+    "error": null,
+    "row_before": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "row_after": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "events": []
+   }
+  },
+  {
+   "name": "empty-finding-id-writes-nothing",
+   "op": "mark",
+   "job": {
+    "job": "crq-repair-F1",
+    "item": "pr1-merged",
+    "canonical_finding_id": "",
+    "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+    "finding": {
+     "id": "thread-1",
+     "path": "src/a.ts"
+    }
+   },
+   "result": {
+    "verdict": "FAILED"
+   },
+   "expected": {
+    "error": null,
+    "row_before": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "row_after": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "events": []
+   }
+  },
+  {
+   "name": "zero-finding-id-writes-nothing",
+   "op": "mark",
+   "job": {
+    "job": "crq-repair-F1",
+    "item": "pr1-merged",
+    "canonical_finding_id": 0,
+    "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+    "finding": {
+     "id": "thread-1",
+     "path": "src/a.ts"
+    }
+   },
+   "result": {
+    "verdict": "FAILED"
+   },
+   "expected": {
+    "error": null,
+    "row_before": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "row_after": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "events": []
+   }
+  },
+  {
+   "name": "empty-list-finding-id-writes-nothing",
+   "op": "mark",
+   "job": {
+    "job": "crq-repair-F1",
+    "item": "pr1-merged",
+    "canonical_finding_id": [],
+    "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+    "finding": {
+     "id": "thread-1",
+     "path": "src/a.ts"
+    }
+   },
+   "result": {
+    "verdict": "FAILED"
+   },
+   "expected": {
+    "error": null,
+    "row_before": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "row_after": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "events": []
+   }
+  },
+  {
+   "name": "int-finding-id-type-error",
+   "op": "mark",
+   "job": {
+    "job": "crq-repair-F1",
+    "item": "pr1-merged",
+    "canonical_finding_id": 5,
+    "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+    "finding": {
+     "id": "thread-1",
+     "path": "src/a.ts"
+    }
+   },
+   "result": {
+    "verdict": "FAILED"
+   },
+   "expected": {
+    "error": "TypeError",
+    "row_before": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "row_after": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "events": []
+   }
+  },
+  {
+   "name": "list-finding-id-type-error",
+   "op": "mark",
+   "job": {
+    "job": "crq-repair-F1",
+    "item": "pr1-merged",
+    "canonical_finding_id": [
+     "x"
+    ],
+    "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+    "finding": {
+     "id": "thread-1",
+     "path": "src/a.ts"
+    }
+   },
+   "result": {
+    "verdict": "FAILED"
+   },
+   "expected": {
+    "error": "TypeError",
+    "row_before": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "row_after": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "events": []
+   }
+  },
+  {
+   "name": "missing-job-id-key-error",
+   "op": "mark",
+   "job": {
+    "item": "pr1-merged",
+    "canonical_finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+    "finding": {
+     "id": "thread-1",
+     "path": "src/a.ts"
+    }
+   },
+   "result": {
+    "verdict": "FAILED"
+   },
+   "expected": {
+    "error": "KeyError",
+    "row_before": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "row_after": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "events": []
+   }
+  },
+  {
+   "name": "missing-repair-base-writes-null-base",
+   "op": "mark",
+   "job": {
+    "job": "crq-repair-F1",
+    "item": "pr1-merged",
+    "canonical_finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "finding": {
+     "id": "thread-1",
+     "path": "src/a.ts"
+    }
+   },
+   "result": {
+    "verdict": "FAILED"
+   },
+   "expected": {
+    "error": null,
+    "row_before": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "row_after": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "failure_class": "exhausted",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "a39d47887b194e62bf121cfe1a32cb57cc24d6eddb1489f3ad2615333e640658",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "needs-retriage"
+    },
+    "events": [
+     {
+      "event_type": "finding-event",
+      "id": "a39d47887b194e62bf121cfe1a32cb57cc24d6eddb1489f3ad2615333e640658",
+      "occurred_at": "2026-11-12T00:00:00Z",
+      "payload": {
+       "action": "needs-retriage",
+       "actor": "crq-repair",
+       "evidence": {
+        "failure_class": "exhausted",
+        "fix_pr": null,
+        "reason": "FAILED",
+        "repair_task": "crq-repair-F1"
+       },
+       "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+       "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "schema": "cq.review-ledger/v1",
+      "source_key": "repair-outcome:cebc39f00f5d01674ead3cf3c3c9b6aa5357db00e016b103333f78ba5b84477b"
+     }
+    ]
+   }
+  },
+  {
+   "name": "row-bound-to-newer-job-preserved",
+   "op": "mark",
+   "job": {
+    "job": "crq-repair-F1",
+    "item": "pr1-merged",
+    "canonical_finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+    "finding": {
+     "id": "thread-1",
+     "path": "src/a.ts"
+    }
+   },
+   "result": {
+    "verdict": "FAILED",
+    "reason": "late"
+   },
+   "repair_task": "crq-newer",
+   "expected": {
+    "error": null,
+    "row_before": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-newer"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "row_after": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-newer"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "events": []
+   }
+  },
+  {
+   "name": "sibling-fixed-needs-human",
+   "op": "sibling",
+   "job": {
+    "job": "sib-1",
+    "item": "pr1-merged",
+    "canonical_finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+    "finding": {
+     "id": "thread-1",
+     "path": "src/a.ts"
+    }
+   },
+   "result": {
+    "job": "sib-1",
+    "item": "pr1-merged",
+    "verdict": "FIXED"
+   },
+   "repair_task": "sib-1",
+   "expected": {
+    "error": null,
+    "row_before": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "sib-1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "row_after": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "failure_class": "exhausted",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "5d795ee2c475ce385702c4b90d460a299bd599c01550f563a6b5a197b600838e",
+     "receipt": {
+      "repair_task": "sib-1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "needs-human"
+    },
+    "events": [
+     {
+      "event_type": "finding-event",
+      "id": "5d795ee2c475ce385702c4b90d460a299bd599c01550f563a6b5a197b600838e",
+      "occurred_at": "2026-11-12T00:00:00Z",
+      "payload": {
+       "action": "needs-human",
+       "actor": "crq-repair",
+       "evidence": {
+        "failure_class": "exhausted",
+        "fix_pr": null,
+        "reason": "repair run failed before publication; the verified fix was not published",
+        "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+        "repair_task": "sib-1"
+       },
+       "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+       "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "schema": "cq.review-ledger/v1",
+      "source_key": "repair-outcome:a274d0a238cb46b1762c2fac8d960bb77dc7a6b45050c27d3560f18cd9cc126c"
+     }
+    ]
+   }
+  },
+  {
+   "name": "sibling-fixed-null-base",
+   "op": "sibling",
+   "job": {
+    "job": "sib-1",
+    "item": "pr1-merged",
+    "canonical_finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "finding": {
+     "id": "thread-1",
+     "path": "src/a.ts"
+    }
+   },
+   "result": {
+    "job": "sib-1",
+    "item": "pr1-merged",
+    "verdict": "FIXED"
+   },
+   "repair_task": "sib-1",
+   "expected": {
+    "error": null,
+    "row_before": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "sib-1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "row_after": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "failure_class": "exhausted",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "427f82ae8939e90d6b8ab11412a30007b82acdb7546cc3b1a6a1d59410ce0451",
+     "receipt": {
+      "repair_task": "sib-1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "needs-human"
+    },
+    "events": [
+     {
+      "event_type": "finding-event",
+      "id": "427f82ae8939e90d6b8ab11412a30007b82acdb7546cc3b1a6a1d59410ce0451",
+      "occurred_at": "2026-11-12T00:00:00Z",
+      "payload": {
+       "action": "needs-human",
+       "actor": "crq-repair",
+       "evidence": {
+        "failure_class": "exhausted",
+        "fix_pr": null,
+        "reason": "repair run failed before publication; the verified fix was not published",
+        "repair_task": "sib-1"
+       },
+       "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+       "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "schema": "cq.review-ledger/v1",
+      "source_key": "repair-outcome:1892ee8f92636a6113688ea5ef019f35f7b60a239ce45fe0ed6d78d239d78c68"
+     }
+    ]
+   }
+  },
+  {
+   "name": "sibling-fixed-row-bound-to-newer-preserved",
+   "op": "sibling",
+   "job": {
+    "job": "sib-1",
+    "item": "pr1-merged",
+    "canonical_finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+    "finding": {
+     "id": "thread-1",
+     "path": "src/a.ts"
+    }
+   },
+   "result": {
+    "job": "sib-1",
+    "item": "pr1-merged",
+    "verdict": "FIXED"
+   },
+   "repair_task": "crq-newer",
+   "expected": {
+    "error": null,
+    "row_before": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-newer"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "row_after": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-newer"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "events": []
+   }
+  }
+ ]
+}

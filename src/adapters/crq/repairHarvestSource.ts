@@ -8,6 +8,7 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { RepairHarvestEffects } from '../../ops/crq/internal/repairHarvestExecution.js';
+import { PyError } from '../../queue-runner/pyErrors.js';
 import type { FindingPublication } from '../../ops/review/internal/crq/findingInbox.js';
 import { fileArtifactStore, fileFindingInbox, fileFindingPublication } from './findingStore.js';
 import { parseBackfillRollout } from './repairPreparation.js';
@@ -33,8 +34,12 @@ export function fileRepairHarvestEffects(stateRoot: string): RepairHarvestEffect
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
     const rollout = parseBackfillRollout(raw);
+    // Python's `finding_inbox` raises `ValueError`, which `repair_tick.harvest` catches by class.
     if (!rollout.ok)
-      throw new Error('backfill repair write-back requires existing ledger configuration');
+      throw new PyError(
+        'ValueError',
+        'backfill repair write-back requires existing ledger configuration',
+      );
     return fileFindingPublication({
       root: roots.publication,
       artifacts: fileArtifactStore(rollout.durableArtifactRoot),
