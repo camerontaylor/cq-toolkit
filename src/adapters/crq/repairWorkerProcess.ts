@@ -176,6 +176,7 @@ export function fileRepairWorkerStarter(
     }
 
     let settled = false;
+    let startupFault = false;
     const exit = new Promise<WorkerExit>((resolve) => {
       const settle = (value: WorkerExit): void => {
         if (settled) return;
@@ -192,21 +193,22 @@ export function fileRepairWorkerStarter(
           // an unavailable fd is reported by takeRefusal, not here
         }
         pipe?.destroy();
-        settle(workerExitFromStatus(code, signal));
+        settle(startupFault ? { kind: 'lost' } : workerExitFromStatus(code, signal));
       });
       child.once('error', () => {
         channel.close();
         settle({ kind: 'lost' });
       });
     });
-    // Startup self-check: a Node without the descriptor must fail now, not on a later refusal.
-    // The child is already running and is never killed; it exits on its own and `owned` falls.
+    // Startup self-check. The child is already running and is never killed, so throwing here
+    // would orphan it (the caller never gets a handle to reap). Instead the handle is returned
+    // so `drainItems` registers and reaps it, and the fault is loud twice: every `takeRefusal`
+    // throws (the pipe stays live, so `livePipeFd` keeps throwing) and the exit is `lost`.
     if (pipe) {
       try {
         livePipeFd(pipe);
-      } catch (error) {
-        pipe.destroy();
-        throw error;
+      } catch {
+        startupFault = true;
       }
     }
     return {

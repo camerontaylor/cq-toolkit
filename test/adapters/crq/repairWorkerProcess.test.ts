@@ -239,6 +239,19 @@ describe('drainItems over real workers', () => {
     }) as unknown as RepairDrainEffects;
   const groups = (...items: string[]) => new Map(items.map((i) => [i, [`${i}-job`]]));
 
+  test('a worker whose pipe has no descriptor is registered and reaped, not orphaned', async () => {
+    spawnHook.tweak = (pipe) =>
+      Object.defineProperty((pipe as { _handle: object })._handle, 'fd', { value: undefined });
+    const before = ownedWorkerCount();
+    const base = starter({ a: { publish: ['a'] }, b: { publish: ['a'] } });
+    try {
+      await drainItems(effects(base, []), groups('a', 'b'), ['a', 'b'], 2).catch(() => undefined);
+    } finally {
+      spawnHook.tweak = null;
+    }
+    expect(ownedWorkerCount()).toBe(before);
+  });
+
   test('a crash stops further admission, the other worker is reaped, the failure is returned', async () => {
     const dir = await tmp();
     const release = join(dir, 'release');
@@ -355,18 +368,19 @@ describe('pipe descriptor lifecycle', () => {
     expect(h.takeRefusal()).toBe(true);
   });
 
-  test('a pipe with no descriptor at start fails loudly', async () => {
+  test('a pipe with no descriptor at start still yields a reapable handle that fails loudly', async () => {
     spawnHook.tweak = (pipe) =>
       Object.defineProperty((pipe as { _handle: object })._handle, 'fd', { value: undefined });
     const before = ownedWorkerCount();
+    let h: RepairWorkerHandle;
     try {
-      expect(() => starter({ i: { publish: ['a'] } })('i', ['j'])).toThrow(
-        RepairWorkerFdUnavailableError,
-      );
+      h = starter({ i: { publish: ['a'] } })('i', ['j']);
     } finally {
       spawnHook.tweak = null;
     }
-    await settle(200);
+    expect(ownedWorkerCount()).toBe(before + 1);
+    expect(() => h.takeRefusal()).toThrow(RepairWorkerFdUnavailableError);
+    expect(await h.exit).toEqual({ kind: 'lost' });
     expect(ownedWorkerCount()).toBe(before);
   });
 
