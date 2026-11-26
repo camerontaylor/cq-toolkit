@@ -11,6 +11,10 @@ export type PyErrorKind =
   | 'TypeError'
   | 'IndexError'
   | 'OSError'
+  /** `IsADirectoryError`, an `OSError` subclass (`read_text` on a directory). */
+  | 'IsADirectoryError'
+  /** `UnicodeEncodeError`, a `ValueError` subclass (`write_text` of a lone surrogate). */
+  | 'UnicodeEncodeError'
   /** `FileNotFoundError`, an `OSError` subclass (`subprocess` with a missing executable). */
   | 'FileNotFoundError'
   /** `subprocess.TimeoutExpired`, a `SubprocessError` (not an `OSError` or `RuntimeError`). */
@@ -42,8 +46,10 @@ export function isPyError(e: unknown, ...kinds: readonly PyErrorKind[]): e is Py
     (kind) =>
       kind === e.kind ||
       (kind === 'ValueError' &&
-        (e.kind === 'DetectorUnavailable' || e.kind === 'UnsupportedUntracked')) ||
-      (kind === 'OSError' && e.kind === 'FileNotFoundError'),
+        (e.kind === 'DetectorUnavailable' ||
+          e.kind === 'UnsupportedUntracked' ||
+          e.kind === 'UnicodeEncodeError')) ||
+      (kind === 'OSError' && (e.kind === 'FileNotFoundError' || e.kind === 'IsADirectoryError')),
   );
 }
 
