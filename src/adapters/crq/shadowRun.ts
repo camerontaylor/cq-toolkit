@@ -361,6 +361,17 @@ export interface ComposedRunResult {
 /** Runs one implementation's whole tick over a frozen copy and resolves when it is done. */
 export type ComposedRunner = (root: string) => Promise<ComposedRunResult>;
 
+/**
+ * Inputs the composed phases read that `freezeStateRoot` does not copy. A sample holding one would
+ * run both sides with that phase silently switched off and could still report `identical`, so the
+ * sample is refused instead.
+ */
+export const COMPOSED_UNFROZEN_INPUTS: readonly string[] = [
+  'backfill-rollout.json',
+  'ledger',
+  'runs',
+];
+
 export interface ComposedShadowOptions {
   readonly liveRoot: string;
   readonly scratch: string;
@@ -392,6 +403,14 @@ export interface ComposedShadowReport {
 export async function runComposedShadow(
   options: ComposedShadowOptions,
 ): Promise<ComposedShadowReport> {
+  const unfrozen = COMPOSED_UNFROZEN_INPUTS.filter((name) =>
+    existsSync(join(options.liveRoot, name)),
+  );
+  if (unfrozen.length > 0) {
+    throw new Error(
+      `composed shadow refuses a live root holding inputs it does not freeze: ${unfrozen.join(', ')}`,
+    );
+  }
   const frozen = freezeStateRoot(options.liveRoot, options.scratch);
   const python = await options.python(frozen.a);
   const ts = await options.ts(frozen.b);

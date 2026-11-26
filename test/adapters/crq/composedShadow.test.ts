@@ -1,5 +1,12 @@
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  appendFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -150,6 +157,25 @@ describe('composed tick shadow: Python crq.tick vs the TS composed tick', () => 
       });
       expect(result.report.class).toBe('identical');
     });
+
+  it('refuses a live root holding inputs the composed shadow does not freeze', async () => {
+    for (const name of ['backfill-rollout.json', 'ledger', 'runs']) {
+      const liveRoot = live(SEEDS[0]![1]);
+      if (name.includes('.')) writeFileSync(join(liveRoot, name), '{}');
+      else mkdirSync(join(liveRoot, name));
+      const s = spec();
+      await expect(
+        runComposedShadow({
+          liveRoot,
+          scratch: tmp(),
+          pinnedAt: NOW,
+          sample: 'unfrozen',
+          python: python(s),
+          ts: (root) => runComposedTs(REPO, root, s),
+        }),
+      ).rejects.toThrow(`does not freeze: ${name}`);
+    }
+  });
 
   it('never reports complete: exactly the four open rows stay', async () => {
     const { result } = await shadow(SEEDS[0]![1]);

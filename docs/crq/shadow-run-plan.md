@@ -49,7 +49,9 @@ after the real Python `crq.tick` runs over frozen copy `a` and the TS
 `queue.json` (by value), `events.jsonl`, `heartbeat.json`, `status.json`,
 `status.md` and `next-review-at` (all by bytes), the tick log and the phase
 calls. Both sides are injected runners; the harness is not imported from a
-routed path and keeps the live-root digest abort. It always reports
+routed path and keeps the live-root digest abort. It refuses a live root holding
+`backfill-rollout.json`, `ledger` or `runs` (inputs it does not freeze), so a
+switched-off phase cannot read as `identical`. It always reports
 `complete: false` with the open `STAGED_GAPS` rows.
 
 Both sides stub the same effects: `start_one` (nothing started), `fetch`, `enroll`,
