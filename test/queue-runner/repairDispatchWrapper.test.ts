@@ -17,6 +17,12 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
+import {
+  JsonNumber,
+  parseJsonValue,
+  toPlainJson,
+  toPlainJsonRetainingNumbers,
+} from '../../src/policy/crq/jsonValue.js';
 import { PyError, type PyErrorKind } from '../../src/queue-runner/pyErrors.js';
 import {
   dispatch,
@@ -48,7 +54,49 @@ interface Case {
   readonly expected: Dict;
 }
 
-const cases = (JSON.parse(readFileSync(FIXTURE, 'utf8')) as { cases: Case[] }).cases;
+/**
+ * The fixture is read twice. The retaining read keeps `7.0` a float, which only the job's
+ * `run`, `job` and `review_diff` (rendered by Python `str()`) can observe; every other
+ * number is the plain JavaScript value the production caller would hold.
+ */
+const fixtureText = readFileSync(FIXTURE, 'utf8');
+const retained = toPlainJsonRetainingNumbers(parseJsonValue(fixtureText)) as { cases: Case[] };
+
+/** Retained numbers become plain numbers, except under `keepFloats` where they stay `JsonNumber`. */
+function plain(value: unknown, keep = false): unknown {
+  if (value instanceof JsonNumber) return keep ? value : toPlainJson(value);
+  if (Array.isArray(value)) return value.map((v) => plain(v, keep));
+  if (isDictLoose(value)) {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, plain(v, keep)]));
+  }
+  return value;
+}
+function isDictLoose(v: unknown): v is Dict {
+  return typeof v === 'object' && v !== null && !(v instanceof JsonNumber);
+}
+/** `structuredClone` that keeps the immutable `JsonNumber` instances intact. */
+function clone<T>(value: T): T {
+  if (value instanceof JsonNumber) return value;
+  if (Array.isArray(value)) return value.map(clone) as T;
+  if (isDictLoose(value)) {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, clone(v)])) as T;
+  }
+  return value;
+}
+const IDENTITY_FIELDS = ['run', 'job', 'review_diff'];
+function scenarioOf(raw: Scenario): Scenario {
+  const job = isDict(raw.job)
+    ? Object.fromEntries(
+        Object.entries(raw.job).map(([k, v]) => [
+          k,
+          v instanceof JsonNumber && IDENTITY_FIELDS.includes(k) ? v : plain(v),
+        ]),
+      )
+    : raw.job;
+  return { ...(plain({ ...raw, job: null }) as Scenario), job };
+}
+
+const cases = retained.cases;
 
 const isRaise = (v: unknown): v is { raise: { kind: PyErrorKind; message: string } } =>
   typeof v === 'object' && v !== null && Object.keys(v).length === 1 && 'raise' in v;
@@ -64,7 +112,7 @@ function budgetOf(config: unknown): unknown {
 
 async function replay(scenario: Scenario): Promise<Dict> {
   const trace: unknown[] = [];
-  const seams = structuredClone(scenario.seams) as Record<string, unknown[]>;
+  const seams = plain(scenario.seams) as Record<string, unknown[]>;
   const env: Record<string, string | null> = Object.fromEntries(ENV_KEYS.map((k) => [k, null]));
   env.CQ_PARENT_WORK_ID = 'stale-parent';
   const before = { ...env };
@@ -75,7 +123,7 @@ async function replay(scenario: Scenario): Promise<Dict> {
     const items = seams[name];
     if (!Array.isArray(items) || items.length === 0) {
       if (fallback === undefined) throw new Error(`scenario ran out of ${name} answers`);
-      return structuredClone(fallback);
+      return clone(fallback);
     }
     const item = items.shift();
     if (isRaise(item)) throw new PyError(item.raise.kind, item.raise.message);
@@ -88,8 +136,8 @@ async function replay(scenario: Scenario): Promise<Dict> {
         'driver',
         name,
         budgetOf(config),
-        structuredClone(role),
-        structuredClone(job),
+        clone(role),
+        clone(job),
         wt,
         directory,
         judgeFlag(judge),
@@ -123,15 +171,15 @@ async function replay(scenario: Scenario): Promise<Dict> {
       return Promise.resolve(new Map(Object.entries(state)));
     },
     providerReady: (role) => {
-      trace.push(['ready', structuredClone(role)]);
+      trace.push(['ready', clone(role)]);
       return answer('ready', true);
     },
     rememberProviderLimit: (provider, report) => {
-      trace.push(['remember', provider, structuredClone(report)]);
+      trace.push(['remember', provider, clone(report)]);
       return Promise.resolve(answer('remember') as string);
     },
     blocked: (repair) => {
-      trace.push(['blocked', structuredClone(repair)]);
+      trace.push(['blocked', clone(repair)]);
       return answer('blocked', false);
     },
     retainPreservingNested: (wt, base, directory) => {
@@ -155,20 +203,20 @@ async function replay(scenario: Scenario): Promise<Dict> {
       return Promise.resolve();
     },
     requireCanonicalDelivery: (job) => {
-      trace.push(['canonical', structuredClone(job)]);
+      trace.push(['canonical', clone(job)]);
       answer('canonical', null);
       return Promise.resolve();
     },
     sourceSnapshot: (config, job) => {
-      trace.push(['snapshot', structuredClone(job), budgetOf(config)]);
+      trace.push(['snapshot', clone(job), budgetOf(config)]);
       return Promise.resolve(answer('snapshot', { path: 'src/a.py', source: 'x' }));
     },
     triageContextSafe: (context, output) => {
-      trace.push(['scan', structuredClone(context), output]);
+      trace.push(['scan', clone(context), output]);
       return Promise.resolve(answer('scan', true));
     },
     atomicWrite: (path, value) => {
-      trace.push(['atomic', path, structuredClone(value)]);
+      trace.push(['atomic', path, clone(value)]);
       return Promise.resolve();
     },
     drivers: {
@@ -184,9 +232,9 @@ async function replay(scenario: Scenario): Promise<Dict> {
   try {
     const returned = await dispatch(
       effects,
-      structuredClone(scenario.config),
-      structuredClone(scenario.role),
-      structuredClone(scenario.job),
+      plain(scenario.config),
+      clone(scenario.role),
+      clone(scenario.job),
       `${ROOT}/wt`,
       directory,
       scenario.judge,
@@ -213,7 +261,7 @@ describe('dispatch() wrapper vs the Python oracle', () => {
   });
 
   it.each(cases.map((c) => [c.name, c] as const))('%s', async (_name, c) => {
-    expect(await replay(c.scenario)).toEqual(c.expected);
+    expect(plain(await replay(scenarioOf(c.scenario)))).toEqual(plain(c.expected));
   });
 });
 

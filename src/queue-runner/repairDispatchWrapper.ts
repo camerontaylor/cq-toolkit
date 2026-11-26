@@ -44,7 +44,8 @@
  * and is not pinned by a vector.
  */
 import { pyTruthy } from '../policy/crq/queueDoc.js';
-import { parseUtcUnchecked, utcHasOffset } from '../policy/crq/utc.js';
+import { JsonNumber, pythonNumberText } from '../policy/crq/jsonValue.js';
+import { UtcParseError, parseUtcDetailed, utcHasOffset } from '../policy/crq/utc.js';
 import { splitlines, pyStrip } from '../ops/crq/deploy/gitGuards.js';
 import { pyRepr } from '../ops/crq/deploy/postSwitch.js';
 import { PyError } from './pyErrors.js';
@@ -129,9 +130,26 @@ function getDefault(value: unknown, key: string, fallback: unknown): unknown {
   return Object.hasOwn(value, key) ? value[key] : fallback;
 }
 
-/** Python `str(value)` over decoded JSON. */
+/** `copy.deepcopy` of decoded JSON: a retained `JsonNumber` is immutable, so it is shared. */
+function copyKeepingNumbers(value: unknown): unknown {
+  if (value instanceof JsonNumber) return value;
+  if (Array.isArray(value)) return value.map(copyKeepingNumbers);
+  if (isDict(value)) {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, copyKeepingNumbers(v)]));
+  }
+  return value;
+}
+
+/**
+ * Python `str(value)` over decoded JSON. A float must arrive as a retaining `JsonNumber`
+ * (`7.0` stays `7.0`); a bare JavaScript number cannot tell `7` from `7.0`, so it reads as an int.
+ */
 function pyStr(value: unknown): string {
-  return typeof value === 'string' ? value : pyRepr(value);
+  if (typeof value === 'string') return value;
+  if (value instanceof JsonNumber) {
+    return value.kind === 'float' ? pythonNumberText(value.float as number) : value.raw;
+  }
+  return pyRepr(value);
 }
 
 /** `directory / name` for a `Path` and a plain component (`''` and `'.'` add nothing). */
@@ -249,7 +267,7 @@ async function innerDispatch(
   deadline: number | null,
 ): Promise<unknown> {
   await effects.mkdir(directory);
-  const job = structuredClone(jobIn) as Dict;
+  const job = copyKeepingNumbers(jobIn) as Dict;
   if (pyGet(job, 'triage_context') !== null) {
     return effects.drivers.cqJudge(config, role, job, wt, directory);
   }
@@ -395,8 +413,15 @@ export async function dispatch(
   if (waits.length === 0) {
     return { stop: 'configuration', summary: 'no configured repair provider is available' };
   }
-  const earliest = waits.reduce((a, b) => (b < a ? b : a)).replace('Z', '+00:00');
-  const end = parseUtcUnchecked(earliest);
+  const earliest = waits.reduce((a, b) => (b < a ? b : a)).replaceAll('Z', '+00:00');
+  let end: bigint | null;
+  try {
+    end = parseUtcDetailed(earliest);
+  } catch (e) {
+    // fromisoformat's component errors (`day 30 must be in range 1..28 ...`) keep their text.
+    if (e instanceof UtcParseError) throw new PyError('ValueError', e.message);
+    throw e;
+  }
   if (end === null)
     throw new PyError('ValueError', `Invalid isoformat string: ${pyRepr(earliest)}`);
   if (!utcHasOffset(earliest)) {

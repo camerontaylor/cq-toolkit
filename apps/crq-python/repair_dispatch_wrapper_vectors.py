@@ -175,6 +175,10 @@ def build_scenarios() -> None:
     scenario("identity: a list job is a TypeError", job_=[1])
     scenario("identity: an int run is stringified", job_=job(run=5), driver=[drv()])
     scenario("identity: a null run is stringified", job_=job(run=None), driver=[drv()])
+    scenario("identity: a float run keeps its point (crq:7.0)", job_=job(run=7.0), driver=[drv()])
+    scenario("identity: a float job keeps its point", job_=job(job=2.5), driver=[drv()])
+    scenario("identity: a float with an exponent spells like repr", job_=job(run=1e16, job=1e-07), driver=[drv()])
+    scenario("identity: a bool run is True", job_=job(run=True, job=False), driver=[drv()])
     scenario("identity: a bool job is stringified", job_=job(job=True), driver=[drv()])
     scenario("identity: a judge flag selects the judge role", judge=True, driver=[drv()])
 
@@ -205,6 +209,8 @@ def build_scenarios() -> None:
              driver=[drv()])
     scenario("diff: a null review_diff is the text None", job_=job(review_diff=None), driver=[drv()])
     scenario("diff: an int review_diff is its decimal text", job_=job(review_diff=5), driver=[drv()])
+    scenario("diff: a float review_diff is its repr", job_=job(review_diff=7.0), driver=[drv()])
+    scenario("diff: a float review_diff with a fraction", job_=job(review_diff=-0.5), driver=[drv()])
     scenario("diff: a list review_diff is its repr", job_=job(review_diff=[1, "a"]), driver=[drv()])
     scenario("diff: a dict review_diff is its repr", job_=job(review_diff={"k": [True, None]}), driver=[drv()])
     scenario("diff: a single file section is scanned under its path", job_=job(review_diff=one),
@@ -265,6 +271,7 @@ def build_scenarios() -> None:
              monotonic=[100.0, 100.5])
     scenario("budget: remaining just under a millisecond stops", config=cfg(("a/b",), 0),
              monotonic=[100.0, 99.9995])
+    # 100.0 - 99.999 is 0.00100000000000477..., NOT a tie; the exact-tie vectors use 0.001 - 0.0.
     scenario("budget: remaining of exactly a millisecond launches", config=cfg(("a/b",), 0),
              monotonic=[100.0, 99.999, 99.999], driver=[drv()])
     scenario("budget: the deadline can lapse during the last-boundary preparation",
@@ -375,6 +382,31 @@ def build_scenarios() -> None:
              remember=["2026-01-01T00:10:00", "2026-01-01T00:10:00Z"])
     scenario("loop: an unparsable recorded end is a ValueError", config=cfg(("a/b",)),
              monotonic=[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0], driver=[drv(RL), drv(RL)], remember=["soon", "soon"])
+    scenario("loop: a recorded end with an out-of-range day is the ValueError fromisoformat raises", config=cfg(("a/b",)),
+             monotonic=[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0], driver=[drv(RL), drv(RL)], remember=["2026-02-30T00:10:00Z", "2026-02-30T00:10:00Z"])
+    scenario("loop: a recorded end with a month of 13 is the ValueError fromisoformat raises", config=cfg(("a/b",)),
+             monotonic=[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0], driver=[drv(RL), drv(RL)], remember=["2026-13-01T00:00:00Z", "2026-13-01T00:00:00Z"])
+    scenario("loop: a recorded end with an hour of 25 is the ValueError fromisoformat raises", config=cfg(("a/b",)),
+             monotonic=[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0], driver=[drv(RL), drv(RL)], remember=["2026-01-01T25:00:00Z", "2026-01-01T25:00:00Z"])
+    scenario("loop: a recorded end with a minute of 61 is the ValueError fromisoformat raises", config=cfg(("a/b",)),
+             monotonic=[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0], driver=[drv(RL), drv(RL)], remember=["2026-01-01T00:61:00Z", "2026-01-01T00:61:00Z"])
+    scenario("loop: a recorded end with a second of 60 is the ValueError fromisoformat raises", config=cfg(("a/b",)),
+             monotonic=[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0], driver=[drv(RL), drv(RL)], remember=["2026-01-01T00:00:60Z", "2026-01-01T00:00:60Z"])
+    scenario("loop: a recorded end with day zero is the ValueError fromisoformat raises", config=cfg(("a/b",)),
+             monotonic=[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0], driver=[drv(RL), drv(RL)], remember=["2026-01-00T00:00:00Z", "2026-01-00T00:00:00Z"])
+    scenario("loop: a recorded end with a Feb 29 in a non-leap year is the ValueError fromisoformat raises", config=cfg(("a/b",)),
+             monotonic=[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0], driver=[drv(RL), drv(RL)], remember=["2027-02-29T00:00:00Z", "2027-02-29T00:00:00Z"])
+    scenario("loop: the earliest of two recorded ends is the one parsed", config=cfg(("a/b",)),
+             monotonic=[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0], driver=[drv(RL), drv(RL)],
+             remember=["2026-02-30T00:10:00Z", "2026-03-01T00:10:00Z"])
+    scenario("loop: a cooldown hot for another provider leaves the candidate's own key absent and launching",
+             config=cfg(("a/b",)), cooldowns=[{"other": "2026-01-01T01:00:00Z"}],
+             monotonic=[0.0, 1.0, 2.0], driver=[drv()])
+    scenario("budget: a remaining of exactly 0.001 launches (strict less-than, first provider)",
+             config=cfg(("a/b",), 0), monotonic=[0.001] + [0.0] * 10, driver=[drv()])
+    scenario("budget: a remaining of exactly 0.001 launches the second provider after cleanup",
+             config=cfg(("a/b",), 0), monotonic=[0.001] + [0.0] * 14, driver=[drv(RL), drv()],
+             remember=["2026-01-01T00:10:00Z"])
     scenario("loop: remember_provider_limit sees the tagged report", config=cfg(("a/b",)),
              monotonic=[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
              driver=[drv(RL, retry_after_ms=10, providerSignals={"retryAfterMs": 4}), drv(RL)],
