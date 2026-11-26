@@ -151,34 +151,87 @@ describe('composed tick shadow: Python crq.tick vs the TS composed tick', () => 
       expect(result.report.class).toBe('identical');
     });
 
-  it('never reports complete: the staged rows stay open', async () => {
+  it('never reports complete: exactly the four open rows stay', async () => {
     const { result } = await shadow(SEEDS[0]![1]);
     expect(result.complete).toBe(false);
-    expect(result.openRows).toEqual(
-      expect.arrayContaining([
-        'harvest-review-effects',
-        'repair-harvest-effects',
-        'start-one-effects',
-      ]),
-    );
+    expect(result.openRows).toEqual([
+      'harvest-review-effects',
+      'repair-harvest-effects',
+      'start-one-effects',
+      'shadow-d2',
+    ]);
+    expect(result.openRows).toHaveLength(4);
   });
 
   // Found by this shadow: Python's `load_queue` retires a pending `open` item that already has a
   // completed cycle and the tick persists it; the TS composition plans the retirement but the
   // queue it persists keeps the item pending. The divergence is explained, not fixed here.
+  // Allowed: `queue.json` and the two status files that render the retired item (its state,
+  // `not_before`, `last_error` and the pending counters). Everything else must match exactly.
+  const retirementOnly: ExplainedDivergence = {
+    id: 'load-queue-retirement-not-persisted',
+    explains: (d) =>
+      d.queue === 'differs' &&
+      d.events.verdict === 'same' &&
+      d.heartbeat === 'same' &&
+      d.phaseCalls === 'same' &&
+      d.slotDecision === 'same' &&
+      d.composed?.log === 'same' &&
+      d.composed.files['next-review-at'] === 'same',
+  };
+  const retirementQueue = {
+    items: [item({ state: 'pending' })],
+    starts: [],
+    last_tick: '2027-01-15T07:55:00Z',
+  };
+
   it('records the unpersisted superseded-open retirement as an explained divergence', async () => {
-    const queue = {
-      items: [item({ state: 'pending' })],
-      starts: [],
-      last_tick: '2027-01-15T07:55:00Z',
-    };
-    const unexplained = await shadow(queue);
+    const unexplained = await shadow(retirementQueue);
     expect(unexplained.result.report.class).toBe('unexplained');
     expect(unexplained.result.report.diff?.queue).toBe('differs');
-    const explained = await shadow(queue, {}, [
-      { id: 'load-queue-retirement-not-persisted', explains: (d) => d.queue === 'differs' },
-    ]);
+    const explained = await shadow(retirementQueue, {}, [retirementOnly]);
     expect(explained.result.report.class).toBe('explained');
+  });
+
+  const retirementWith = (mutate: (root: string) => void, extra: Partial<ComposedSpec> = {}) => {
+    const s = spec(extra);
+    return runComposedShadow({
+      liveRoot: live(retirementQueue),
+      scratch: tmp(),
+      pinnedAt: NOW,
+      sample: 'retirement',
+      allowList: [retirementOnly],
+      python: python(s),
+      ts: async (root) => {
+        const out = await runComposedTs(REPO, root, s);
+        mutate(root);
+        return out;
+      },
+    });
+  };
+
+  it('does not let the retirement allow-list hide other drift on that sample', async () => {
+    for (const mutate of [
+      (root: string) => writeFileSync(join(root, 'next-review-at'), 'x'),
+      (root: string) => appendFileSync(join(root, 'events.jsonl'), '{"at":"x","event":"x"}\n'),
+      (root: string) => writeFileSync(join(root, 'heartbeat.json'), '{}'),
+    ]) {
+      expect((await retirementWith(mutate)).report.class).toBe('unexplained');
+    }
+    const logDrift = spec();
+    const { report } = await runComposedShadow({
+      liveRoot: live(retirementQueue),
+      scratch: tmp(),
+      pinnedAt: NOW,
+      sample: 'retirement-log',
+      allowList: [retirementOnly],
+      python: python(logDrift),
+      ts: async (root) => {
+        const out = await runComposedTs(REPO, root, logDrift);
+        return { ...out, log: [...out.log, 'extra'] };
+      },
+    });
+    expect(report.class).toBe('unexplained');
   });
 
   // Counterfactuals: each corrupts one TS-side artefact after a correct run.
