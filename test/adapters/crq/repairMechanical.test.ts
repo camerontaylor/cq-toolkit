@@ -20,6 +20,7 @@ import {
 import type { DetectorProcess, DetectorRun } from '../../../src/adapters/crq/repairHackDetector.js';
 import { PyError } from '../../../src/queue-runner/pyErrors.js';
 import { scrubbedGitEnv } from '../../helpers/git-env.js';
+import { oraclePython } from '../../helpers/oraclePython.js';
 
 const ORACLE = fileURLToPath(new URL('../../helpers/repairMechanicalOracle.py', import.meta.url));
 const APPS = fileURLToPath(new URL('../../../apps/crq-python', import.meta.url));
@@ -181,7 +182,7 @@ function runPython(items: Case[], dirs: string[]): Outcome[] {
       detector: item.detector,
     };
   });
-  const stdout = execFileSync('python3', ['-I', ORACLE, APPS], {
+  const stdout = execFileSync(oraclePython(), ['-I', ORACLE, APPS], {
     input: JSON.stringify({ cases }),
     encoding: 'utf8',
     maxBuffer: 256 * 1024 * 1024,

@@ -39,6 +39,8 @@ export function repairHarvestState(options: RepairHarvestStateOptions): RepairHa
       ...(options.retained === undefined ? {} : { retained: options.retained }),
     }),
     saveQueue: (q) => files.saveQueue(q),
+    // Python's `begin_tick`: one budget per tick. This object owns exactly one, so the
+    // caller must build it once per tick; a longer-lived object spends the 25 runs once.
     replayBudget: new ReplayBudget(),
   };
 }

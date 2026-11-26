@@ -107,14 +107,15 @@ interface Scenario {
   record: Record<string, unknown>;
 }
 
-function scenario(run: string): Scenario {
+function scenario(run: string, openPr?: { target: string; branch: string }): Scenario {
   const created: Scenario['created'] = [];
   const item: Record<string, unknown> = { id: 'pr9', pr: 9, kind: 'open', state: 'running' };
   const q = { items: [item] };
   const record: Record<string, unknown> = {
     state: 'running',
     jobs: [JOB],
-    open_pr: false,
+    open_pr: openPr !== undefined,
+    ...(openPr === undefined ? {} : { base: openPr.target, branch: openPr.branch }),
     verdicts: [{ job: JOB, verdict: 'FIXED', reason: 'ok' }],
   };
   const branch = `crq/fix-${run}`;
@@ -131,7 +132,12 @@ function scenario(run: string): Scenario {
     match: async () => [],
     forge: {
       prInfo: async () => {
-        throw new Error('no forge read expected');
+        if (openPr === undefined) throw new Error('no forge read expected');
+        return {
+          state: 'OPEN',
+          headRefOid: openPr.target,
+          headRefName: openPr.branch,
+        };
       },
       listBranchPrs: async () =>
         created.length === 0
@@ -194,6 +200,29 @@ describe('repairHarvestPublish', () => {
     );
     expect(s.created).toHaveLength(0);
     expect(s.record['state']).toBe('running');
+    expect(git(origin, 'rev-parse', 'refs/heads/crq/fix-r2')).toBe(
+      git(origin, 'rev-parse', 'refs/heads/main'),
+    );
     expect(await exists(join(wtRoot, 'crq-publish-publish-r2'))).toBe(false);
+  });
+
+  it('an open PR whose branch moved fails the non-empty lease and leaves the remote alone', async () => {
+    await mkdir(join(state, 'repair', JOB), { recursive: true });
+    await rm(join(state, 'repair', JOB, 'publication.json'), { force: true });
+    const target = git(origin, 'rev-parse', 'refs/heads/main');
+    // The branch moved on the remote after the PR head was read: the lease names `target`.
+    const moved = git(clone, 'commit-tree', `${target}^{tree}`, '-p', target, '-m', 'maintainer');
+    git(clone, 'push', '-q', 'origin', `${moved}:refs/heads/crq/fix-r3`);
+    const s = scenario('r3', { target, branch: 'crq/fix-r3' });
+    const error = await s
+      .publish(s.q, s.item, 'r3', s.record, [{ job: JOB, commits: [fixed] }])
+      .catch((e: unknown) => e);
+    expect(isPyError(error, 'RuntimeError')).toBe(true);
+    expect((error as Error).message).toContain(
+      `push origin --force-with-lease=refs/heads/crq/fix-r3:${target}`,
+    );
+    expect(git(origin, 'rev-parse', 'refs/heads/crq/fix-r3')).toBe(moved);
+    expect(s.created).toHaveLength(0);
+    expect(await exists(join(wtRoot, 'crq-publish-publish-r3'))).toBe(false);
   });
 });

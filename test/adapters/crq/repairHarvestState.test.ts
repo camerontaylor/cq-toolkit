@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { repairHarvestState } from '../../../src/adapters/crq/repairHarvestState.js';
 import { JsonNumber } from '../../../src/policy/crq/jsonValue.js';
+import { oraclePython } from '../../helpers/oraclePython.js';
 
 const APPS = fileURLToPath(new URL('../../../apps/crq-python', import.meta.url));
 let base: string;
@@ -30,7 +31,7 @@ describe('repairHarvestState', () => {
     });
     const reference = join(base, 'ref.json');
     execFileSync(
-      'python3',
+      oraclePython(),
       [
         '-I',
         '-c',
@@ -78,5 +79,16 @@ describe('repairHarvestState', () => {
     const record: Record<string, unknown> = {};
     expect(second?.take(record)).toBe(true);
     expect(second?.take(record)).toBe(false);
+  });
+
+  it('one effects object owns one budget: spent runs do not come back, a new object is a new tick', () => {
+    const tick = repairHarvestState({ stateRoot: join(base, 'd', 'state') });
+    while (tick.replayBudget?.take({})) {
+      // spend the whole budget
+    }
+    expect(tick.replayBudget?.take({})).toBe(false);
+    expect(repairHarvestState({ stateRoot: join(base, 'd', 'state') }).replayBudget?.take({})).toBe(
+      true,
+    );
   });
 });

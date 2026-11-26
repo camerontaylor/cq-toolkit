@@ -18,6 +18,7 @@ import {
 } from '../../../src/policy/crq/jsonValue.js';
 import { LedgerIntegrityError } from '../../../src/policy/crq/ledger.js';
 import { PyError, type PyErrorKind } from '../../../src/queue-runner/pyErrors.js';
+import { oraclePython } from '../../helpers/oraclePython.js';
 
 const ORACLE = fileURLToPath(
   new URL('../../helpers/repairCanonicalDeliveryOracle.py', import.meta.url),
@@ -331,7 +332,7 @@ async function runTs(item: Case, root: string): Promise<Outcome> {
 const runPython = (cases: object[]): Outcome[] =>
   (
     JSON.parse(
-      execFileSync('python3', ['-I', ORACLE, APPS], {
+      execFileSync(oraclePython(), ['-I', ORACLE, APPS], {
         input: JSON.stringify({ cases }),
         encoding: 'utf8',
         maxBuffer: 64 * 1024 * 1024,
