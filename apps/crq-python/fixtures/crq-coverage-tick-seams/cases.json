@@ -1,0 +1,3100 @@
+{
+ "configs": [
+  {
+   "aging": null,
+   "name": "default",
+   "repos": []
+  },
+  {
+   "aging": 5,
+   "name": "ranked",
+   "repos": [
+    {
+     "rank_tier": 1,
+     "repo": "owner/other"
+    },
+    {
+     "rank_tier": 4,
+     "repo": "owner/Idle"
+    }
+   ]
+  },
+  {
+   "aging": 0,
+   "name": "aging-zero",
+   "repos": [
+    {
+     "rank_tier": 0,
+     "repo": "owner/other"
+    }
+   ]
+  }
+ ],
+ "malformed": [
+  {
+   "live": {
+    "message": "'str' object has no attribute 'get'",
+    "raises": "AttributeError"
+   },
+   "name": "items-not-a-list",
+   "queue": {
+    "items": "nope"
+   }
+  },
+  {
+   "live": {
+    "message": "'items'",
+    "raises": "KeyError"
+   },
+   "name": "items-missing",
+   "queue": {}
+  },
+  {
+   "live": {
+    "message": "'int' object has no attribute 'get'",
+    "raises": "AttributeError"
+   },
+   "name": "item-not-a-dict",
+   "queue": {
+    "items": [
+     {
+      "id": "a",
+      "kind": "open",
+      "state": "pending"
+     },
+     7
+    ]
+   }
+  }
+ ],
+ "now": "2026-11-20T12:00:00Z",
+ "parse_iso": [
+  {
+   "input": "2026-11-20T12:00:00Z",
+   "outcome": {
+    "ok": 1795176000000
+   }
+  },
+  {
+   "input": "2026-11-20T12:00:00.000Z",
+   "outcome": {
+    "ok": 1795176000000
+   }
+  },
+  {
+   "input": "2026-11-20T12:00:00.123Z",
+   "outcome": {
+    "message": "time data '2026-11-20T12:00:00.Z' does not match format '%Y-%m-%dT%H:%M:%SZ'",
+    "raises": "ValueError"
+   }
+  },
+  {
+   "input": "2026-11-20T12:00:00",
+   "outcome": {
+    "ok": 1795176000000
+   }
+  },
+  {
+   "input": "2026-11-20t12:00:00z",
+   "outcome": {
+    "message": "unconverted data remains: Z",
+    "raises": "ValueError"
+   }
+  },
+  {
+   "input": "2026-11-20T12:00:00ZZZ",
+   "outcome": {
+    "ok": 1795176000000
+   }
+  },
+  {
+   "input": "2026-11-20T12:00:00+08:00",
+   "outcome": {
+    "message": "time data '2026-11-20T12:00:00+Z' does not match format '%Y-%m-%dT%H:%M:%SZ'",
+    "raises": "ValueError"
+   }
+  },
+  {
+   "input": "2026-11-20T12:00:00.000000Z",
+   "outcome": {
+    "message": "time data '2026-11-20T12:00:000Z' does not match format '%Y-%m-%dT%H:%M:%SZ'",
+    "raises": "ValueError"
+   }
+  },
+  {
+   "input": "2026-1-2T3:4:5Z",
+   "outcome": {
+    "ok": 1767323045000
+   }
+  },
+  {
+   "input": "2026-02-30T00:00:00Z",
+   "outcome": {
+    "message": "day 30 must be in range 1..28 for month 2 in year 2026",
+    "raises": "ValueError"
+   }
+  },
+  {
+   "input": "2026-11-20T24:00:00Z",
+   "outcome": {
+    "message": "time data '2026-11-20T24:00:00Z' does not match format '%Y-%m-%dT%H:%M:%SZ'",
+    "raises": "ValueError"
+   }
+  },
+  {
+   "input": "2026-11-20T23:59:60Z",
+   "outcome": {
+    "message": "second must be in 0..59, not 60",
+    "raises": "ValueError"
+   }
+  },
+  {
+   "input": "not a time",
+   "outcome": {
+    "message": "time data 'not a timeZ' does not match format '%Y-%m-%dT%H:%M:%SZ'",
+    "raises": "ValueError"
+   }
+  },
+  {
+   "input": "2026-11-20",
+   "outcome": {
+    "message": "time data '2026-11-20Z' does not match format '%Y-%m-%dT%H:%M:%SZ'",
+    "raises": "ValueError"
+   }
+  },
+  {
+   "input": "",
+   "outcome": {
+    "ok": null
+   }
+  },
+  {
+   "input": " 2026-11-20T12:00:00Z",
+   "outcome": {
+    "message": "time data ' 2026-11-20T12:00:00Z' does not match format '%Y-%m-%dT%H:%M:%SZ'",
+    "raises": "ValueError"
+   }
+  },
+  {
+   "input": "2026-11-20T12:00:00Z extra",
+   "outcome": {
+    "ok": 1795176000000
+   }
+  },
+  {
+   "input": "0001-01-01T00:00:00Z",
+   "outcome": {
+    "ok": -62135596800000
+   }
+  },
+  {
+   "input": "9999-12-31T23:59:59Z",
+   "outcome": {
+    "ok": 253402300799000
+   }
+  },
+  {
+   "input": "0000-01-01T00:00:00Z",
+   "outcome": {
+    "message": "year must be in 1..9999, not 0",
+    "raises": "ValueError"
+   }
+  },
+  {
+   "input": 5,
+   "outcome": {
+    "message": "'int' object has no attribute 'replace'",
+    "raises": "AttributeError"
+   }
+  },
+  {
+   "input": {
+    "$float": "1.5"
+   },
+   "outcome": {
+    "message": "'float' object has no attribute 'replace'",
+    "raises": "AttributeError"
+   }
+  },
+  {
+   "input": true,
+   "outcome": {
+    "message": "'bool' object has no attribute 'replace'",
+    "raises": "AttributeError"
+   }
+  },
+  {
+   "input": [
+    "2026-11-20T12:00:00Z"
+   ],
+   "outcome": {
+    "message": "'list' object has no attribute 'replace'",
+    "raises": "AttributeError"
+   }
+  },
+  {
+   "input": {
+    "a": 1
+   },
+   "outcome": {
+    "message": "'dict' object has no attribute 'replace'",
+    "raises": "AttributeError"
+   }
+  },
+  {
+   "input": null,
+   "outcome": {
+    "ok": null
+   }
+  }
+ ],
+ "primary": "owner/primary",
+ "queues": [
+  {
+   "config": "default",
+   "deps": {
+    "author": {
+     "ok": true
+    },
+    "backfill": {
+     "ok": true
+    },
+    "backlog": {
+     "ok": true
+    },
+    "cov": {
+     "ok": true
+    },
+    "delta": {
+     "ok": true
+    },
+    "followup": {
+     "ok": true
+    },
+    "merged": {
+     "ok": true
+    },
+    "merged-delta": {
+     "ok": true
+    },
+    "noorder": {
+     "ok": true
+    },
+    "open": {
+     "ok": true
+    },
+    "promo": {
+     "ok": true
+    },
+    "receipt": {
+     "ok": true
+    }
+   },
+   "items": [
+    {
+     "id": "cov",
+     "kind": "coverage",
+     "order": 1,
+     "state": "pending"
+    },
+    {
+     "id": "open",
+     "kind": "open",
+     "order": 2,
+     "state": "pending"
+    },
+    {
+     "id": "delta",
+     "kind": "delta",
+     "order": 3,
+     "state": "pending"
+    },
+    {
+     "followup": "merged",
+     "id": "merged-delta",
+     "kind": "delta",
+     "order": 4,
+     "state": "pending"
+    },
+    {
+     "id": "merged",
+     "kind": "merged",
+     "order": 5,
+     "state": "pending"
+    },
+    {
+     "id": "followup",
+     "kind": "merged",
+     "order": 6,
+     "source": "followup",
+     "state": "pending"
+    },
+    {
+     "id": "backlog",
+     "kind": "merged",
+     "order": 7,
+     "source": "backlog",
+     "state": "pending"
+    },
+    {
+     "id": "author",
+     "kind": "author",
+     "order": 8,
+     "state": "pending"
+    },
+    {
+     "id": "backfill",
+     "kind": "backfill",
+     "order": 9,
+     "state": "pending"
+    },
+    {
+     "id": "receipt",
+     "kind": "merged-current",
+     "order": 10,
+     "state": "pending"
+    },
+    {
+     "id": "promo",
+     "kind": "promotion",
+     "order": 11,
+     "state": "pending"
+    },
+    {
+     "id": "noorder",
+     "kind": "open",
+     "state": "pending"
+    }
+   ],
+   "live": [
+    "cov",
+    "open",
+    "delta",
+    "merged-delta",
+    "merged",
+    "followup",
+    "backlog",
+    "author",
+    "backfill",
+    "receipt",
+    "noorder"
+   ],
+   "queue": "kinds",
+   "sorted": {
+    "ok": [
+     "open",
+     "noorder",
+     "delta",
+     "merged-delta",
+     "followup",
+     "receipt",
+     "merged",
+     "backlog",
+     "cov",
+     "author",
+     "backfill"
+    ]
+   }
+  },
+  {
+   "config": "ranked",
+   "deps": {
+    "author": {
+     "ok": true
+    },
+    "backfill": {
+     "ok": true
+    },
+    "backlog": {
+     "ok": true
+    },
+    "cov": {
+     "ok": true
+    },
+    "delta": {
+     "ok": true
+    },
+    "followup": {
+     "ok": true
+    },
+    "merged": {
+     "ok": true
+    },
+    "merged-delta": {
+     "ok": true
+    },
+    "noorder": {
+     "ok": true
+    },
+    "open": {
+     "ok": true
+    },
+    "promo": {
+     "ok": true
+    },
+    "receipt": {
+     "ok": true
+    }
+   },
+   "items": [
+    {
+     "id": "cov",
+     "kind": "coverage",
+     "order": 1,
+     "state": "pending"
+    },
+    {
+     "id": "open",
+     "kind": "open",
+     "order": 2,
+     "state": "pending"
+    },
+    {
+     "id": "delta",
+     "kind": "delta",
+     "order": 3,
+     "state": "pending"
+    },
+    {
+     "followup": "merged",
+     "id": "merged-delta",
+     "kind": "delta",
+     "order": 4,
+     "state": "pending"
+    },
+    {
+     "id": "merged",
+     "kind": "merged",
+     "order": 5,
+     "state": "pending"
+    },
+    {
+     "id": "followup",
+     "kind": "merged",
+     "order": 6,
+     "source": "followup",
+     "state": "pending"
+    },
+    {
+     "id": "backlog",
+     "kind": "merged",
+     "order": 7,
+     "source": "backlog",
+     "state": "pending"
+    },
+    {
+     "id": "author",
+     "kind": "author",
+     "order": 8,
+     "state": "pending"
+    },
+    {
+     "id": "backfill",
+     "kind": "backfill",
+     "order": 9,
+     "state": "pending"
+    },
+    {
+     "id": "receipt",
+     "kind": "merged-current",
+     "order": 10,
+     "state": "pending"
+    },
+    {
+     "id": "promo",
+     "kind": "promotion",
+     "order": 11,
+     "state": "pending"
+    },
+    {
+     "id": "noorder",
+     "kind": "open",
+     "state": "pending"
+    }
+   ],
+   "live": [
+    "cov",
+    "open",
+    "delta",
+    "merged-delta",
+    "merged",
+    "followup",
+    "backlog",
+    "author",
+    "backfill",
+    "receipt",
+    "noorder"
+   ],
+   "queue": "kinds",
+   "sorted": {
+    "ok": [
+     "open",
+     "noorder",
+     "delta",
+     "merged-delta",
+     "followup",
+     "receipt",
+     "merged",
+     "backlog",
+     "cov",
+     "author",
+     "backfill"
+    ]
+   }
+  },
+  {
+   "config": "aging-zero",
+   "deps": {
+    "author": {
+     "ok": true
+    },
+    "backfill": {
+     "ok": true
+    },
+    "backlog": {
+     "ok": true
+    },
+    "cov": {
+     "ok": true
+    },
+    "delta": {
+     "ok": true
+    },
+    "followup": {
+     "ok": true
+    },
+    "merged": {
+     "ok": true
+    },
+    "merged-delta": {
+     "ok": true
+    },
+    "noorder": {
+     "ok": true
+    },
+    "open": {
+     "ok": true
+    },
+    "promo": {
+     "ok": true
+    },
+    "receipt": {
+     "ok": true
+    }
+   },
+   "items": [
+    {
+     "id": "cov",
+     "kind": "coverage",
+     "order": 1,
+     "state": "pending"
+    },
+    {
+     "id": "open",
+     "kind": "open",
+     "order": 2,
+     "state": "pending"
+    },
+    {
+     "id": "delta",
+     "kind": "delta",
+     "order": 3,
+     "state": "pending"
+    },
+    {
+     "followup": "merged",
+     "id": "merged-delta",
+     "kind": "delta",
+     "order": 4,
+     "state": "pending"
+    },
+    {
+     "id": "merged",
+     "kind": "merged",
+     "order": 5,
+     "state": "pending"
+    },
+    {
+     "id": "followup",
+     "kind": "merged",
+     "order": 6,
+     "source": "followup",
+     "state": "pending"
+    },
+    {
+     "id": "backlog",
+     "kind": "merged",
+     "order": 7,
+     "source": "backlog",
+     "state": "pending"
+    },
+    {
+     "id": "author",
+     "kind": "author",
+     "order": 8,
+     "state": "pending"
+    },
+    {
+     "id": "backfill",
+     "kind": "backfill",
+     "order": 9,
+     "state": "pending"
+    },
+    {
+     "id": "receipt",
+     "kind": "merged-current",
+     "order": 10,
+     "state": "pending"
+    },
+    {
+     "id": "promo",
+     "kind": "promotion",
+     "order": 11,
+     "state": "pending"
+    },
+    {
+     "id": "noorder",
+     "kind": "open",
+     "state": "pending"
+    }
+   ],
+   "live": [
+    "cov",
+    "open",
+    "delta",
+    "merged-delta",
+    "merged",
+    "followup",
+    "backlog",
+    "author",
+    "backfill",
+    "receipt",
+    "noorder"
+   ],
+   "queue": "kinds",
+   "sorted": {
+    "ok": [
+     "open",
+     "noorder",
+     "delta",
+     "merged-delta",
+     "followup",
+     "receipt",
+     "merged",
+     "backlog",
+     "cov",
+     "author",
+     "backfill"
+    ]
+   }
+  },
+  {
+   "config": "default",
+   "deps": {
+    "a": {
+     "ok": true
+    },
+    "b": {
+     "ok": true
+    },
+    "c": {
+     "ok": true
+    },
+    "d": {
+     "ok": true
+    },
+    "e": {
+     "ok": true
+    }
+   },
+   "items": [
+    {
+     "id": "a",
+     "kind": "merged",
+     "order": 1,
+     "state": "pending"
+    },
+    {
+     "id": "b",
+     "kind": "merged",
+     "operator_priority": true,
+     "order": 2,
+     "state": "pending"
+    },
+    {
+     "id": "c",
+     "kind": "merged",
+     "order": 2,
+     "state": "pending"
+    },
+    {
+     "id": "d",
+     "kind": "merged",
+     "operator_priority": false,
+     "order": 1,
+     "state": "pending"
+    },
+    {
+     "id": "e",
+     "kind": "merged",
+     "operator_priority": true,
+     "order": 50,
+     "state": "pending"
+    }
+   ],
+   "live": [
+    "a",
+    "b",
+    "c",
+    "d",
+    "e"
+   ],
+   "queue": "operator-priority-and-order",
+   "sorted": {
+    "ok": [
+     "b",
+     "e",
+     "a",
+     "d",
+     "c"
+    ]
+   }
+  },
+  {
+   "config": "ranked",
+   "deps": {
+    "a": {
+     "ok": true
+    },
+    "b": {
+     "ok": true
+    },
+    "c": {
+     "ok": true
+    },
+    "d": {
+     "ok": true
+    },
+    "e": {
+     "ok": true
+    }
+   },
+   "items": [
+    {
+     "id": "a",
+     "kind": "merged",
+     "order": 1,
+     "state": "pending"
+    },
+    {
+     "id": "b",
+     "kind": "merged",
+     "operator_priority": true,
+     "order": 2,
+     "state": "pending"
+    },
+    {
+     "id": "c",
+     "kind": "merged",
+     "order": 2,
+     "state": "pending"
+    },
+    {
+     "id": "d",
+     "kind": "merged",
+     "operator_priority": false,
+     "order": 1,
+     "state": "pending"
+    },
+    {
+     "id": "e",
+     "kind": "merged",
+     "operator_priority": true,
+     "order": 50,
+     "state": "pending"
+    }
+   ],
+   "live": [
+    "a",
+    "b",
+    "c",
+    "d",
+    "e"
+   ],
+   "queue": "operator-priority-and-order",
+   "sorted": {
+    "ok": [
+     "b",
+     "e",
+     "a",
+     "d",
+     "c"
+    ]
+   }
+  },
+  {
+   "config": "aging-zero",
+   "deps": {
+    "a": {
+     "ok": true
+    },
+    "b": {
+     "ok": true
+    },
+    "c": {
+     "ok": true
+    },
+    "d": {
+     "ok": true
+    },
+    "e": {
+     "ok": true
+    }
+   },
+   "items": [
+    {
+     "id": "a",
+     "kind": "merged",
+     "order": 1,
+     "state": "pending"
+    },
+    {
+     "id": "b",
+     "kind": "merged",
+     "operator_priority": true,
+     "order": 2,
+     "state": "pending"
+    },
+    {
+     "id": "c",
+     "kind": "merged",
+     "order": 2,
+     "state": "pending"
+    },
+    {
+     "id": "d",
+     "kind": "merged",
+     "operator_priority": false,
+     "order": 1,
+     "state": "pending"
+    },
+    {
+     "id": "e",
+     "kind": "merged",
+     "operator_priority": true,
+     "order": 50,
+     "state": "pending"
+    }
+   ],
+   "live": [
+    "a",
+    "b",
+    "c",
+    "d",
+    "e"
+   ],
+   "queue": "operator-priority-and-order",
+   "sorted": {
+    "ok": [
+     "b",
+     "e",
+     "a",
+     "d",
+     "c"
+    ]
+   }
+  },
+  {
+   "config": "default",
+   "deps": {
+    "auth-none": {
+     "ok": true
+    },
+    "auth1": {
+     "ok": true
+    },
+    "auth2": {
+     "ok": true
+    },
+    "auth3": {
+     "ok": true
+    },
+    "open0": {
+     "ok": true
+    },
+    "open1": {
+     "ok": true
+    }
+   },
+   "items": [
+    {
+     "id": "open0",
+     "kind": "open",
+     "order": 1,
+     "state": "pending"
+    },
+    {
+     "cycles": [
+      {
+       "n": 1
+      }
+     ],
+     "id": "open1",
+     "kind": "open",
+     "order": 2,
+     "state": "pending"
+    },
+    {
+     "author": {
+      "cycle": 1
+     },
+     "id": "auth1",
+     "kind": "author",
+     "order": 3,
+     "state": "pending"
+    },
+    {
+     "author": {
+      "cycle": 2
+     },
+     "id": "auth2",
+     "kind": "author",
+     "order": 4,
+     "state": "pending"
+    },
+    {
+     "id": "auth-none",
+     "kind": "author",
+     "order": 5,
+     "state": "pending"
+    },
+    {
+     "author": {
+      "cycle": 3
+     },
+     "id": "auth3",
+     "kind": "author",
+     "order": 6,
+     "state": "pending"
+    }
+   ],
+   "live": [
+    "open0",
+    "open1",
+    "auth1",
+    "auth2",
+    "auth-none",
+    "auth3"
+   ],
+   "queue": "optional-and-author-cycles",
+   "sorted": {
+    "ok": [
+     "open0",
+     "auth1",
+     "auth-none",
+     "open1",
+     "auth2",
+     "auth3"
+    ]
+   }
+  },
+  {
+   "config": "ranked",
+   "deps": {
+    "auth-none": {
+     "ok": true
+    },
+    "auth1": {
+     "ok": true
+    },
+    "auth2": {
+     "ok": true
+    },
+    "auth3": {
+     "ok": true
+    },
+    "open0": {
+     "ok": true
+    },
+    "open1": {
+     "ok": true
+    }
+   },
+   "items": [
+    {
+     "id": "open0",
+     "kind": "open",
+     "order": 1,
+     "state": "pending"
+    },
+    {
+     "cycles": [
+      {
+       "n": 1
+      }
+     ],
+     "id": "open1",
+     "kind": "open",
+     "order": 2,
+     "state": "pending"
+    },
+    {
+     "author": {
+      "cycle": 1
+     },
+     "id": "auth1",
+     "kind": "author",
+     "order": 3,
+     "state": "pending"
+    },
+    {
+     "author": {
+      "cycle": 2
+     },
+     "id": "auth2",
+     "kind": "author",
+     "order": 4,
+     "state": "pending"
+    },
+    {
+     "id": "auth-none",
+     "kind": "author",
+     "order": 5,
+     "state": "pending"
+    },
+    {
+     "author": {
+      "cycle": 3
+     },
+     "id": "auth3",
+     "kind": "author",
+     "order": 6,
+     "state": "pending"
+    }
+   ],
+   "live": [
+    "open0",
+    "open1",
+    "auth1",
+    "auth2",
+    "auth-none",
+    "auth3"
+   ],
+   "queue": "optional-and-author-cycles",
+   "sorted": {
+    "ok": [
+     "open0",
+     "auth1",
+     "auth-none",
+     "open1",
+     "auth2",
+     "auth3"
+    ]
+   }
+  },
+  {
+   "config": "aging-zero",
+   "deps": {
+    "auth-none": {
+     "ok": true
+    },
+    "auth1": {
+     "ok": true
+    },
+    "auth2": {
+     "ok": true
+    },
+    "auth3": {
+     "ok": true
+    },
+    "open0": {
+     "ok": true
+    },
+    "open1": {
+     "ok": true
+    }
+   },
+   "items": [
+    {
+     "id": "open0",
+     "kind": "open",
+     "order": 1,
+     "state": "pending"
+    },
+    {
+     "cycles": [
+      {
+       "n": 1
+      }
+     ],
+     "id": "open1",
+     "kind": "open",
+     "order": 2,
+     "state": "pending"
+    },
+    {
+     "author": {
+      "cycle": 1
+     },
+     "id": "auth1",
+     "kind": "author",
+     "order": 3,
+     "state": "pending"
+    },
+    {
+     "author": {
+      "cycle": 2
+     },
+     "id": "auth2",
+     "kind": "author",
+     "order": 4,
+     "state": "pending"
+    },
+    {
+     "id": "auth-none",
+     "kind": "author",
+     "order": 5,
+     "state": "pending"
+    },
+    {
+     "author": {
+      "cycle": 3
+     },
+     "id": "auth3",
+     "kind": "author",
+     "order": 6,
+     "state": "pending"
+    }
+   ],
+   "live": [
+    "open0",
+    "open1",
+    "auth1",
+    "auth2",
+    "auth-none",
+    "auth3"
+   ],
+   "queue": "optional-and-author-cycles",
+   "sorted": {
+    "ok": [
+     "open0",
+     "auth1",
+     "auth-none",
+     "open1",
+     "auth2",
+     "auth3"
+    ]
+   }
+  },
+  {
+   "config": "default",
+   "deps": {
+    "lr-ancestry": {
+     "ok": true
+    },
+    "lr-bad-created": {
+     "ok": true
+    },
+    "lr-first": {
+     "ok": true
+    },
+    "lr-gen2-aged": {
+     "ok": true
+    },
+    "lr-gen2-fresh": {
+     "ok": true
+    },
+    "lr-no-created": {
+     "ok": true
+    },
+    "lr-repeat": {
+     "ok": true
+    },
+    "lr-repeat-str": {
+     "ok": true
+    }
+   },
+   "items": [
+    {
+     "id": "lr-first",
+     "kind": "local-review",
+     "order": 1,
+     "state": "pending"
+    },
+    {
+     "created_at": "2026-11-20T10:00:00Z",
+     "generation": 2,
+     "id": "lr-gen2-aged",
+     "kind": "local-review",
+     "order": 2,
+     "state": "pending"
+    },
+    {
+     "created_at": "2026-11-20T11:59:00Z",
+     "generation": 2,
+     "id": "lr-gen2-fresh",
+     "kind": "local-review",
+     "order": 3,
+     "state": "pending"
+    },
+    {
+     "created_at": "2026-11-20T10:00:00Z",
+     "id": "lr-repeat",
+     "kind": "local-review",
+     "order": 4,
+     "repeat_requested": true,
+     "state": "pending"
+    },
+    {
+     "ancestry_repeat": true,
+     "created_at": "2026-11-20T11:59:00Z",
+     "id": "lr-ancestry",
+     "kind": "local-review",
+     "order": 5,
+     "state": "pending"
+    },
+    {
+     "generation": 3,
+     "id": "lr-no-created",
+     "kind": "local-review",
+     "order": 6,
+     "state": "pending"
+    },
+    {
+     "created_at": "garbage",
+     "generation": 3,
+     "id": "lr-bad-created",
+     "kind": "local-review",
+     "order": 7,
+     "state": "pending"
+    },
+    {
+     "created_at": "2026-11-20T10:00:00Z",
+     "id": "lr-repeat-str",
+     "kind": "local-review",
+     "order": 8,
+     "repeat_requested": "yes",
+     "state": "pending"
+    }
+   ],
+   "live": [
+    "lr-first",
+    "lr-gen2-aged",
+    "lr-gen2-fresh",
+    "lr-repeat",
+    "lr-ancestry",
+    "lr-no-created",
+    "lr-bad-created",
+    "lr-repeat-str"
+   ],
+   "queue": "local-review-aging",
+   "sorted": {
+    "ok": [
+     "lr-first",
+     "lr-gen2-aged",
+     "lr-repeat",
+     "lr-repeat-str",
+     "lr-gen2-fresh",
+     "lr-ancestry",
+     "lr-no-created",
+     "lr-bad-created"
+    ]
+   }
+  },
+  {
+   "config": "ranked",
+   "deps": {
+    "lr-ancestry": {
+     "ok": true
+    },
+    "lr-bad-created": {
+     "ok": true
+    },
+    "lr-first": {
+     "ok": true
+    },
+    "lr-gen2-aged": {
+     "ok": true
+    },
+    "lr-gen2-fresh": {
+     "ok": true
+    },
+    "lr-no-created": {
+     "ok": true
+    },
+    "lr-repeat": {
+     "ok": true
+    },
+    "lr-repeat-str": {
+     "ok": true
+    }
+   },
+   "items": [
+    {
+     "id": "lr-first",
+     "kind": "local-review",
+     "order": 1,
+     "state": "pending"
+    },
+    {
+     "created_at": "2026-11-20T10:00:00Z",
+     "generation": 2,
+     "id": "lr-gen2-aged",
+     "kind": "local-review",
+     "order": 2,
+     "state": "pending"
+    },
+    {
+     "created_at": "2026-11-20T11:59:00Z",
+     "generation": 2,
+     "id": "lr-gen2-fresh",
+     "kind": "local-review",
+     "order": 3,
+     "state": "pending"
+    },
+    {
+     "created_at": "2026-11-20T10:00:00Z",
+     "id": "lr-repeat",
+     "kind": "local-review",
+     "order": 4,
+     "repeat_requested": true,
+     "state": "pending"
+    },
+    {
+     "ancestry_repeat": true,
+     "created_at": "2026-11-20T11:59:00Z",
+     "id": "lr-ancestry",
+     "kind": "local-review",
+     "order": 5,
+     "state": "pending"
+    },
+    {
+     "generation": 3,
+     "id": "lr-no-created",
+     "kind": "local-review",
+     "order": 6,
+     "state": "pending"
+    },
+    {
+     "created_at": "garbage",
+     "generation": 3,
+     "id": "lr-bad-created",
+     "kind": "local-review",
+     "order": 7,
+     "state": "pending"
+    },
+    {
+     "created_at": "2026-11-20T10:00:00Z",
+     "id": "lr-repeat-str",
+     "kind": "local-review",
+     "order": 8,
+     "repeat_requested": "yes",
+     "state": "pending"
+    }
+   ],
+   "live": [
+    "lr-first",
+    "lr-gen2-aged",
+    "lr-gen2-fresh",
+    "lr-repeat",
+    "lr-ancestry",
+    "lr-no-created",
+    "lr-bad-created",
+    "lr-repeat-str"
+   ],
+   "queue": "local-review-aging",
+   "sorted": {
+    "ok": [
+     "lr-first",
+     "lr-gen2-aged",
+     "lr-repeat",
+     "lr-repeat-str",
+     "lr-gen2-fresh",
+     "lr-ancestry",
+     "lr-no-created",
+     "lr-bad-created"
+    ]
+   }
+  },
+  {
+   "config": "aging-zero",
+   "deps": {
+    "lr-ancestry": {
+     "ok": true
+    },
+    "lr-bad-created": {
+     "ok": true
+    },
+    "lr-first": {
+     "ok": true
+    },
+    "lr-gen2-aged": {
+     "ok": true
+    },
+    "lr-gen2-fresh": {
+     "ok": true
+    },
+    "lr-no-created": {
+     "ok": true
+    },
+    "lr-repeat": {
+     "ok": true
+    },
+    "lr-repeat-str": {
+     "ok": true
+    }
+   },
+   "items": [
+    {
+     "id": "lr-first",
+     "kind": "local-review",
+     "order": 1,
+     "state": "pending"
+    },
+    {
+     "created_at": "2026-11-20T10:00:00Z",
+     "generation": 2,
+     "id": "lr-gen2-aged",
+     "kind": "local-review",
+     "order": 2,
+     "state": "pending"
+    },
+    {
+     "created_at": "2026-11-20T11:59:00Z",
+     "generation": 2,
+     "id": "lr-gen2-fresh",
+     "kind": "local-review",
+     "order": 3,
+     "state": "pending"
+    },
+    {
+     "created_at": "2026-11-20T10:00:00Z",
+     "id": "lr-repeat",
+     "kind": "local-review",
+     "order": 4,
+     "repeat_requested": true,
+     "state": "pending"
+    },
+    {
+     "ancestry_repeat": true,
+     "created_at": "2026-11-20T11:59:00Z",
+     "id": "lr-ancestry",
+     "kind": "local-review",
+     "order": 5,
+     "state": "pending"
+    },
+    {
+     "generation": 3,
+     "id": "lr-no-created",
+     "kind": "local-review",
+     "order": 6,
+     "state": "pending"
+    },
+    {
+     "created_at": "garbage",
+     "generation": 3,
+     "id": "lr-bad-created",
+     "kind": "local-review",
+     "order": 7,
+     "state": "pending"
+    },
+    {
+     "created_at": "2026-11-20T10:00:00Z",
+     "id": "lr-repeat-str",
+     "kind": "local-review",
+     "order": 8,
+     "repeat_requested": "yes",
+     "state": "pending"
+    }
+   ],
+   "live": [
+    "lr-first",
+    "lr-gen2-aged",
+    "lr-gen2-fresh",
+    "lr-repeat",
+    "lr-ancestry",
+    "lr-no-created",
+    "lr-bad-created",
+    "lr-repeat-str"
+   ],
+   "queue": "local-review-aging",
+   "sorted": {
+    "ok": [
+     "lr-first",
+     "lr-gen2-aged",
+     "lr-gen2-fresh",
+     "lr-repeat",
+     "lr-ancestry",
+     "lr-repeat-str",
+     "lr-no-created",
+     "lr-bad-created"
+    ]
+   }
+  },
+  {
+   "config": "default",
+   "deps": {
+    "p": {
+     "ok": true
+    },
+    "q-cov": {
+     "ok": true
+    },
+    "q-empty": {
+     "ok": true
+    },
+    "q-gone": {
+     "ok": true
+    },
+    "q-open": {
+     "ok": true
+    },
+    "q-primary-case": {
+     "ok": true
+    },
+    "q-tier1": {
+     "ok": true
+    }
+   },
+   "items": [
+    {
+     "id": "p",
+     "kind": "merged",
+     "order": 1,
+     "state": "pending"
+    },
+    {
+     "id": "q-tier1",
+     "kind": "merged",
+     "order": 2,
+     "repo": "owner/Other",
+     "state": "pending"
+    },
+    {
+     "id": "q-gone",
+     "kind": "merged",
+     "order": 3,
+     "repo": "owner/removed",
+     "state": "pending"
+    },
+    {
+     "id": "q-empty",
+     "kind": "merged",
+     "order": 4,
+     "repo": "",
+     "state": "pending"
+    },
+    {
+     "id": "q-primary-case",
+     "kind": "merged",
+     "order": 5,
+     "repo": "OWNER/Primary",
+     "state": "pending"
+    },
+    {
+     "id": "q-open",
+     "kind": "open",
+     "order": 6,
+     "repo": "owner/other",
+     "state": "pending"
+    },
+    {
+     "id": "q-cov",
+     "kind": "coverage",
+     "order": 7,
+     "repo": "owner/removed",
+     "state": "pending"
+    }
+   ],
+   "live": [
+    "p",
+    "q-tier1",
+    "q-gone",
+    "q-empty",
+    "q-primary-case",
+    "q-open",
+    "q-cov"
+   ],
+   "queue": "repo-ranks",
+   "sorted": {
+    "ok": [
+     "q-open",
+     "p",
+     "q-tier1",
+     "q-gone",
+     "q-empty",
+     "q-primary-case",
+     "q-cov"
+    ]
+   }
+  },
+  {
+   "config": "ranked",
+   "deps": {
+    "p": {
+     "ok": true
+    },
+    "q-cov": {
+     "ok": true
+    },
+    "q-empty": {
+     "ok": true
+    },
+    "q-gone": {
+     "ok": true
+    },
+    "q-open": {
+     "ok": true
+    },
+    "q-primary-case": {
+     "ok": true
+    },
+    "q-tier1": {
+     "ok": true
+    }
+   },
+   "items": [
+    {
+     "id": "p",
+     "kind": "merged",
+     "order": 1,
+     "state": "pending"
+    },
+    {
+     "id": "q-tier1",
+     "kind": "merged",
+     "order": 2,
+     "repo": "owner/Other",
+     "state": "pending"
+    },
+    {
+     "id": "q-gone",
+     "kind": "merged",
+     "order": 3,
+     "repo": "owner/removed",
+     "state": "pending"
+    },
+    {
+     "id": "q-empty",
+     "kind": "merged",
+     "order": 4,
+     "repo": "",
+     "state": "pending"
+    },
+    {
+     "id": "q-primary-case",
+     "kind": "merged",
+     "order": 5,
+     "repo": "OWNER/Primary",
+     "state": "pending"
+    },
+    {
+     "id": "q-open",
+     "kind": "open",
+     "order": 6,
+     "repo": "owner/other",
+     "state": "pending"
+    },
+    {
+     "id": "q-cov",
+     "kind": "coverage",
+     "order": 7,
+     "repo": "owner/removed",
+     "state": "pending"
+    }
+   ],
+   "live": [
+    "p",
+    "q-tier1",
+    "q-gone",
+    "q-empty",
+    "q-primary-case",
+    "q-open",
+    "q-cov"
+   ],
+   "queue": "repo-ranks",
+   "sorted": {
+    "ok": [
+     "q-open",
+     "q-tier1",
+     "p",
+     "q-gone",
+     "q-empty",
+     "q-primary-case",
+     "q-cov"
+    ]
+   }
+  },
+  {
+   "config": "aging-zero",
+   "deps": {
+    "p": {
+     "ok": true
+    },
+    "q-cov": {
+     "ok": true
+    },
+    "q-empty": {
+     "ok": true
+    },
+    "q-gone": {
+     "ok": true
+    },
+    "q-open": {
+     "ok": true
+    },
+    "q-primary-case": {
+     "ok": true
+    },
+    "q-tier1": {
+     "ok": true
+    }
+   },
+   "items": [
+    {
+     "id": "p",
+     "kind": "merged",
+     "order": 1,
+     "state": "pending"
+    },
+    {
+     "id": "q-tier1",
+     "kind": "merged",
+     "order": 2,
+     "repo": "owner/Other",
+     "state": "pending"
+    },
+    {
+     "id": "q-gone",
+     "kind": "merged",
+     "order": 3,
+     "repo": "owner/removed",
+     "state": "pending"
+    },
+    {
+     "id": "q-empty",
+     "kind": "merged",
+     "order": 4,
+     "repo": "",
+     "state": "pending"
+    },
+    {
+     "id": "q-primary-case",
+     "kind": "merged",
+     "order": 5,
+     "repo": "OWNER/Primary",
+     "state": "pending"
+    },
+    {
+     "id": "q-open",
+     "kind": "open",
+     "order": 6,
+     "repo": "owner/other",
+     "state": "pending"
+    },
+    {
+     "id": "q-cov",
+     "kind": "coverage",
+     "order": 7,
+     "repo": "owner/removed",
+     "state": "pending"
+    }
+   ],
+   "live": [
+    "p",
+    "q-tier1",
+    "q-gone",
+    "q-empty",
+    "q-primary-case",
+    "q-open",
+    "q-cov"
+   ],
+   "queue": "repo-ranks",
+   "sorted": {
+    "ok": [
+     "q-tier1",
+     "q-open",
+     "p",
+     "q-gone",
+     "q-empty",
+     "q-primary-case",
+     "q-cov"
+    ]
+   }
+  },
+  {
+   "config": "default",
+   "deps": {
+    "d-done": {
+     "ok": true
+    },
+    "d-empty": {
+     "ok": true
+    },
+    "d-gone": {
+     "ok": true
+    },
+    "d-null": {
+     "ok": true
+    },
+    "d-opt": {
+     "ok": true
+    },
+    "d-promo": {
+     "ok": true
+    },
+    "d-rev": {
+     "ok": false
+    },
+    "d-root": {
+     "ok": false
+    },
+    "d-skip": {
+     "ok": true
+    },
+    "d-zero": {
+     "ok": true
+    },
+    "done": {
+     "ok": true
+    },
+    "opt": {
+     "ok": true
+    },
+    "promo": {
+     "ok": true
+    },
+    "rev": {
+     "ok": true
+    },
+    "root": {
+     "ok": true
+    },
+    "skip": {
+     "ok": true
+    }
+   },
+   "items": [
+    {
+     "id": "root",
+     "kind": "merged",
+     "order": 1,
+     "state": "pending"
+    },
+    {
+     "id": "done",
+     "kind": "merged",
+     "order": 2,
+     "state": "done"
+    },
+    {
+     "id": "skip",
+     "kind": "merged",
+     "order": 3,
+     "state": "skipped"
+    },
+    {
+     "id": "rev",
+     "kind": "merged",
+     "order": 4,
+     "state": "reviewing"
+    },
+    {
+     "cycles": [
+      {
+       "n": 1
+      }
+     ],
+     "id": "opt",
+     "kind": "open",
+     "order": 5,
+     "state": "reviewing"
+    },
+    {
+     "depends_on": "root",
+     "id": "d-root",
+     "kind": "merged",
+     "order": 6,
+     "state": "pending"
+    },
+    {
+     "depends_on": "done",
+     "id": "d-done",
+     "kind": "merged",
+     "order": 7,
+     "state": "pending"
+    },
+    {
+     "depends_on": "skip",
+     "id": "d-skip",
+     "kind": "merged",
+     "order": 8,
+     "state": "pending"
+    },
+    {
+     "depends_on": "rev",
+     "id": "d-rev",
+     "kind": "merged",
+     "order": 9,
+     "state": "pending"
+    },
+    {
+     "depends_on": "opt",
+     "id": "d-opt",
+     "kind": "merged",
+     "order": 10,
+     "state": "pending"
+    },
+    {
+     "depends_on": "gone",
+     "id": "d-gone",
+     "kind": "merged",
+     "order": 11,
+     "state": "pending"
+    },
+    {
+     "depends_on": "",
+     "id": "d-empty",
+     "kind": "merged",
+     "order": 12,
+     "state": "pending"
+    },
+    {
+     "depends_on": null,
+     "id": "d-null",
+     "kind": "merged",
+     "order": 13,
+     "state": "pending"
+    },
+    {
+     "depends_on": 0,
+     "id": "d-zero",
+     "kind": "merged",
+     "order": 14,
+     "state": "pending"
+    },
+    {
+     "depends_on": "promo",
+     "id": "d-promo",
+     "kind": "merged",
+     "order": 15,
+     "state": "pending"
+    },
+    {
+     "id": "promo",
+     "kind": "promotion",
+     "order": 16,
+     "state": "reviewing"
+    }
+   ],
+   "live": [
+    "root",
+    "done",
+    "skip",
+    "rev",
+    "opt",
+    "d-root",
+    "d-done",
+    "d-skip",
+    "d-rev",
+    "d-opt",
+    "d-gone",
+    "d-empty",
+    "d-null",
+    "d-zero",
+    "d-promo"
+   ],
+   "queue": "dependencies",
+   "sorted": {
+    "ok": [
+     "root",
+     "done",
+     "skip",
+     "rev",
+     "d-root",
+     "d-done",
+     "d-skip",
+     "d-rev",
+     "d-opt",
+     "d-gone",
+     "d-empty",
+     "d-null",
+     "d-zero",
+     "d-promo",
+     "opt"
+    ]
+   }
+  },
+  {
+   "config": "ranked",
+   "deps": {
+    "d-done": {
+     "ok": true
+    },
+    "d-empty": {
+     "ok": true
+    },
+    "d-gone": {
+     "ok": true
+    },
+    "d-null": {
+     "ok": true
+    },
+    "d-opt": {
+     "ok": true
+    },
+    "d-promo": {
+     "ok": true
+    },
+    "d-rev": {
+     "ok": false
+    },
+    "d-root": {
+     "ok": false
+    },
+    "d-skip": {
+     "ok": true
+    },
+    "d-zero": {
+     "ok": true
+    },
+    "done": {
+     "ok": true
+    },
+    "opt": {
+     "ok": true
+    },
+    "promo": {
+     "ok": true
+    },
+    "rev": {
+     "ok": true
+    },
+    "root": {
+     "ok": true
+    },
+    "skip": {
+     "ok": true
+    }
+   },
+   "items": [
+    {
+     "id": "root",
+     "kind": "merged",
+     "order": 1,
+     "state": "pending"
+    },
+    {
+     "id": "done",
+     "kind": "merged",
+     "order": 2,
+     "state": "done"
+    },
+    {
+     "id": "skip",
+     "kind": "merged",
+     "order": 3,
+     "state": "skipped"
+    },
+    {
+     "id": "rev",
+     "kind": "merged",
+     "order": 4,
+     "state": "reviewing"
+    },
+    {
+     "cycles": [
+      {
+       "n": 1
+      }
+     ],
+     "id": "opt",
+     "kind": "open",
+     "order": 5,
+     "state": "reviewing"
+    },
+    {
+     "depends_on": "root",
+     "id": "d-root",
+     "kind": "merged",
+     "order": 6,
+     "state": "pending"
+    },
+    {
+     "depends_on": "done",
+     "id": "d-done",
+     "kind": "merged",
+     "order": 7,
+     "state": "pending"
+    },
+    {
+     "depends_on": "skip",
+     "id": "d-skip",
+     "kind": "merged",
+     "order": 8,
+     "state": "pending"
+    },
+    {
+     "depends_on": "rev",
+     "id": "d-rev",
+     "kind": "merged",
+     "order": 9,
+     "state": "pending"
+    },
+    {
+     "depends_on": "opt",
+     "id": "d-opt",
+     "kind": "merged",
+     "order": 10,
+     "state": "pending"
+    },
+    {
+     "depends_on": "gone",
+     "id": "d-gone",
+     "kind": "merged",
+     "order": 11,
+     "state": "pending"
+    },
+    {
+     "depends_on": "",
+     "id": "d-empty",
+     "kind": "merged",
+     "order": 12,
+     "state": "pending"
+    },
+    {
+     "depends_on": null,
+     "id": "d-null",
+     "kind": "merged",
+     "order": 13,
+     "state": "pending"
+    },
+    {
+     "depends_on": 0,
+     "id": "d-zero",
+     "kind": "merged",
+     "order": 14,
+     "state": "pending"
+    },
+    {
+     "depends_on": "promo",
+     "id": "d-promo",
+     "kind": "merged",
+     "order": 15,
+     "state": "pending"
+    },
+    {
+     "id": "promo",
+     "kind": "promotion",
+     "order": 16,
+     "state": "reviewing"
+    }
+   ],
+   "live": [
+    "root",
+    "done",
+    "skip",
+    "rev",
+    "opt",
+    "d-root",
+    "d-done",
+    "d-skip",
+    "d-rev",
+    "d-opt",
+    "d-gone",
+    "d-empty",
+    "d-null",
+    "d-zero",
+    "d-promo"
+   ],
+   "queue": "dependencies",
+   "sorted": {
+    "ok": [
+     "root",
+     "done",
+     "skip",
+     "rev",
+     "d-root",
+     "d-done",
+     "d-skip",
+     "d-rev",
+     "d-opt",
+     "d-gone",
+     "d-empty",
+     "d-null",
+     "d-zero",
+     "d-promo",
+     "opt"
+    ]
+   }
+  },
+  {
+   "config": "aging-zero",
+   "deps": {
+    "d-done": {
+     "ok": true
+    },
+    "d-empty": {
+     "ok": true
+    },
+    "d-gone": {
+     "ok": true
+    },
+    "d-null": {
+     "ok": true
+    },
+    "d-opt": {
+     "ok": true
+    },
+    "d-promo": {
+     "ok": true
+    },
+    "d-rev": {
+     "ok": false
+    },
+    "d-root": {
+     "ok": false
+    },
+    "d-skip": {
+     "ok": true
+    },
+    "d-zero": {
+     "ok": true
+    },
+    "done": {
+     "ok": true
+    },
+    "opt": {
+     "ok": true
+    },
+    "promo": {
+     "ok": true
+    },
+    "rev": {
+     "ok": true
+    },
+    "root": {
+     "ok": true
+    },
+    "skip": {
+     "ok": true
+    }
+   },
+   "items": [
+    {
+     "id": "root",
+     "kind": "merged",
+     "order": 1,
+     "state": "pending"
+    },
+    {
+     "id": "done",
+     "kind": "merged",
+     "order": 2,
+     "state": "done"
+    },
+    {
+     "id": "skip",
+     "kind": "merged",
+     "order": 3,
+     "state": "skipped"
+    },
+    {
+     "id": "rev",
+     "kind": "merged",
+     "order": 4,
+     "state": "reviewing"
+    },
+    {
+     "cycles": [
+      {
+       "n": 1
+      }
+     ],
+     "id": "opt",
+     "kind": "open",
+     "order": 5,
+     "state": "reviewing"
+    },
+    {
+     "depends_on": "root",
+     "id": "d-root",
+     "kind": "merged",
+     "order": 6,
+     "state": "pending"
+    },
+    {
+     "depends_on": "done",
+     "id": "d-done",
+     "kind": "merged",
+     "order": 7,
+     "state": "pending"
+    },
+    {
+     "depends_on": "skip",
+     "id": "d-skip",
+     "kind": "merged",
+     "order": 8,
+     "state": "pending"
+    },
+    {
+     "depends_on": "rev",
+     "id": "d-rev",
+     "kind": "merged",
+     "order": 9,
+     "state": "pending"
+    },
+    {
+     "depends_on": "opt",
+     "id": "d-opt",
+     "kind": "merged",
+     "order": 10,
+     "state": "pending"
+    },
+    {
+     "depends_on": "gone",
+     "id": "d-gone",
+     "kind": "merged",
+     "order": 11,
+     "state": "pending"
+    },
+    {
+     "depends_on": "",
+     "id": "d-empty",
+     "kind": "merged",
+     "order": 12,
+     "state": "pending"
+    },
+    {
+     "depends_on": null,
+     "id": "d-null",
+     "kind": "merged",
+     "order": 13,
+     "state": "pending"
+    },
+    {
+     "depends_on": 0,
+     "id": "d-zero",
+     "kind": "merged",
+     "order": 14,
+     "state": "pending"
+    },
+    {
+     "depends_on": "promo",
+     "id": "d-promo",
+     "kind": "merged",
+     "order": 15,
+     "state": "pending"
+    },
+    {
+     "id": "promo",
+     "kind": "promotion",
+     "order": 16,
+     "state": "reviewing"
+    }
+   ],
+   "live": [
+    "root",
+    "done",
+    "skip",
+    "rev",
+    "opt",
+    "d-root",
+    "d-done",
+    "d-skip",
+    "d-rev",
+    "d-opt",
+    "d-gone",
+    "d-empty",
+    "d-null",
+    "d-zero",
+    "d-promo"
+   ],
+   "queue": "dependencies",
+   "sorted": {
+    "ok": [
+     "root",
+     "done",
+     "skip",
+     "rev",
+     "d-root",
+     "d-done",
+     "d-skip",
+     "d-rev",
+     "d-opt",
+     "d-gone",
+     "d-empty",
+     "d-null",
+     "d-zero",
+     "d-promo",
+     "opt"
+    ]
+   }
+  }
+ ],
+ "schema": "crq-coverage-tick-seams-oracle/1",
+ "settings": [
+  {
+   "name": "absent",
+   "outcome": {
+    "ok": false
+   },
+   "spec": {
+    "name": "absent",
+    "policy_files": {
+     "limits": "{\"version\": 1, \"max_files\": 8, \"max_file_bytes\": 200000, \"max_total_bytes\": 500000, \"reviewer\": {\"verified\": true, \"version\": \"0.9.2\", \"max_files\": 8, \"max_diff_bytes\": 262144, \"evidence\": \"docs/evidence.json\"}}",
+     "required-list": "{\"version\": 1}",
+     "tiers": "{\"version\": 1}"
+    },
+    "rollout": null
+   }
+  },
+  {
+   "name": "enabled-ok",
+   "outcome": {
+    "ok": true
+   },
+   "spec": {
+    "name": "enabled-ok",
+    "policy_files": {
+     "limits": "{\"version\": 1, \"max_files\": 8, \"max_file_bytes\": 200000, \"max_total_bytes\": 500000, \"reviewer\": {\"verified\": true, \"version\": \"0.9.2\", \"max_files\": 8, \"max_diff_bytes\": 262144, \"evidence\": \"docs/evidence.json\"}}",
+     "required-list": "{\"version\": 1}",
+     "tiers": "{\"version\": 1}"
+    },
+    "rollout": "{\"durable_artifact_root\": \"/var/evidence\", \"enabled\": true, \"no_live_run_verification\": \"n\", \"operational_ruling\": \"r\", \"owner_branch_ruleset_evidence\": \"e\", \"publisher_spool\": {\"ssh_alias\": \"svc@host.example\", \"ssh_key\": \"/keys/id\"}, \"runner_identity\": \"crq-runner-app\"}"
+   }
+  },
+  {
+   "name": "enabled-ok-key-alias",
+   "outcome": {
+    "ok": true
+   },
+   "spec": {
+    "name": "enabled-ok-key-alias",
+    "policy_files": {
+     "limits": "{\"version\": 1, \"max_files\": 8, \"max_file_bytes\": 200000, \"max_total_bytes\": 500000, \"reviewer\": {\"verified\": true, \"version\": \"0.9.2\", \"max_files\": 8, \"max_diff_bytes\": 262144, \"evidence\": \"docs/evidence.json\"}}",
+     "required-list": "{\"version\": 1}",
+     "tiers": "{\"version\": 1}"
+    },
+    "rollout": "{\"durable_artifact_root\": \"/var/evidence\", \"enabled\": true, \"no_live_run_verification\": \"n\", \"operational_ruling\": \"r\", \"owner_branch_ruleset_evidence\": \"e\", \"publisher_spool\": {\"key\": \"/k\", \"ssh_alias\": \"svc@h\"}, \"runner_identity\": \"crq-runner-app\"}"
+   }
+  },
+  {
+   "name": "disabled",
+   "outcome": {
+    "ok": false
+   },
+   "spec": {
+    "name": "disabled",
+    "policy_files": {
+     "limits": "{\"version\": 1, \"max_files\": 8, \"max_file_bytes\": 200000, \"max_total_bytes\": 500000, \"reviewer\": {\"verified\": true, \"version\": \"0.9.2\", \"max_files\": 8, \"max_diff_bytes\": 262144, \"evidence\": \"docs/evidence.json\"}}",
+     "required-list": "{\"version\": 1}",
+     "tiers": "{\"version\": 1}"
+    },
+    "rollout": "{\"durable_artifact_root\": \"/var/evidence\", \"enabled\": false, \"no_live_run_verification\": \"n\", \"operational_ruling\": \"r\", \"owner_branch_ruleset_evidence\": \"e\", \"publisher_spool\": {\"ssh_alias\": \"svc@host.example\", \"ssh_key\": \"/keys/id\"}, \"runner_identity\": \"crq-runner-app\"}"
+   }
+  },
+  {
+   "name": "enabled-string-true",
+   "outcome": {
+    "ok": false
+   },
+   "spec": {
+    "name": "enabled-string-true",
+    "policy_files": {
+     "limits": "{\"version\": 1, \"max_files\": 8, \"max_file_bytes\": 200000, \"max_total_bytes\": 500000, \"reviewer\": {\"verified\": true, \"version\": \"0.9.2\", \"max_files\": 8, \"max_diff_bytes\": 262144, \"evidence\": \"docs/evidence.json\"}}",
+     "required-list": "{\"version\": 1}",
+     "tiers": "{\"version\": 1}"
+    },
+    "rollout": "{\"durable_artifact_root\": \"/var/evidence\", \"enabled\": \"true\", \"no_live_run_verification\": \"n\", \"operational_ruling\": \"r\", \"owner_branch_ruleset_evidence\": \"e\", \"publisher_spool\": {\"ssh_alias\": \"svc@host.example\", \"ssh_key\": \"/keys/id\"}, \"runner_identity\": \"crq-runner-app\"}"
+   }
+  },
+  {
+   "name": "enabled-one",
+   "outcome": {
+    "ok": false
+   },
+   "spec": {
+    "name": "enabled-one",
+    "policy_files": {
+     "limits": "{\"version\": 1, \"max_files\": 8, \"max_file_bytes\": 200000, \"max_total_bytes\": 500000, \"reviewer\": {\"verified\": true, \"version\": \"0.9.2\", \"max_files\": 8, \"max_diff_bytes\": 262144, \"evidence\": \"docs/evidence.json\"}}",
+     "required-list": "{\"version\": 1}",
+     "tiers": "{\"version\": 1}"
+    },
+    "rollout": "{\"durable_artifact_root\": \"/var/evidence\", \"enabled\": 1, \"no_live_run_verification\": \"n\", \"operational_ruling\": \"r\", \"owner_branch_ruleset_evidence\": \"e\", \"publisher_spool\": {\"ssh_alias\": \"svc@host.example\", \"ssh_key\": \"/keys/id\"}, \"runner_identity\": \"crq-runner-app\"}"
+   }
+  },
+  {
+   "name": "enabled-missing",
+   "outcome": {
+    "ok": false
+   },
+   "spec": {
+    "name": "enabled-missing",
+    "policy_files": {
+     "limits": "{\"version\": 1, \"max_files\": 8, \"max_file_bytes\": 200000, \"max_total_bytes\": 500000, \"reviewer\": {\"verified\": true, \"version\": \"0.9.2\", \"max_files\": 8, \"max_diff_bytes\": 262144, \"evidence\": \"docs/evidence.json\"}}",
+     "required-list": "{\"version\": 1}",
+     "tiers": "{\"version\": 1}"
+    },
+    "rollout": "{\"durable_artifact_root\": \"/var/evidence\", \"no_live_run_verification\": \"n\", \"operational_ruling\": \"r\", \"owner_branch_ruleset_evidence\": \"e\", \"publisher_spool\": {\"ssh_alias\": \"svc@host.example\", \"ssh_key\": \"/keys/id\"}, \"runner_identity\": \"crq-runner-app\"}"
+   }
+  },
+  {
+   "name": "disabled-but-incomplete",
+   "outcome": {
+    "ok": false
+   },
+   "spec": {
+    "name": "disabled-but-incomplete",
+    "policy_files": {
+     "limits": "{\"version\": 1, \"max_files\": 8, \"max_file_bytes\": 200000, \"max_total_bytes\": 500000, \"reviewer\": {\"verified\": true, \"version\": \"0.9.2\", \"max_files\": 8, \"max_diff_bytes\": 262144, \"evidence\": \"docs/evidence.json\"}}",
+     "required-list": "{\"version\": 1}",
+     "tiers": "{\"version\": 1}"
+    },
+    "rollout": "{\"enabled\": false}"
+   }
+  },
+  {
+   "name": "incomplete-missing-ruling",
+   "outcome": {
+    "message": "backfill rollout prerequisites incomplete",
+    "raises": "IntegrityError"
+   },
+   "spec": {
+    "name": "incomplete-missing-ruling",
+    "policy_files": {
+     "limits": "{\"version\": 1, \"max_files\": 8, \"max_file_bytes\": 200000, \"max_total_bytes\": 500000, \"reviewer\": {\"verified\": true, \"version\": \"0.9.2\", \"max_files\": 8, \"max_diff_bytes\": 262144, \"evidence\": \"docs/evidence.json\"}}",
+     "required-list": "{\"version\": 1}",
+     "tiers": "{\"version\": 1}"
+    },
+    "rollout": "{\"durable_artifact_root\": \"/var/evidence\", \"enabled\": true, \"no_live_run_verification\": \"n\", \"owner_branch_ruleset_evidence\": \"e\", \"publisher_spool\": {\"ssh_alias\": \"svc@host.example\", \"ssh_key\": \"/keys/id\"}, \"runner_identity\": \"crq-runner-app\"}"
+   }
+  },
+  {
+   "name": "incomplete-empty-ruling",
+   "outcome": {
+    "message": "backfill rollout prerequisites incomplete",
+    "raises": "IntegrityError"
+   },
+   "spec": {
+    "name": "incomplete-empty-ruling",
+    "policy_files": {
+     "limits": "{\"version\": 1, \"max_files\": 8, \"max_file_bytes\": 200000, \"max_total_bytes\": 500000, \"reviewer\": {\"verified\": true, \"version\": \"0.9.2\", \"max_files\": 8, \"max_diff_bytes\": 262144, \"evidence\": \"docs/evidence.json\"}}",
+     "required-list": "{\"version\": 1}",
+     "tiers": "{\"version\": 1}"
+    },
+    "rollout": "{\"durable_artifact_root\": \"/var/evidence\", \"enabled\": true, \"no_live_run_verification\": \"n\", \"operational_ruling\": \"\", \"owner_branch_ruleset_evidence\": \"e\", \"publisher_spool\": {\"ssh_alias\": \"svc@host.example\", \"ssh_key\": \"/keys/id\"}, \"runner_identity\": \"crq-runner-app\"}"
+   }
+  },
+  {
+   "name": "wrong-runner",
+   "outcome": {
+    "message": "backfill rollout prerequisites incomplete",
+    "raises": "IntegrityError"
+   },
+   "spec": {
+    "name": "wrong-runner",
+    "policy_files": {
+     "limits": "{\"version\": 1, \"max_files\": 8, \"max_file_bytes\": 200000, \"max_total_bytes\": 500000, \"reviewer\": {\"verified\": true, \"version\": \"0.9.2\", \"max_files\": 8, \"max_diff_bytes\": 262144, \"evidence\": \"docs/evidence.json\"}}",
+     "required-list": "{\"version\": 1}",
+     "tiers": "{\"version\": 1}"
+    },
+    "rollout": "{\"durable_artifact_root\": \"/var/evidence\", \"enabled\": true, \"no_live_run_verification\": \"n\", \"operational_ruling\": \"r\", \"owner_branch_ruleset_evidence\": \"e\", \"publisher_spool\": {\"ssh_alias\": \"svc@host.example\", \"ssh_key\": \"/keys/id\"}, \"runner_identity\": \"someone\"}"
+   }
+  },
+  {
+   "name": "spool-not-dict",
+   "outcome": {
+    "message": "backfill rollout publisher_spool incomplete or invalid",
+    "raises": "IntegrityError"
+   },
+   "spec": {
+    "name": "spool-not-dict",
+    "policy_files": {
+     "limits": "{\"version\": 1, \"max_files\": 8, \"max_file_bytes\": 200000, \"max_total_bytes\": 500000, \"reviewer\": {\"verified\": true, \"version\": \"0.9.2\", \"max_files\": 8, \"max_diff_bytes\": 262144, \"evidence\": \"docs/evidence.json\"}}",
+     "required-list": "{\"version\": 1}",
+     "tiers": "{\"version\": 1}"
+    },
+    "rollout": "{\"durable_artifact_root\": \"/var/evidence\", \"enabled\": true, \"no_live_run_verification\": \"n\", \"operational_ruling\": \"r\", \"owner_branch_ruleset_evidence\": \"e\", \"publisher_spool\": [\"x\"], \"runner_identity\": \"crq-runner-app\"}"
+   }
+  },
+  {
+   "name": "spool-extra-key",
+   "outcome": {
+    "message": "backfill rollout publisher_spool incomplete or invalid",
+    "raises": "IntegrityError"
+   },
+   "spec": {
+    "name": "spool-extra-key",
+    "policy_files": {
+     "limits": "{\"version\": 1, \"max_files\": 8, \"max_file_bytes\": 200000, \"max_total_bytes\": 500000, \"reviewer\": {\"verified\": true, \"version\": \"0.9.2\", \"max_files\": 8, \"max_diff_bytes\": 262144, \"evidence\": \"docs/evidence.json\"}}",
+     "required-list": "{\"version\": 1}",
+     "tiers": "{\"version\": 1}"
+    },
+    "rollout": "{\"durable_artifact_root\": \"/var/evidence\", \"enabled\": true, \"no_live_run_verification\": \"n\", \"operational_ruling\": \"r\", \"owner_branch_ruleset_evidence\": \"e\", \"publisher_spool\": {\"ssh_alias\": \"svc@h\", \"ssh_key\": \"/k\", \"x\": 1}, \"runner_identity\": \"crq-runner-app\"}"
+   }
+  },
+  {
+   "name": "spool-bad-alias",
+   "outcome": {
+    "message": "backfill rollout publisher_spool incomplete or invalid",
+    "raises": "IntegrityError"
+   },
+   "spec": {
+    "name": "spool-bad-alias",
+    "policy_files": {
+     "limits": "{\"version\": 1, \"max_files\": 8, \"max_file_bytes\": 200000, \"max_total_bytes\": 500000, \"reviewer\": {\"verified\": true, \"version\": \"0.9.2\", \"max_files\": 8, \"max_diff_bytes\": 262144, \"evidence\": \"docs/evidence.json\"}}",
+     "required-list": "{\"version\": 1}",
+     "tiers": "{\"version\": 1}"
+    },
+    "rollout": "{\"durable_artifact_root\": \"/var/evidence\", \"enabled\": true, \"no_live_run_verification\": \"n\", \"operational_ruling\": \"r\", \"owner_branch_ruleset_evidence\": \"e\", \"publisher_spool\": {\"ssh_alias\": \"nope\", \"ssh_key\": \"/k\"}, \"runner_identity\": \"crq-runner-app\"}"
+   }
+  },
+  {
+   "name": "spool-blank-key",
+   "outcome": {
+    "message": "backfill rollout publisher_spool incomplete or invalid",
+    "raises": "IntegrityError"
+   },
+   "spec": {
+    "name": "spool-blank-key",
+    "policy_files": {
+     "limits": "{\"version\": 1, \"max_files\": 8, \"max_file_bytes\": 200000, \"max_total_bytes\": 500000, \"reviewer\": {\"verified\": true, \"version\": \"0.9.2\", \"max_files\": 8, \"max_diff_bytes\": 262144, \"evidence\": \"docs/evidence.json\"}}",
+     "required-list": "{\"version\": 1}",
+     "tiers": "{\"version\": 1}"
+    },
+    "rollout": "{\"durable_artifact_root\": \"/var/evidence\", \"enabled\": true, \"no_live_run_verification\": \"n\", \"operational_ruling\": \"r\", \"owner_branch_ruleset_evidence\": \"e\", \"publisher_spool\": {\"ssh_alias\": \"svc@h\", \"ssh_key\": \"  \"}, \"runner_identity\": \"crq-runner-app\"}"
+   }
+  },
+  {
+   "name": "spool-newline-key",
+   "outcome": {
+    "message": "backfill rollout publisher_spool incomplete or invalid",
+    "raises": "IntegrityError"
+   },
+   "spec": {
+    "name": "spool-newline-key",
+    "policy_files": {
+     "limits": "{\"version\": 1, \"max_files\": 8, \"max_file_bytes\": 200000, \"max_total_bytes\": 500000, \"reviewer\": {\"verified\": true, \"version\": \"0.9.2\", \"max_files\": 8, \"max_diff_bytes\": 262144, \"evidence\": \"docs/evidence.json\"}}",
+     "required-list": "{\"version\": 1}",
+     "tiers": "{\"version\": 1}"
+    },
+    "rollout": "{\"durable_artifact_root\": \"/var/evidence\", \"enabled\": true, \"no_live_run_verification\": \"n\", \"operational_ruling\": \"r\", \"owner_branch_ruleset_evidence\": \"e\", \"publisher_spool\": {\"ssh_alias\": \"svc@h\", \"ssh_key\": \"a\\nb\"}, \"runner_identity\": \"crq-runner-app\"}"
+   }
+  },
+  {
+   "name": "not-an-object",
+   "outcome": {
+    "message": "'list' object has no attribute 'get'",
+    "raises": "AttributeError"
+   },
+   "spec": {
+    "name": "not-an-object",
+    "policy_files": {
+     "limits": "{\"version\": 1, \"max_files\": 8, \"max_file_bytes\": 200000, \"max_total_bytes\": 500000, \"reviewer\": {\"verified\": true, \"version\": \"0.9.2\", \"max_files\": 8, \"max_diff_bytes\": 262144, \"evidence\": \"docs/evidence.json\"}}",
+     "required-list": "{\"version\": 1}",
+     "tiers": "{\"version\": 1}"
+    },
+    "rollout": "[1, 2]"
+   }
+  },
+  {
+   "name": "scalar",
+   "outcome": {
+    "message": "'int' object has no attribute 'get'",
+    "raises": "AttributeError"
+   },
+   "spec": {
+    "name": "scalar",
+    "policy_files": {
+     "limits": "{\"version\": 1, \"max_files\": 8, \"max_file_bytes\": 200000, \"max_total_bytes\": 500000, \"reviewer\": {\"verified\": true, \"version\": \"0.9.2\", \"max_files\": 8, \"max_diff_bytes\": 262144, \"evidence\": \"docs/evidence.json\"}}",
+     "required-list": "{\"version\": 1}",
+     "tiers": "{\"version\": 1}"
+    },
+    "rollout": "7"
+   }
+  },
+  {
+   "name": "malformed-json",
+   "outcome": {
+    "message": "Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
+    "raises": "JSONDecodeError"
+   },
+   "spec": {
+    "name": "malformed-json",
+    "policy_files": {
+     "limits": "{\"version\": 1, \"max_files\": 8, \"max_file_bytes\": 200000, \"max_total_bytes\": 500000, \"reviewer\": {\"verified\": true, \"version\": \"0.9.2\", \"max_files\": 8, \"max_diff_bytes\": 262144, \"evidence\": \"docs/evidence.json\"}}",
+     "required-list": "{\"version\": 1}",
+     "tiers": "{\"version\": 1}"
+    },
+    "rollout": "{"
+   }
+  },
+  {
+   "name": "duplicate-key",
+   "outcome": {
+    "message": "duplicate JSON key",
+    "raises": "IntegrityError"
+   },
+   "spec": {
+    "name": "duplicate-key",
+    "policy_files": {
+     "limits": "{\"version\": 1, \"max_files\": 8, \"max_file_bytes\": 200000, \"max_total_bytes\": 500000, \"reviewer\": {\"verified\": true, \"version\": \"0.9.2\", \"max_files\": 8, \"max_diff_bytes\": 262144, \"evidence\": \"docs/evidence.json\"}}",
+     "required-list": "{\"version\": 1}",
+     "tiers": "{\"version\": 1}"
+    },
+    "rollout": "{\"enabled\": true, \"enabled\": true}"
+   }
+  },
+  {
+   "name": "float-value",
+   "outcome": {
+    "message": "unsupported numeric JSON value",
+    "raises": "IntegrityError"
+   },
+   "spec": {
+    "name": "float-value",
+    "policy_files": {
+     "limits": "{\"version\": 1, \"max_files\": 8, \"max_file_bytes\": 200000, \"max_total_bytes\": 500000, \"reviewer\": {\"verified\": true, \"version\": \"0.9.2\", \"max_files\": 8, \"max_diff_bytes\": 262144, \"evidence\": \"docs/evidence.json\"}}",
+     "required-list": "{\"version\": 1}",
+     "tiers": "{\"version\": 1}"
+    },
+    "rollout": "{\"durable_artifact_root\": \"/var/evidence\", \"enabled\": true, \"extra\": 1.5, \"no_live_run_verification\": \"n\", \"operational_ruling\": \"r\", \"owner_branch_ruleset_evidence\": \"e\", \"publisher_spool\": {\"ssh_alias\": \"svc@host.example\", \"ssh_key\": \"/keys/id\"}, \"runner_identity\": \"crq-runner-app\"}"
+   }
+  },
+  {
+   "name": "non-utf8",
+   "outcome": {
+    "message": "'utf-8' codec can't decode byte 0xff in position 18: invalid start byte",
+    "raises": "UnicodeDecodeError"
+   },
+   "spec": {
+    "name": "non-utf8",
+    "policy_files": {
+     "limits": "{\"version\": 1, \"max_files\": 8, \"max_file_bytes\": 200000, \"max_total_bytes\": 500000, \"reviewer\": {\"verified\": true, \"version\": \"0.9.2\", \"max_files\": 8, \"max_diff_bytes\": 262144, \"evidence\": \"docs/evidence.json\"}}",
+     "required-list": "{\"version\": 1}",
+     "tiers": "{\"version\": 1}"
+    },
+    "rollout_hex": "7b22656e61626c6564223a20747275652c20ff7d"
+   }
+  },
+  {
+   "name": "empty-file",
+   "outcome": {
+    "message": "Expecting value: line 1 column 1 (char 0)",
+    "raises": "JSONDecodeError"
+   },
+   "spec": {
+    "name": "empty-file",
+    "policy_files": {
+     "limits": "{\"version\": 1, \"max_files\": 8, \"max_file_bytes\": 200000, \"max_total_bytes\": 500000, \"reviewer\": {\"verified\": true, \"version\": \"0.9.2\", \"max_files\": 8, \"max_diff_bytes\": 262144, \"evidence\": \"docs/evidence.json\"}}",
+     "required-list": "{\"version\": 1}",
+     "tiers": "{\"version\": 1}"
+    },
+    "rollout": ""
+   }
+  },
+  {
+   "name": "limits-unverified",
+   "outcome": {
+    "message": "deployed reviewer limits not verified; go-live blocked",
+    "raises": "IntegrityError"
+   },
+   "spec": {
+    "name": "limits-unverified",
+    "policy": {
+     "limits": {
+      "max_file_bytes": 200000,
+      "max_files": 8,
+      "max_total_bytes": 500000,
+      "reviewer": {
+       "evidence": "docs/evidence.json",
+       "max_diff_bytes": 262144,
+       "max_files": 8,
+       "verified": false,
+       "version": "0.9.2"
+      },
+      "version": 1
+     }
+    },
+    "policy_files": {
+     "limits": "{\"version\": 1, \"max_files\": 8, \"max_file_bytes\": 200000, \"max_total_bytes\": 500000, \"reviewer\": {\"verified\": false, \"version\": \"0.9.2\", \"max_files\": 8, \"max_diff_bytes\": 262144, \"evidence\": \"docs/evidence.json\"}}",
+     "required-list": "{\"version\": 1}",
+     "tiers": "{\"version\": 1}"
+    },
+    "rollout": "{\"durable_artifact_root\": \"/var/evidence\", \"enabled\": true, \"no_live_run_verification\": \"n\", \"operational_ruling\": \"r\", \"owner_branch_ruleset_evidence\": \"e\", \"publisher_spool\": {\"ssh_alias\": \"svc@host.example\", \"ssh_key\": \"/keys/id\"}, \"runner_identity\": \"crq-runner-app\"}"
+   }
+  },
+  {
+   "name": "limits-no-evidence",
+   "outcome": {
+    "message": "deployed reviewer limits not verified; go-live blocked",
+    "raises": "IntegrityError"
+   },
+   "spec": {
+    "name": "limits-no-evidence",
+    "policy": {
+     "limits": {
+      "max_file_bytes": 200000,
+      "max_files": 8,
+      "max_total_bytes": 500000,
+      "reviewer": {
+       "evidence": "",
+       "max_diff_bytes": 262144,
+       "max_files": 8,
+       "verified": true,
+       "version": "0.9.2"
+      },
+      "version": 1
+     }
+    },
+    "policy_files": {
+     "limits": "{\"version\": 1, \"max_files\": 8, \"max_file_bytes\": 200000, \"max_total_bytes\": 500000, \"reviewer\": {\"verified\": true, \"version\": \"0.9.2\", \"max_files\": 8, \"max_diff_bytes\": 262144, \"evidence\": \"\"}}",
+     "required-list": "{\"version\": 1}",
+     "tiers": "{\"version\": 1}"
+    },
+    "rollout": "{\"durable_artifact_root\": \"/var/evidence\", \"enabled\": true, \"no_live_run_verification\": \"n\", \"operational_ruling\": \"r\", \"owner_branch_ruleset_evidence\": \"e\", \"publisher_spool\": {\"ssh_alias\": \"svc@host.example\", \"ssh_key\": \"/keys/id\"}, \"runner_identity\": \"crq-runner-app\"}"
+   }
+  },
+  {
+   "name": "limits-no-diff-bytes",
+   "outcome": {
+    "message": "invalid construction limits",
+    "raises": "IntegrityError"
+   },
+   "spec": {
+    "name": "limits-no-diff-bytes",
+    "policy": {
+     "limits": {
+      "max_file_bytes": 200000,
+      "max_files": 8,
+      "max_total_bytes": 500000,
+      "reviewer": {
+       "evidence": "docs/evidence.json",
+       "max_files": 8,
+       "verified": true,
+       "version": "0.9.2"
+      },
+      "version": 1
+     }
+    },
+    "policy_files": {
+     "limits": "{\"version\": 1, \"max_files\": 8, \"max_file_bytes\": 200000, \"max_total_bytes\": 500000, \"reviewer\": {\"verified\": true, \"version\": \"0.9.2\", \"max_files\": 8, \"evidence\": \"docs/evidence.json\"}}",
+     "required-list": "{\"version\": 1}",
+     "tiers": "{\"version\": 1}"
+    },
+    "rollout": "{\"durable_artifact_root\": \"/var/evidence\", \"enabled\": true, \"no_live_run_verification\": \"n\", \"operational_ruling\": \"r\", \"owner_branch_ruleset_evidence\": \"e\", \"publisher_spool\": {\"ssh_alias\": \"svc@host.example\", \"ssh_key\": \"/keys/id\"}, \"runner_identity\": \"crq-runner-app\"}"
+   }
+  },
+  {
+   "name": "limits-diff-bytes-zero",
+   "outcome": {
+    "message": "invalid construction limits",
+    "raises": "IntegrityError"
+   },
+   "spec": {
+    "name": "limits-diff-bytes-zero",
+    "policy": {
+     "limits": {
+      "max_file_bytes": 200000,
+      "max_files": 8,
+      "max_total_bytes": 500000,
+      "reviewer": {
+       "evidence": "docs/evidence.json",
+       "max_diff_bytes": 0,
+       "max_files": 8,
+       "verified": true,
+       "version": "0.9.2"
+      },
+      "version": 1
+     }
+    },
+    "policy_files": {
+     "limits": "{\"version\": 1, \"max_files\": 8, \"max_file_bytes\": 200000, \"max_total_bytes\": 500000, \"reviewer\": {\"verified\": true, \"version\": \"0.9.2\", \"max_files\": 8, \"max_diff_bytes\": 0, \"evidence\": \"docs/evidence.json\"}}",
+     "required-list": "{\"version\": 1}",
+     "tiers": "{\"version\": 1}"
+    },
+    "rollout": "{\"durable_artifact_root\": \"/var/evidence\", \"enabled\": true, \"no_live_run_verification\": \"n\", \"operational_ruling\": \"r\", \"owner_branch_ruleset_evidence\": \"e\", \"publisher_spool\": {\"ssh_alias\": \"svc@host.example\", \"ssh_key\": \"/keys/id\"}, \"runner_identity\": \"crq-runner-app\"}"
+   }
+  },
+  {
+   "name": "limits-diff-bytes-float",
+   "outcome": {
+    "message": "unsupported numeric JSON value",
+    "raises": "IntegrityError"
+   },
+   "spec": {
+    "name": "limits-diff-bytes-float",
+    "policy": {
+     "limits_text": "{\"version\": 1, \"max_files\": 8, \"max_file_bytes\": 200000, \"max_total_bytes\": 500000, \"reviewer\": {\"verified\": true, \"version\": \"0.9.2\", \"max_files\": 8, \"max_diff_bytes\": 262144.0, \"evidence\": \"docs/evidence.json\"}}"
+    },
+    "policy_files": {
+     "limits": "{\"version\": 1, \"max_files\": 8, \"max_file_bytes\": 200000, \"max_total_bytes\": 500000, \"reviewer\": {\"verified\": true, \"version\": \"0.9.2\", \"max_files\": 8, \"max_diff_bytes\": 262144.0, \"evidence\": \"docs/evidence.json\"}}",
+     "required-list": "{\"version\": 1}",
+     "tiers": "{\"version\": 1}"
+    },
+    "rollout": "{\"durable_artifact_root\": \"/var/evidence\", \"enabled\": true, \"no_live_run_verification\": \"n\", \"operational_ruling\": \"r\", \"owner_branch_ruleset_evidence\": \"e\", \"publisher_spool\": {\"ssh_alias\": \"svc@host.example\", \"ssh_key\": \"/keys/id\"}, \"runner_identity\": \"crq-runner-app\"}"
+   }
+  },
+  {
+   "name": "limits-files-zero",
+   "outcome": {
+    "message": "invalid construction limits",
+    "raises": "IntegrityError"
+   },
+   "spec": {
+    "name": "limits-files-zero",
+    "policy": {
+     "limits": {
+      "max_file_bytes": 200000,
+      "max_files": 0,
+      "max_total_bytes": 500000,
+      "reviewer": {
+       "evidence": "docs/evidence.json",
+       "max_diff_bytes": 262144,
+       "max_files": 8,
+       "verified": true,
+       "version": "0.9.2"
+      },
+      "version": 1
+     }
+    },
+    "policy_files": {
+     "limits": "{\"version\": 1, \"max_files\": 0, \"max_file_bytes\": 200000, \"max_total_bytes\": 500000, \"reviewer\": {\"verified\": true, \"version\": \"0.9.2\", \"max_files\": 8, \"max_diff_bytes\": 262144, \"evidence\": \"docs/evidence.json\"}}",
+     "required-list": "{\"version\": 1}",
+     "tiers": "{\"version\": 1}"
+    },
+    "rollout": "{\"durable_artifact_root\": \"/var/evidence\", \"enabled\": true, \"no_live_run_verification\": \"n\", \"operational_ruling\": \"r\", \"owner_branch_ruleset_evidence\": \"e\", \"publisher_spool\": {\"ssh_alias\": \"svc@host.example\", \"ssh_key\": \"/keys/id\"}, \"runner_identity\": \"crq-runner-app\"}"
+   }
+  },
+  {
+   "name": "limits-missing-key",
+   "outcome": {
+    "message": "'max_total_bytes'",
+    "raises": "KeyError"
+   },
+   "spec": {
+    "name": "limits-missing-key",
+    "policy": {
+     "limits": {
+      "max_file_bytes": 200000,
+      "max_files": 8,
+      "reviewer": {
+       "evidence": "docs/evidence.json",
+       "max_diff_bytes": 262144,
+       "max_files": 8,
+       "verified": true,
+       "version": "0.9.2"
+      },
+      "version": 1
+     }
+    },
+    "policy_files": {
+     "limits": "{\"version\": 1, \"max_files\": 8, \"max_file_bytes\": 200000, \"reviewer\": {\"verified\": true, \"version\": \"0.9.2\", \"max_files\": 8, \"max_diff_bytes\": 262144, \"evidence\": \"docs/evidence.json\"}}",
+     "required-list": "{\"version\": 1}",
+     "tiers": "{\"version\": 1}"
+    },
+    "rollout": "{\"durable_artifact_root\": \"/var/evidence\", \"enabled\": true, \"no_live_run_verification\": \"n\", \"operational_ruling\": \"r\", \"owner_branch_ruleset_evidence\": \"e\", \"publisher_spool\": {\"ssh_alias\": \"svc@host.example\", \"ssh_key\": \"/keys/id\"}, \"runner_identity\": \"crq-runner-app\"}"
+   }
+  },
+  {
+   "name": "limits-missing-reviewer",
+   "outcome": {
+    "message": "'reviewer'",
+    "raises": "KeyError"
+   },
+   "spec": {
+    "name": "limits-missing-reviewer",
+    "policy": {
+     "limits": {
+      "max_file_bytes": 200000,
+      "max_files": 8,
+      "max_total_bytes": 500000,
+      "version": 1
+     }
+    },
+    "policy_files": {
+     "limits": "{\"version\": 1, \"max_files\": 8, \"max_file_bytes\": 200000, \"max_total_bytes\": 500000}",
+     "required-list": "{\"version\": 1}",
+     "tiers": "{\"version\": 1}"
+    },
+    "rollout": "{\"durable_artifact_root\": \"/var/evidence\", \"enabled\": true, \"no_live_run_verification\": \"n\", \"operational_ruling\": \"r\", \"owner_branch_ruleset_evidence\": \"e\", \"publisher_spool\": {\"ssh_alias\": \"svc@host.example\", \"ssh_key\": \"/keys/id\"}, \"runner_identity\": \"crq-runner-app\"}"
+   }
+  },
+  {
+   "name": "tiers-missing",
+   "outcome": {
+    "message": "[Errno 2] No such file or directory: '<tmp>/policy/review-tiers.json'",
+    "raises": "FileNotFoundError"
+   },
+   "spec": {
+    "name": "tiers-missing",
+    "policy": {
+     "tiers": null
+    },
+    "policy_files": {
+     "limits": "{\"version\": 1, \"max_files\": 8, \"max_file_bytes\": 200000, \"max_total_bytes\": 500000, \"reviewer\": {\"verified\": true, \"version\": \"0.9.2\", \"max_files\": 8, \"max_diff_bytes\": 262144, \"evidence\": \"docs/evidence.json\"}}",
+     "required-list": "{\"version\": 1}",
+     "tiers": null
+    },
+    "rollout": "{\"durable_artifact_root\": \"/var/evidence\", \"enabled\": true, \"no_live_run_verification\": \"n\", \"operational_ruling\": \"r\", \"owner_branch_ruleset_evidence\": \"e\", \"publisher_spool\": {\"ssh_alias\": \"svc@host.example\", \"ssh_key\": \"/keys/id\"}, \"runner_identity\": \"crq-runner-app\"}"
+   }
+  },
+  {
+   "name": "required-list-malformed",
+   "outcome": {
+    "message": "Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
+    "raises": "JSONDecodeError"
+   },
+   "spec": {
+    "name": "required-list-malformed",
+    "policy": {
+     "required-list_text": "{"
+    },
+    "policy_files": {
+     "limits": "{\"version\": 1, \"max_files\": 8, \"max_file_bytes\": 200000, \"max_total_bytes\": 500000, \"reviewer\": {\"verified\": true, \"version\": \"0.9.2\", \"max_files\": 8, \"max_diff_bytes\": 262144, \"evidence\": \"docs/evidence.json\"}}",
+     "required-list": "{",
+     "tiers": "{\"version\": 1}"
+    },
+    "rollout": "{\"durable_artifact_root\": \"/var/evidence\", \"enabled\": true, \"no_live_run_verification\": \"n\", \"operational_ruling\": \"r\", \"owner_branch_ruleset_evidence\": \"e\", \"publisher_spool\": {\"ssh_alias\": \"svc@host.example\", \"ssh_key\": \"/keys/id\"}, \"runner_identity\": \"crq-runner-app\"}"
+   }
+  },
+  {
+   "name": "limits-not-consulted-when-disabled",
+   "outcome": {
+    "ok": false
+   },
+   "spec": {
+    "name": "limits-not-consulted-when-disabled",
+    "policy": {
+     "limits_text": "{"
+    },
+    "policy_files": {
+     "limits": "{",
+     "required-list": "{\"version\": 1}",
+     "tiers": "{\"version\": 1}"
+    },
+    "rollout": "{\"durable_artifact_root\": \"/var/evidence\", \"enabled\": false, \"no_live_run_verification\": \"n\", \"operational_ruling\": \"r\", \"owner_branch_ruleset_evidence\": \"e\", \"publisher_spool\": {\"ssh_alias\": \"svc@host.example\", \"ssh_key\": \"/keys/id\"}, \"runner_identity\": \"crq-runner-app\"}"
+   }
+  },
+  {
+   "name": "limits-not-consulted-when-absent",
+   "outcome": {
+    "ok": false
+   },
+   "spec": {
+    "name": "limits-not-consulted-when-absent",
+    "policy": {
+     "limits_text": "{"
+    },
+    "policy_files": {
+     "limits": "{",
+     "required-list": "{\"version\": 1}",
+     "tiers": "{\"version\": 1}"
+    },
+    "rollout": null
+   }
+  }
+ ],
+ "source": "apps/crq-python/crq.py:116,256,3172; apps/crq-python/backfill_runtime.py:37"
+}
