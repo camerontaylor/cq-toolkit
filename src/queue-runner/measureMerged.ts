@@ -117,7 +117,7 @@ async function renameMap(io: MeasureGit, a: string, b: string): Promise<Map<stri
 }
 
 /** `synth_paths(merge, mq)`. */
-async function synthPaths(io: MeasureGit, merge: string, mq: string): Promise<string[]> {
+export async function synthPaths(io: MeasureGit, merge: string, mq: string): Promise<string[]> {
   const names = new Set<string>();
   const text = await io.git(['diff', '--name-status', '--no-renames', `${merge}^1`, merge]);
   for (const line of pySplitlines(text)) {
