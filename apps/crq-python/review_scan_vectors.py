@@ -137,6 +137,8 @@ def build_cases() -> None:
                                                            "+one ", "+" + SECRET])
     add("a U+2028 in a hunk line opens a fake header and hides the next added line (Python weakness copied, #2389)", ["diff --git a/x b/x", "--- a/x", "+++ b/x", "@@ -1 +1 @@",
                                                          "+one diff --git a/evil b/evil", "+" + SECRET])
+    add("a U+0085 in a hunk line opens a fake header and hides the next added line (Python weakness copied, #2389)",
+        ["diff --git a/x b/x", "--- a/x", "+++ b/x", "@@ -1 +1 @@", "+one\u0085diff --git a/evil b/evil", "+" + SECRET])
     add("a U+2028 in a hunk line cannot open a hunk", ["diff --git a/x b/x", "--- a/x", "+++ b/x", "@@ -1 +1 @@",
                                                        "+one @@ -1 +1 @@", "+" + SECRET])
     add("a hunk line break then a label-like line", ["diff --git a/x b/x", "--- a/x", "+++ b/x", "@@ -1 +1 @@",

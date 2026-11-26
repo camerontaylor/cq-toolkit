@@ -80,7 +80,7 @@ export async function scanReviewDiff(
   // Two Python weaknesses are copied on purpose (parity; tracked in #2389, to be
   // fixed in both engines before any routing): (1) a quoted name is never decoded,
   // so path-scoped rules and exemptions never match it; (2) `splitlines` also cuts
-  // at U+2028/U+0085/etc., so a hunk line such as `+one<U+2028>diff --git a/x b/y`
+  // at U+2028/U+0085/etc., so a hunk line such as `+one<U+2028>diff --git a/x b/y` (or U+0085)
   // opens a fake header and the next added line is skipped unscanned (fail-open).
   for (const [index, line] of pythonSplitlines(input.diff).entries()) {
     const diffLine = index + 1;

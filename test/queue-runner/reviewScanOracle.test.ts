@@ -28,29 +28,33 @@ describe('review scan header parsing against the Python oracle', () => {
     expect(fixture.schema).toBe('cq.crq-review-scan-vector/v1');
     expect(fixture.cases.length).toBeGreaterThan(50);
   });
+  const scan = async (c: Case) => {
+    let report = '';
+    const loaded = c.exemptions === null ? null : loadScanExemptions(c.exemptions);
+    const decision = await scanReviewDiff(
+      {
+        patternsText: corpus,
+        diff: c.diff,
+        base: 'base',
+        head: 'head',
+        foreign: false,
+        extraClasses: [],
+        artifactPath: '/run/secret-scan.json',
+        ...(loaded ? { exemptions: loaded.entries, exemptionError: loaded.error } : {}),
+      },
+      {
+        match: matchReviewRegexBatch,
+        gitleaks: async () => ({ kind: 'not-run' }),
+        writeReport: async (text) => {
+          report = text;
+        },
+      },
+    );
+    return { decision, report };
+  };
   for (const c of fixture.cases) {
     it(c.name, async () => {
-      let report = '';
-      const loaded = c.exemptions === null ? null : loadScanExemptions(c.exemptions);
-      const decision = await scanReviewDiff(
-        {
-          patternsText: corpus,
-          diff: c.diff,
-          base: 'base',
-          head: 'head',
-          foreign: false,
-          extraClasses: [],
-          artifactPath: '/run/secret-scan.json',
-          ...(loaded ? { exemptions: loaded.entries, exemptionError: loaded.error } : {}),
-        },
-        {
-          match: matchReviewRegexBatch,
-          gitleaks: async () => ({ kind: 'not-run' }),
-          writeReport: async (text) => {
-            report = text;
-          },
-        },
-      );
+      const { decision, report } = await scan(c);
       expect(c.expected.error).toBeNull();
       expect(decision.clean).toBe(c.expected.ok);
       expect(report).toBe(c.expected.artifact);
@@ -60,11 +64,17 @@ describe('review scan header parsing against the Python oracle', () => {
   // The pre-#2385 TS guarded this (a logical fragment of hunk content is not a header);
   // Python does not, so the fixture records a CLEAN result: Python's fail-open weakness,
   // copied for parity and tracked in #2389. Fix both engines before any routing.
-  it('copies the Python U+2028 fake-header fail-open the old TS guard blocked (#2389)', () => {
-    const c = fixture.cases.find((x) =>
+  it('copies the Python U+2028/U+0085 fake-header fail-open the old TS guard blocked (#2389)', async () => {
+    const cases = fixture.cases.filter((x) =>
       x.name.includes('fake header and hides the next added line'),
     );
-    expect(c?.expected.ok).toBe(true);
-    expect(c?.diff).toContain('\u2028');
+    expect(cases.map((x) => x.name).length).toBe(2);
+    for (const c of cases) {
+      expect(c.diff).toMatch(/\u2028|\u0085/u);
+      const { decision } = await scan(c);
+      // The secret on the line after the fragment is NOT reported: Python's weakness, kept for parity.
+      expect(decision.clean).toBe(true);
+      expect(c.expected.ok).toBe(true);
+    }
   });
 });
