@@ -1,0 +1,280 @@
+{
+ "cases": [
+  {
+   "item": {
+    "kind": "push-current",
+    "subject": {
+     "base": "abc",
+     "head": "def"
+    }
+   },
+   "name": "push reads the subject base",
+   "result": {
+    "spec": "abc"
+   }
+  },
+  {
+   "item": {
+    "kind": "merged-current",
+    "subject": {
+     "merge_sha": "m1"
+    }
+   },
+   "name": "receipt reads the merge first parent",
+   "result": {
+    "spec": "m1^1"
+   }
+  },
+  {
+   "item": {
+    "kind": "merged-current",
+    "subject": {
+     "base": "x"
+    }
+   },
+   "name": "receipt without merge_sha is none",
+   "result": {
+    "spec": null
+   }
+  },
+  {
+   "item": {
+    "kind": "merged-current",
+    "subject": {
+     "merge_sha": ""
+    }
+   },
+   "name": "receipt with empty merge_sha is none",
+   "result": {
+    "spec": null
+   }
+  },
+  {
+   "item": {
+    "kind": "push-current",
+    "subject": {}
+   },
+   "name": "push with empty subject is none",
+   "result": {
+    "spec": null
+   }
+  },
+  {
+   "item": {
+    "kind": "push-current",
+    "subject": {
+     "base": 7
+    }
+   },
+   "name": "push with a non-string base is none",
+   "result": {
+    "spec": null
+   }
+  },
+  {
+   "item": {
+    "kind": "push-current",
+    "subject": {
+     "base": ""
+    }
+   },
+   "name": "push with an empty base is none",
+   "result": {
+    "spec": null
+   }
+  },
+  {
+   "item": {
+    "kind": "push-current"
+   },
+   "name": "push without a subject is none",
+   "result": {
+    "spec": null
+   }
+  },
+  {
+   "item": {
+    "kind": "push-current",
+    "subject": null
+   },
+   "name": "push with a null subject is none",
+   "result": {
+    "spec": null
+   }
+  },
+  {
+   "item": {
+    "kind": "open",
+    "subject": {
+     "base": "abc"
+    }
+   },
+   "name": "other kinds are none",
+   "result": {
+    "spec": null
+   }
+  },
+  {
+   "item": {
+    "kind": "merged-current",
+    "subject": {
+     "merge_sha": 5
+    }
+   },
+   "name": "a truthy non-string merge_sha is a TypeError",
+   "result": {
+    "raises": "TypeError"
+   }
+  },
+  {
+   "item": {
+    "kind": "merged-current",
+    "subject": {
+     "merge_sha": [
+      "m"
+     ]
+    }
+   },
+   "name": "a list merge_sha is a TypeError",
+   "result": {
+    "raises": "TypeError"
+   }
+  },
+  {
+   "item": {
+    "kind": "push-current",
+    "subject": "base"
+   },
+   "name": "push with a non-empty string subject raises AttributeError",
+   "result": {
+    "raises": "AttributeError"
+   }
+  },
+  {
+   "item": {
+    "kind": "merged-current",
+    "subject": "base"
+   },
+   "name": "receipt with a non-empty string subject raises AttributeError",
+   "result": {
+    "raises": "AttributeError"
+   }
+  },
+  {
+   "item": {
+    "kind": "push-current",
+    "subject": [
+     "base"
+    ]
+   },
+   "name": "push with a non-empty list subject raises AttributeError",
+   "result": {
+    "raises": "AttributeError"
+   }
+  },
+  {
+   "item": {
+    "kind": "merged-current",
+    "subject": [
+     "base"
+    ]
+   },
+   "name": "receipt with a non-empty list subject raises AttributeError",
+   "result": {
+    "raises": "AttributeError"
+   }
+  },
+  {
+   "item": {
+    "kind": "push-current",
+    "subject": 3
+   },
+   "name": "push with a non-zero number subject raises AttributeError",
+   "result": {
+    "raises": "AttributeError"
+   }
+  },
+  {
+   "item": {
+    "kind": "merged-current",
+    "subject": 3
+   },
+   "name": "receipt with a non-zero number subject raises AttributeError",
+   "result": {
+    "raises": "AttributeError"
+   }
+  },
+  {
+   "item": {
+    "kind": "push-current",
+    "subject": true
+   },
+   "name": "push with true subject raises AttributeError",
+   "result": {
+    "raises": "AttributeError"
+   }
+  },
+  {
+   "item": {
+    "kind": "merged-current",
+    "subject": true
+   },
+   "name": "receipt with true subject raises AttributeError",
+   "result": {
+    "raises": "AttributeError"
+   }
+  },
+  {
+   "item": {
+    "kind": "push-current",
+    "subject": ""
+   },
+   "name": "push with an empty string subject is none",
+   "result": {
+    "spec": null
+   }
+  },
+  {
+   "item": {
+    "kind": "push-current",
+    "subject": []
+   },
+   "name": "push with an empty list subject is none",
+   "result": {
+    "spec": null
+   }
+  },
+  {
+   "item": {
+    "kind": "push-current",
+    "subject": 0
+   },
+   "name": "push with zero subject is none",
+   "result": {
+    "spec": null
+   }
+  },
+  {
+   "item": {
+    "kind": "push-current",
+    "subject": false
+   },
+   "name": "push with false subject is none",
+   "result": {
+    "spec": null
+   }
+  },
+  {
+   "item": {
+    "kind": "open",
+    "subject": "base"
+   },
+   "name": "a non-dict subject is never read by other kinds",
+   "result": {
+    "spec": null
+   }
+  }
+ ],
+ "schema": "cq.crq-exemption-base-vector/v1",
+ "source": "apps/crq-python/crq.py"
+}

@@ -70,8 +70,15 @@ function spawn(cwd: string, args: readonly string[], timeout: number): Completed
   const done = spawnSync('git', [...args], { cwd, timeout, maxBuffer: 1 << 30 });
   if (done.error) {
     const code = (done.error as NodeJS.ErrnoException).code;
-    if (code === 'ETIMEDOUT') throw new PyError('RuntimeError', 'git command timed out');
-    throw new PyError('OSError', done.error.message);
+    // `subprocess.run(timeout=...)` raises `TimeoutExpired`, a `SubprocessError`.
+    if (code === 'ETIMEDOUT') {
+      throw new PyError(
+        'TimeoutExpired',
+        `Command '['git', ${args.map((a) => `'${a}'`).join(', ')}]' timed out after ${timeout / 1000} seconds`,
+      );
+    }
+    // A missing `git` binary is `FileNotFoundError` (an `OSError`) in Python.
+    throw new PyError(code === 'ENOENT' ? 'FileNotFoundError' : 'OSError', done.error.message);
   }
   return { status: done.status ?? -1, stdout: done.stdout, stderr: done.stderr };
 }

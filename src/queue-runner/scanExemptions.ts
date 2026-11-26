@@ -11,6 +11,8 @@
  * more than Python's full `tomllib`, never less.
  */
 import { pythonUnicode16Space } from '../policy/crq/pythonUnicode16.js';
+import { pyTruthy } from '../policy/crq/queueDoc.js';
+import { PyError } from './pyErrors.js';
 import { REVIEW_RECEIPT_KIND } from '../policy/crq/tickSchedule.js';
 
 export const SCAN_EXEMPTIONS_PATH = '.crq/scan-exemptions.toml';
@@ -320,27 +322,26 @@ export function exemptionBaseSpec(item: {
   readonly kind?: unknown;
   readonly subject?: unknown;
 }): string | null {
-  const subject =
-    typeof item.subject === 'object' && item.subject !== null && !Array.isArray(item.subject)
-      ? (item.subject as Record<string, unknown>)
-      : {};
+  // `item.get("subject") or {}`: a falsy subject is empty, a truthy non-dict one
+  // fails at `subject.get(...)`, but only on the two kinds that read it.
+  const subject = pyTruthy(item.subject) ? item.subject : {};
+  const isPush = item.kind === 'push-current';
+  const isReceipt = item.kind === REVIEW_RECEIPT_KIND;
+  if (
+    (isPush || isReceipt) &&
+    (typeof subject !== 'object' || subject === null || Array.isArray(subject))
+  ) {
+    throw new PyError('AttributeError', 'subject has no attribute get');
+  }
+  const fields = subject as Record<string, unknown>;
   let spec: unknown;
-  if (item.kind === 'push-current') spec = subject.base;
-  else if (item.kind === REVIEW_RECEIPT_KIND && truthy(subject.merge_sha)) {
+  if (isPush) spec = fields.base;
+  else if (isReceipt && pyTruthy(fields.merge_sha)) {
     // Python `subject["merge_sha"] + "^1"` raises TypeError on a non-string.
-    if (typeof subject.merge_sha !== 'string') throw new TypeError('merge_sha must be a string');
-    spec = `${subject.merge_sha}^1`;
+    if (typeof fields.merge_sha !== 'string') throw new TypeError('merge_sha must be a string');
+    spec = `${fields.merge_sha}^1`;
   } else return null;
   return typeof spec === 'string' && spec !== '' ? spec : null;
-}
-
-/** Python truthiness for a JSON value (`subject.get("merge_sha")` in an `and`). */
-function truthy(value: unknown): boolean {
-  if (value === null || value === undefined || value === false || value === 0 || value === '')
-    return false;
-  if (Array.isArray(value)) return value.length > 0;
-  if (typeof value === 'object') return Object.keys(value).length > 0;
-  return true;
 }
 
 /**

@@ -2883,6 +2883,206 @@
     {
       "evidence_entries": 1,
       "leftover_capture_dirs": [],
+      "name": "untracked multi-byte name over 100 bytes, under 100 characters",
+      "options": {},
+      "repo": [
+        [
+          "git",
+          "init",
+          "-q",
+          "-b",
+          "main"
+        ],
+        [
+          "write",
+          "a.txt",
+          "one\n"
+        ],
+        [
+          "commit_all",
+          "base"
+        ],
+        [
+          "mark",
+          "c0"
+        ],
+        [
+          "write",
+          "\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9.txt",
+          "m\n"
+        ]
+      ],
+      "result": "<snapshot>",
+      "second_capture_reuses_snapshot": true,
+      "snapshot": {
+        "bundle_empty": true,
+        "bundle_heads": null,
+        "digests_consistent": true,
+        "dir_mode": 448,
+        "files": [
+          "commits.bundle",
+          "committed.patch",
+          "manifest.json",
+          "staged.patch",
+          "unstaged.patch",
+          "untracked.tar"
+        ],
+        "manifest": {
+          "base": "{c0}",
+          "commits": [],
+          "head": "{c0}",
+          "sha256": {
+            "commits.bundle": "<sha256>",
+            "committed.patch": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "staged.patch": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "unstaged.patch": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "untracked.tar": "<sha256>"
+          },
+          "untracked": [
+            "\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9.txt"
+          ]
+        },
+        "manifest_key_order": [
+          "base",
+          "head",
+          "commits",
+          "untracked",
+          "sha256"
+        ],
+        "manifest_mode": 384,
+        "manifest_sha256_key_order": [
+          "staged.patch",
+          "unstaged.patch",
+          "committed.patch",
+          "untracked.tar",
+          "commits.bundle"
+        ],
+        "manifest_text_matches_atomic": true,
+        "named_by_manifest": true,
+        "patches": {
+          "committed.patch": "",
+          "staged.patch": "",
+          "unstaged.patch": ""
+        },
+        "tar": [
+          {
+            "linkname": "",
+            "mode": 420,
+            "name": "\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9.txt",
+            "sha256": "01a60e35df88d8b49546cb3f8f4ba4f406870f9b8e1f394c9d48ab73548d748d",
+            "size": 2,
+            "type": "0"
+          }
+        ]
+      },
+      "tree_unchanged": true,
+      "untracked_directories": {
+        "result": []
+      }
+    },
+    {
+      "evidence_entries": 1,
+      "leftover_capture_dirs": [],
+      "name": "untracked astral-plane name over 100 bytes",
+      "options": {},
+      "repo": [
+        [
+          "git",
+          "init",
+          "-q",
+          "-b",
+          "main"
+        ],
+        [
+          "write",
+          "a.txt",
+          "one\n"
+        ],
+        [
+          "commit_all",
+          "base"
+        ],
+        [
+          "mark",
+          "c0"
+        ],
+        [
+          "write",
+          "\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00.txt",
+          "m\n"
+        ]
+      ],
+      "result": "<snapshot>",
+      "second_capture_reuses_snapshot": true,
+      "snapshot": {
+        "bundle_empty": true,
+        "bundle_heads": null,
+        "digests_consistent": true,
+        "dir_mode": 448,
+        "files": [
+          "commits.bundle",
+          "committed.patch",
+          "manifest.json",
+          "staged.patch",
+          "unstaged.patch",
+          "untracked.tar"
+        ],
+        "manifest": {
+          "base": "{c0}",
+          "commits": [],
+          "head": "{c0}",
+          "sha256": {
+            "commits.bundle": "<sha256>",
+            "committed.patch": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "staged.patch": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "unstaged.patch": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "untracked.tar": "<sha256>"
+          },
+          "untracked": [
+            "\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00.txt"
+          ]
+        },
+        "manifest_key_order": [
+          "base",
+          "head",
+          "commits",
+          "untracked",
+          "sha256"
+        ],
+        "manifest_mode": 384,
+        "manifest_sha256_key_order": [
+          "staged.patch",
+          "unstaged.patch",
+          "committed.patch",
+          "untracked.tar",
+          "commits.bundle"
+        ],
+        "manifest_text_matches_atomic": true,
+        "named_by_manifest": true,
+        "patches": {
+          "committed.patch": "",
+          "staged.patch": "",
+          "unstaged.patch": ""
+        },
+        "tar": [
+          {
+            "linkname": "",
+            "mode": 420,
+            "name": "\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00.txt",
+            "sha256": "01a60e35df88d8b49546cb3f8f4ba4f406870f9b8e1f394c9d48ab73548d748d",
+            "size": 2,
+            "type": "0"
+          }
+        ]
+      },
+      "tree_unchanged": true,
+      "untracked_directories": {
+        "result": []
+      }
+    },
+    {
+      "evidence_entries": 1,
+      "leftover_capture_dirs": [],
       "name": "untracked hard link becomes a link entry",
       "options": {},
       "repo": [

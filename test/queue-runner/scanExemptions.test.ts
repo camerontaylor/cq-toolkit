@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { isPyError } from '../../src/queue-runner/pyErrors.js';
 import {
   acceptExemptionBase,
   exemptionBaseSpec,
@@ -320,6 +322,37 @@ describe('exemption base for projected scans (crq.exemption_base)', () => {
     expect(() => exemptionBaseSpec({ kind: 'merged-current', subject: { merge_sha: 5 } })).toThrow(
       TypeError,
     );
+  });
+
+  it('matches the production crq.exemption_base on every recorded item, errors included', () => {
+    const { cases } = JSON.parse(
+      readFileSync(
+        new URL('../../apps/crq-python/fixtures/crq-exemption-base/cases.json', import.meta.url),
+        'utf8',
+      ),
+    ) as {
+      cases: {
+        name: string;
+        item: { kind?: unknown; subject?: unknown };
+        result: { spec?: string | null; raises?: string };
+      }[];
+    };
+    expect(cases.length).toBeGreaterThan(20);
+    for (const { name, item, result } of cases) {
+      if (result.raises === undefined) {
+        expect([name, exemptionBaseSpec(item)]).toEqual([name, result.spec]);
+      } else if (result.raises === 'TypeError') {
+        expect(() => exemptionBaseSpec(item), name).toThrow(TypeError);
+      } else {
+        let thrown: unknown;
+        try {
+          exemptionBaseSpec(item);
+        } catch (e) {
+          thrown = e;
+        }
+        expect(isPyError(thrown, result.raises as 'AttributeError'), name).toBe(true);
+      }
+    }
   });
 
   it('accepts only a full object id, not the spec rev-parse echoes on failure', () => {

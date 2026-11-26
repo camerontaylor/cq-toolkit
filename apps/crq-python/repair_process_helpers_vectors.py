@@ -584,6 +584,12 @@ def retain_cases() -> list[dict]:
         ("untracked non-ASCII and spaced names", base_steps(["write", "café ☃.txt", "u\n"],
                                                             ["write", "a b.txt", "s\n"]), {}),
         ("untracked name over 100 characters", base_steps(["write", long_name, "long\n"]), {}),
+        # 60 characters but 120 UTF-8 bytes: a PAX path record is due because the name
+        # is non-ASCII, and the ustar field must be `?`-replaced per code point.
+        ("untracked multi-byte name over 100 bytes, under 100 characters",
+         base_steps(["write", "é" * 60 + ".txt", "m\n"]), {}),
+        ("untracked astral-plane name over 100 bytes",
+         base_steps(["write", "😀" * 30 + ".txt", "m\n"]), {}),
         ("untracked hard link becomes a link entry", base_steps(["write", "h1.txt", "same\n"],
                                                                 ["link", "h1.txt", "h2.txt"]), {}),
         ("ignored files are not archived", base_steps(["write", ".gitignore", "*.log\n"],
