@@ -702,4 +702,34 @@ describe('repair transport seams', () => {
     expect(saved.length).toBe(1);
     expect(saved[0]?.startsWith('bound:')).toBe(true);
   });
+
+  test('one refused accept does not latch the serialization chain for later accepts', async () => {
+    const spec = caseSpec('accept-ceiling-custom-one');
+    const rig = await build(
+      new JsonObject([
+        ...spec.entries.filter(([key]) => key !== 'queue'),
+        ['queue', new JsonObject([['items', []]])],
+      ]),
+    );
+    const step = obj(arr(spec.get('steps'), 'steps')[0], 'step');
+    const [key, request] = arr(step.get('args'), 'args') as [JsonValue, JsonValue];
+    let clean = false;
+    const accept = makeRepairTransport({
+      files: rig.files,
+      cell: rig.cell,
+      async saveQueue() {},
+      maxRoundsPerPin: JsonNumber.int(5),
+      async scan() {
+        return clean;
+      },
+      async scanFinding() {
+        return true;
+      },
+    });
+    const refused = await accept(key, request).catch((error: unknown) => error);
+    expect((refused as Error).message).toBe('repair source secret scan rejected');
+    clean = true;
+    const done = await accept(key, request);
+    expect(done).toBeInstanceOf(JsonObject);
+  });
 });

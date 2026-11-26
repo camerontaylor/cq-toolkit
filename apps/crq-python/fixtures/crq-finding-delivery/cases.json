@@ -16600,6 +16600,630 @@
    }
   },
   {
+   "name": "retry-patch-header-after-200000-cap-not-listed",
+   "result": {
+    "steps": [
+     {
+      "calls": [
+       [
+        "transport",
+        "5c52e1b3919ff7530301e733209d03c08ab5ed2f11e00523e1812130518d1140",
+        "{\"canonical_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"body\":\"Body\",\"id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"intervals\":[[1,2]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"Title\"},\"finding_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"intervals\":[[1,2]],\"path\":\"src/a.ts\",\"prior_repair_task\":\"crq-backfill-7777777777777777777777777777777777777777777777777777777777777777\",\"retry_instructions\":\"Prior attempt reason: needs work\\nRetained diff summary: retained diff bytes committed/staged/unstaged: 200153/0/0; 1 untracked paths; changed paths: a/early b/early\",\"review_id\":\"9999999999999999999999999999999999999999999999999999999999999999\",\"target\":\"1111111111111111111111111111111111111111\"}"
+       ]
+      ],
+      "delivery": {
+       "5c52e1b3919ff7530301e733209d03c08ab5ed2f11e00523e1812130518d1140": "{\"canonical_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"body\":\"Body\",\"id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"intervals\":[[1,2]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"Title\"},\"finding_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"intervals\":[[1,2]],\"path\":\"src/a.ts\",\"prior_repair_task\":\"crq-backfill-7777777777777777777777777777777777777777777777777777777777777777\",\"retry_instructions\":\"Prior attempt reason: needs work\\nRetained diff summary: retained diff bytes committed/staged/unstaged: 200153/0/0; 1 untracked paths; changed paths: a/early b/early\",\"review_id\":\"9999999999999999999999999999999999999999999999999999999999999999\",\"target\":\"1111111111111111111111111111111111111111\"}"
+      },
+      "digests": {
+       "state/backfill/findings/delivery/5c52e1b3919ff7530301e733209d03c08ab5ed2f11e00523e1812130518d1140.json": "e827f17c2a7ac2c9cb8f3e11c0ae59c7d04dd00e28bed53f17b5eb11e1d870aa",
+       "state/backfill/findings/receipts/5c52e1b3919ff7530301e733209d03c08ab5ed2f11e00523e1812130518d1140.json": "d26de399ba33c654c71f46c025febe847566f59c90d3af75133224decf870492",
+       "state/backfill/findings/triage/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.json": "6803413568efb7f59750f56613eb61124f02f9efcee01bcf17a7e749247d6c9b",
+       "state/backfill/publication/pending/6f4bdfc2f1e2df12188f4cbb3828fcb4d023a0f98af7dbbba9a3b3f94b71450f.json": "2097b8de91ed509fb6d30d00b58c35d4778a5b6f8de33fe0eb534569f21ef445",
+       "state/backfill/publication/pending/7a0c33d57204c62a229aa571e09c4b9785cc3d5ddef8a2591578c4b8d1ab5b6f.json": "5ba75f779eee2d91a85640766f98531a34e6b0461e045883e05af7ef5683ed26",
+       "state/repair/crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-5c4bb7dca5050c1dfea661ccd8377245ec3aa1f9c4095000becdf079d811ec29/committed.patch": "64697fd15f2b5cee172d79118b7ae59eda35fe5527b344b1acbffda5e3446925",
+       "state/repair/crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-5c4bb7dca5050c1dfea661ccd8377245ec3aa1f9c4095000becdf079d811ec29/manifest.json": "5c4bb7dca5050c1dfea661ccd8377245ec3aa1f9c4095000becdf079d811ec29",
+       "state/repair/crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-5c4bb7dca5050c1dfea661ccd8377245ec3aa1f9c4095000becdf079d811ec29/staged.patch": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+       "state/repair/crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-5c4bb7dca5050c1dfea661ccd8377245ec3aa1f9c4095000becdf079d811ec29/unstaged.patch": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "outside_untouched": true,
+      "pending": {
+       "6f4bdfc2f1e2df12188f4cbb3828fcb4d023a0f98af7dbbba9a3b3f94b71450f": "{\"event_type\":\"finding-event\",\"id\":\"6f4bdfc2f1e2df12188f4cbb3828fcb4d023a0f98af7dbbba9a3b3f94b71450f\",\"occurred_at\":\"2026-10-30T00:00:00Z\",\"payload\":{\"action\":\"delivered\",\"actor\":\"crq-repair-adapter\",\"evidence\":{\"acknowledgement\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"repair_task\":\"crq-backfill-7777777777777777777777777777777777777777777777777777777777777777\"},\"finding_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"previous_event_id\":\"7a0c33d57204c62a229aa571e09c4b9785cc3d5ddef8a2591578c4b8d1ab5b6f\",\"review_id\":\"9999999999999999999999999999999999999999999999999999999999999999\"},\"schema\":\"cq.review-ledger/v1\",\"source_key\":\"delivery:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee:5c52e1b3919ff7530301e733209d03c08ab5ed2f11e00523e1812130518d1140\"}",
+       "7a0c33d57204c62a229aa571e09c4b9785cc3d5ddef8a2591578c4b8d1ab5b6f": "{\"event_type\":\"finding-event\",\"id\":\"7a0c33d57204c62a229aa571e09c4b9785cc3d5ddef8a2591578c4b8d1ab5b6f\",\"occurred_at\":\"2026-10-30T00:00:00Z\",\"payload\":{\"action\":\"needs-human\",\"actor\":\"crq-repair\",\"evidence\":{\"reason\":\"needs work\",\"repair_base\":\"1111111111111111111111111111111111111111\",\"repair_task\":\"crq-backfill-7777777777777777777777777777777777777777777777777777777777777777\"},\"finding_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"previous_event_id\":\"p0\",\"review_id\":\"9999999999999999999999999999999999999999999999999999999999999999\"},\"schema\":\"cq.review-ledger/v1\",\"source_key\":\"k0\"}"
+      },
+      "queue": "{\"items\":[]}",
+      "queue_saves": [],
+      "receipts": {
+       "5c52e1b3919ff7530301e733209d03c08ab5ed2f11e00523e1812130518d1140": "{\"acknowledgement\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"repair_task\":\"crq-backfill-7777777777777777777777777777777777777777777777777777777777777777\"}"
+      },
+      "repair_inbox": {},
+      "returns": "{\"acknowledgement\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"repair_task\":\"crq-backfill-7777777777777777777777777777777777777777777777777777777777777777\"}",
+      "rows": {
+       "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee": "{\"canonical_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"body\":\"Body\",\"id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"intervals\":[[1,2]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"Title\"},\"mapped_intervals\":[[1,2]],\"mapped_path\":\"src/a.ts\",\"previous_event_id\":\"6f4bdfc2f1e2df12188f4cbb3828fcb4d023a0f98af7dbbba9a3b3f94b71450f\",\"receipt\":{\"acknowledgement\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"repair_task\":\"crq-backfill-7777777777777777777777777777777777777777777777777777777777777777\"},\"review_id\":\"9999999999999999999999999999999999999999999999999999999999999999\",\"status\":\"delivered\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"target_current\":\"1111111111111111111111111111111111111111\"}"
+      },
+      "trace": [
+       "retained",
+       "lock:findings.lock",
+       "unlock:findings.lock",
+       "lock:findings.lock",
+       "retained",
+       "write:delivery/5c52e1b3919ff7530301e733209d03c08ab5ed2f11e00523e1812130518d1140.json",
+       "write:receipts/5c52e1b3919ff7530301e733209d03c08ab5ed2f11e00523e1812130518d1140.json",
+       "spool",
+       "lock:outbox.lock",
+       "write:pending/6f4bdfc2f1e2df12188f4cbb3828fcb4d023a0f98af7dbbba9a3b3f94b71450f.json",
+       "unlock:outbox.lock",
+       "write:triage/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.json",
+       "unlock:findings.lock"
+      ],
+      "tree": [
+       "state/backfill/findings/delivery/5c52e1b3919ff7530301e733209d03c08ab5ed2f11e00523e1812130518d1140.json",
+       "state/backfill/findings/receipts/5c52e1b3919ff7530301e733209d03c08ab5ed2f11e00523e1812130518d1140.json",
+       "state/backfill/findings/triage/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.json",
+       "state/backfill/publication/pending/6f4bdfc2f1e2df12188f4cbb3828fcb4d023a0f98af7dbbba9a3b3f94b71450f.json",
+       "state/backfill/publication/pending/7a0c33d57204c62a229aa571e09c4b9785cc3d5ddef8a2591578c4b8d1ab5b6f.json",
+       "state/repair/crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-5c4bb7dca5050c1dfea661ccd8377245ec3aa1f9c4095000becdf079d811ec29/committed.patch",
+       "state/repair/crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-5c4bb7dca5050c1dfea661ccd8377245ec3aa1f9c4095000becdf079d811ec29/manifest.json",
+       "state/repair/crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-5c4bb7dca5050c1dfea661ccd8377245ec3aa1f9c4095000becdf079d811ec29/staged.patch",
+       "state/repair/crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-5c4bb7dca5050c1dfea661ccd8377245ec3aa1f9c4095000becdf079d811ec29/unstaged.patch"
+      ]
+     }
+    ]
+   },
+   "spec": {
+    "inbox": {},
+    "repair_files": {
+     "crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-5c4bb7dca5050c1dfea661ccd8377245ec3aa1f9c4095000becdf079d811ec29/committed.patch": {
+      "rle": [
+       [
+        100,
+        1
+       ],
+       [
+        105,
+        1
+       ],
+       [
+        102,
+        2
+       ],
+       [
+        32,
+        1
+       ],
+       [
+        45,
+        2
+       ],
+       [
+        103,
+        1
+       ],
+       [
+        105,
+        1
+       ],
+       [
+        116,
+        1
+       ],
+       [
+        32,
+        1
+       ],
+       [
+        97,
+        1
+       ],
+       [
+        47,
+        1
+       ],
+       [
+        101,
+        1
+       ],
+       [
+        97,
+        1
+       ],
+       [
+        114,
+        1
+       ],
+       [
+        108,
+        1
+       ],
+       [
+        121,
+        1
+       ],
+       [
+        32,
+        1
+       ],
+       [
+        98,
+        1
+       ],
+       [
+        47,
+        1
+       ],
+       [
+        101,
+        1
+       ],
+       [
+        97,
+        1
+       ],
+       [
+        114,
+        1
+       ],
+       [
+        108,
+        1
+       ],
+       [
+        121,
+        1
+       ],
+       [
+        10,
+        1
+       ],
+       [
+        122,
+        200100
+       ],
+       [
+        10,
+        1
+       ],
+       [
+        100,
+        1
+       ],
+       [
+        105,
+        1
+       ],
+       [
+        102,
+        2
+       ],
+       [
+        32,
+        1
+       ],
+       [
+        45,
+        2
+       ],
+       [
+        103,
+        1
+       ],
+       [
+        105,
+        1
+       ],
+       [
+        116,
+        1
+       ],
+       [
+        32,
+        1
+       ],
+       [
+        97,
+        1
+       ],
+       [
+        47,
+        1
+       ],
+       [
+        108,
+        1
+       ],
+       [
+        97,
+        1
+       ],
+       [
+        116,
+        1
+       ],
+       [
+        101,
+        1
+       ],
+       [
+        32,
+        1
+       ],
+       [
+        98,
+        1
+       ],
+       [
+        47,
+        1
+       ],
+       [
+        108,
+        1
+       ],
+       [
+        97,
+        1
+       ],
+       [
+        116,
+        1
+       ],
+       [
+        101,
+        1
+       ],
+       [
+        10,
+        1
+       ]
+      ]
+     },
+     "crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-5c4bb7dca5050c1dfea661ccd8377245ec3aa1f9c4095000becdf079d811ec29/manifest.json": {
+      "base": "1111111111111111111111111111111111111111",
+      "sha256": {
+       "committed.patch": "64697fd15f2b5cee172d79118b7ae59eda35fe5527b344b1acbffda5e3446925",
+       "staged.patch": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+       "unstaged.patch": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "untracked": [
+       "new.txt"
+      ]
+     },
+     "crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-5c4bb7dca5050c1dfea661ccd8377245ec3aa1f9c4095000becdf079d811ec29/staged.patch": {
+      "raw_hex": ""
+     },
+     "crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-5c4bb7dca5050c1dfea661ccd8377245ec3aa1f9c4095000becdf079d811ec29/unstaged.patch": {
+      "raw_hex": ""
+     }
+    },
+    "retained": [
+     {
+      "event_type": "finding-event",
+      "id": "7a0c33d57204c62a229aa571e09c4b9785cc3d5ddef8a2591578c4b8d1ab5b6f",
+      "occurred_at": "2026-10-30T00:00:00Z",
+      "payload": {
+       "action": "needs-human",
+       "actor": "crq-repair",
+       "evidence": {
+        "reason": "needs work",
+        "repair_base": "1111111111111111111111111111111111111111",
+        "repair_task": "crq-backfill-7777777777777777777777777777777777777777777777777777777777777777"
+       },
+       "finding_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+       "previous_event_id": "p0",
+       "review_id": "9999999999999999999999999999999999999999999999999999999999999999"
+      },
+      "schema": "cq.review-ledger/v1",
+      "source_key": "k0"
+     }
+    ],
+    "rows": {
+     "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee": {
+      "canonical_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "finding": {
+       "anchor_status": "verified",
+       "blob": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+       "body": "Body",
+       "id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+       "intervals": [
+        [
+         1,
+         2
+        ]
+       ],
+       "path": "src/a.ts",
+       "severity": "major",
+       "source_id": null,
+       "status": "untriaged",
+       "title": "Title"
+      },
+      "mapped_intervals": [
+       [
+        1,
+        2
+       ]
+      ],
+      "mapped_path": "src/a.ts",
+      "previous_event_id": "7a0c33d57204c62a229aa571e09c4b9785cc3d5ddef8a2591578c4b8d1ab5b6f",
+      "receipt": {
+       "acknowledgement": "8888888888888888888888888888888888888888888888888888888888888888",
+       "repair_task": "crq-backfill-7777777777777777777777777777777777777777777777777777777777777777"
+      },
+      "review_id": "9999999999999999999999999999999999999999999999999999999999999999",
+      "status": "confirmed",
+      "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "target_current": "1111111111111111111111111111111111111111"
+     }
+    },
+    "steps": [
+     {
+      "args": [
+       "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+       "2026-10-30T00:00:00Z"
+      ],
+      "method": "deliver",
+      "transport": {
+       "mode": "stub",
+       "receipt": {
+        "acknowledgement": "8888888888888888888888888888888888888888888888888888888888888888",
+        "repair_task": "crq-backfill-7777777777777777777777777777777777777777777777777777777777777777"
+       }
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "retry-patch-header-in-last-cap-byte-listed",
+   "result": {
+    "steps": [
+     {
+      "calls": [
+       [
+        "transport",
+        "5c52e1b3919ff7530301e733209d03c08ab5ed2f11e00523e1812130518d1140",
+        "{\"canonical_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"body\":\"Body\",\"id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"intervals\":[[1,2]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"Title\"},\"finding_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"intervals\":[[1,2]],\"path\":\"src/a.ts\",\"prior_repair_task\":\"crq-backfill-7777777777777777777777777777777777777777777777777777777777777777\",\"retry_instructions\":\"Prior attempt reason: needs work\\nRetained diff summary: retained diff bytes committed/staged/unstaged: 200092/0/0; 1 untracked paths; changed paths: a/x b/x\",\"review_id\":\"9999999999999999999999999999999999999999999999999999999999999999\",\"target\":\"1111111111111111111111111111111111111111\"}"
+       ]
+      ],
+      "delivery": {
+       "5c52e1b3919ff7530301e733209d03c08ab5ed2f11e00523e1812130518d1140": "{\"canonical_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"body\":\"Body\",\"id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"intervals\":[[1,2]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"Title\"},\"finding_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"intervals\":[[1,2]],\"path\":\"src/a.ts\",\"prior_repair_task\":\"crq-backfill-7777777777777777777777777777777777777777777777777777777777777777\",\"retry_instructions\":\"Prior attempt reason: needs work\\nRetained diff summary: retained diff bytes committed/staged/unstaged: 200092/0/0; 1 untracked paths; changed paths: a/x b/x\",\"review_id\":\"9999999999999999999999999999999999999999999999999999999999999999\",\"target\":\"1111111111111111111111111111111111111111\"}"
+      },
+      "digests": {
+       "state/backfill/findings/delivery/5c52e1b3919ff7530301e733209d03c08ab5ed2f11e00523e1812130518d1140.json": "3ad1646ef8a3d35f56d722766975a2ac845ef0c24510a8a878c2ce10d5dd499a",
+       "state/backfill/findings/receipts/5c52e1b3919ff7530301e733209d03c08ab5ed2f11e00523e1812130518d1140.json": "d26de399ba33c654c71f46c025febe847566f59c90d3af75133224decf870492",
+       "state/backfill/findings/triage/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.json": "6803413568efb7f59750f56613eb61124f02f9efcee01bcf17a7e749247d6c9b",
+       "state/backfill/publication/pending/6f4bdfc2f1e2df12188f4cbb3828fcb4d023a0f98af7dbbba9a3b3f94b71450f.json": "2097b8de91ed509fb6d30d00b58c35d4778a5b6f8de33fe0eb534569f21ef445",
+       "state/backfill/publication/pending/7a0c33d57204c62a229aa571e09c4b9785cc3d5ddef8a2591578c4b8d1ab5b6f.json": "5ba75f779eee2d91a85640766f98531a34e6b0461e045883e05af7ef5683ed26",
+       "state/repair/crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-0ae9a5ee543f1b7375f466790aeeb9d756cb60ec4513aac2557237a1508b99bf/committed.patch": "a0e8cef01a07724335d3fe80b19dcc7c8be45bf1322c06ebcd0e316cde47ce13",
+       "state/repair/crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-0ae9a5ee543f1b7375f466790aeeb9d756cb60ec4513aac2557237a1508b99bf/manifest.json": "0ae9a5ee543f1b7375f466790aeeb9d756cb60ec4513aac2557237a1508b99bf",
+       "state/repair/crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-0ae9a5ee543f1b7375f466790aeeb9d756cb60ec4513aac2557237a1508b99bf/staged.patch": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+       "state/repair/crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-0ae9a5ee543f1b7375f466790aeeb9d756cb60ec4513aac2557237a1508b99bf/unstaged.patch": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "outside_untouched": true,
+      "pending": {
+       "6f4bdfc2f1e2df12188f4cbb3828fcb4d023a0f98af7dbbba9a3b3f94b71450f": "{\"event_type\":\"finding-event\",\"id\":\"6f4bdfc2f1e2df12188f4cbb3828fcb4d023a0f98af7dbbba9a3b3f94b71450f\",\"occurred_at\":\"2026-10-30T00:00:00Z\",\"payload\":{\"action\":\"delivered\",\"actor\":\"crq-repair-adapter\",\"evidence\":{\"acknowledgement\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"repair_task\":\"crq-backfill-7777777777777777777777777777777777777777777777777777777777777777\"},\"finding_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"previous_event_id\":\"7a0c33d57204c62a229aa571e09c4b9785cc3d5ddef8a2591578c4b8d1ab5b6f\",\"review_id\":\"9999999999999999999999999999999999999999999999999999999999999999\"},\"schema\":\"cq.review-ledger/v1\",\"source_key\":\"delivery:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee:5c52e1b3919ff7530301e733209d03c08ab5ed2f11e00523e1812130518d1140\"}",
+       "7a0c33d57204c62a229aa571e09c4b9785cc3d5ddef8a2591578c4b8d1ab5b6f": "{\"event_type\":\"finding-event\",\"id\":\"7a0c33d57204c62a229aa571e09c4b9785cc3d5ddef8a2591578c4b8d1ab5b6f\",\"occurred_at\":\"2026-10-30T00:00:00Z\",\"payload\":{\"action\":\"needs-human\",\"actor\":\"crq-repair\",\"evidence\":{\"reason\":\"needs work\",\"repair_base\":\"1111111111111111111111111111111111111111\",\"repair_task\":\"crq-backfill-7777777777777777777777777777777777777777777777777777777777777777\"},\"finding_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"previous_event_id\":\"p0\",\"review_id\":\"9999999999999999999999999999999999999999999999999999999999999999\"},\"schema\":\"cq.review-ledger/v1\",\"source_key\":\"k0\"}"
+      },
+      "queue": "{\"items\":[]}",
+      "queue_saves": [],
+      "receipts": {
+       "5c52e1b3919ff7530301e733209d03c08ab5ed2f11e00523e1812130518d1140": "{\"acknowledgement\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"repair_task\":\"crq-backfill-7777777777777777777777777777777777777777777777777777777777777777\"}"
+      },
+      "repair_inbox": {},
+      "returns": "{\"acknowledgement\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"repair_task\":\"crq-backfill-7777777777777777777777777777777777777777777777777777777777777777\"}",
+      "rows": {
+       "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee": "{\"canonical_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"body\":\"Body\",\"id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"intervals\":[[1,2]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"Title\"},\"mapped_intervals\":[[1,2]],\"mapped_path\":\"src/a.ts\",\"previous_event_id\":\"6f4bdfc2f1e2df12188f4cbb3828fcb4d023a0f98af7dbbba9a3b3f94b71450f\",\"receipt\":{\"acknowledgement\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"repair_task\":\"crq-backfill-7777777777777777777777777777777777777777777777777777777777777777\"},\"review_id\":\"9999999999999999999999999999999999999999999999999999999999999999\",\"status\":\"delivered\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"target_current\":\"1111111111111111111111111111111111111111\"}"
+      },
+      "trace": [
+       "retained",
+       "lock:findings.lock",
+       "unlock:findings.lock",
+       "lock:findings.lock",
+       "retained",
+       "write:delivery/5c52e1b3919ff7530301e733209d03c08ab5ed2f11e00523e1812130518d1140.json",
+       "write:receipts/5c52e1b3919ff7530301e733209d03c08ab5ed2f11e00523e1812130518d1140.json",
+       "spool",
+       "lock:outbox.lock",
+       "write:pending/6f4bdfc2f1e2df12188f4cbb3828fcb4d023a0f98af7dbbba9a3b3f94b71450f.json",
+       "unlock:outbox.lock",
+       "write:triage/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.json",
+       "unlock:findings.lock"
+      ],
+      "tree": [
+       "state/backfill/findings/delivery/5c52e1b3919ff7530301e733209d03c08ab5ed2f11e00523e1812130518d1140.json",
+       "state/backfill/findings/receipts/5c52e1b3919ff7530301e733209d03c08ab5ed2f11e00523e1812130518d1140.json",
+       "state/backfill/findings/triage/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.json",
+       "state/backfill/publication/pending/6f4bdfc2f1e2df12188f4cbb3828fcb4d023a0f98af7dbbba9a3b3f94b71450f.json",
+       "state/backfill/publication/pending/7a0c33d57204c62a229aa571e09c4b9785cc3d5ddef8a2591578c4b8d1ab5b6f.json",
+       "state/repair/crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-0ae9a5ee543f1b7375f466790aeeb9d756cb60ec4513aac2557237a1508b99bf/committed.patch",
+       "state/repair/crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-0ae9a5ee543f1b7375f466790aeeb9d756cb60ec4513aac2557237a1508b99bf/manifest.json",
+       "state/repair/crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-0ae9a5ee543f1b7375f466790aeeb9d756cb60ec4513aac2557237a1508b99bf/staged.patch",
+       "state/repair/crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-0ae9a5ee543f1b7375f466790aeeb9d756cb60ec4513aac2557237a1508b99bf/unstaged.patch"
+      ]
+     }
+    ]
+   },
+   "spec": {
+    "inbox": {},
+    "repair_files": {
+     "crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-0ae9a5ee543f1b7375f466790aeeb9d756cb60ec4513aac2557237a1508b99bf/committed.patch": {
+      "rle": [
+       [
+        121,
+        199972
+       ],
+       [
+        10,
+        1
+       ],
+       [
+        100,
+        1
+       ],
+       [
+        105,
+        1
+       ],
+       [
+        102,
+        2
+       ],
+       [
+        32,
+        1
+       ],
+       [
+        45,
+        2
+       ],
+       [
+        103,
+        1
+       ],
+       [
+        105,
+        1
+       ],
+       [
+        116,
+        1
+       ],
+       [
+        32,
+        1
+       ],
+       [
+        97,
+        1
+       ],
+       [
+        47,
+        1
+       ],
+       [
+        120,
+        1
+       ],
+       [
+        32,
+        1
+       ],
+       [
+        98,
+        1
+       ],
+       [
+        47,
+        1
+       ],
+       [
+        120,
+        1
+       ],
+       [
+        10,
+        1
+       ],
+       [
+        122,
+        100
+       ]
+      ]
+     },
+     "crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-0ae9a5ee543f1b7375f466790aeeb9d756cb60ec4513aac2557237a1508b99bf/manifest.json": {
+      "base": "1111111111111111111111111111111111111111",
+      "sha256": {
+       "committed.patch": "a0e8cef01a07724335d3fe80b19dcc7c8be45bf1322c06ebcd0e316cde47ce13",
+       "staged.patch": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+       "unstaged.patch": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "untracked": [
+       "new.txt"
+      ]
+     },
+     "crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-0ae9a5ee543f1b7375f466790aeeb9d756cb60ec4513aac2557237a1508b99bf/staged.patch": {
+      "raw_hex": ""
+     },
+     "crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-0ae9a5ee543f1b7375f466790aeeb9d756cb60ec4513aac2557237a1508b99bf/unstaged.patch": {
+      "raw_hex": ""
+     }
+    },
+    "retained": [
+     {
+      "event_type": "finding-event",
+      "id": "7a0c33d57204c62a229aa571e09c4b9785cc3d5ddef8a2591578c4b8d1ab5b6f",
+      "occurred_at": "2026-10-30T00:00:00Z",
+      "payload": {
+       "action": "needs-human",
+       "actor": "crq-repair",
+       "evidence": {
+        "reason": "needs work",
+        "repair_base": "1111111111111111111111111111111111111111",
+        "repair_task": "crq-backfill-7777777777777777777777777777777777777777777777777777777777777777"
+       },
+       "finding_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+       "previous_event_id": "p0",
+       "review_id": "9999999999999999999999999999999999999999999999999999999999999999"
+      },
+      "schema": "cq.review-ledger/v1",
+      "source_key": "k0"
+     }
+    ],
+    "rows": {
+     "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee": {
+      "canonical_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "finding": {
+       "anchor_status": "verified",
+       "blob": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+       "body": "Body",
+       "id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+       "intervals": [
+        [
+         1,
+         2
+        ]
+       ],
+       "path": "src/a.ts",
+       "severity": "major",
+       "source_id": null,
+       "status": "untriaged",
+       "title": "Title"
+      },
+      "mapped_intervals": [
+       [
+        1,
+        2
+       ]
+      ],
+      "mapped_path": "src/a.ts",
+      "previous_event_id": "7a0c33d57204c62a229aa571e09c4b9785cc3d5ddef8a2591578c4b8d1ab5b6f",
+      "receipt": {
+       "acknowledgement": "8888888888888888888888888888888888888888888888888888888888888888",
+       "repair_task": "crq-backfill-7777777777777777777777777777777777777777777777777777777777777777"
+      },
+      "review_id": "9999999999999999999999999999999999999999999999999999999999999999",
+      "status": "confirmed",
+      "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "target_current": "1111111111111111111111111111111111111111"
+     }
+    },
+    "steps": [
+     {
+      "args": [
+       "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+       "2026-10-30T00:00:00Z"
+      ],
+      "method": "deliver",
+      "transport": {
+       "mode": "stub",
+       "receipt": {
+        "acknowledgement": "8888888888888888888888888888888888888888888888888888888888888888",
+        "repair_task": "crq-backfill-7777777777777777777777777777777777777777777777777777777777777777"
+       }
+      }
+     }
+    ]
+   }
+  },
+  {
    "name": "retry-patch-nul-bytes-in-path-removed",
    "result": {
     "steps": [

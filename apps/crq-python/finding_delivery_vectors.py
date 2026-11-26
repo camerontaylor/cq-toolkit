@@ -618,6 +618,12 @@ def retry_cases() -> List[Dict[str, Any]]:
     add(_retry_case("retry-patch-cut-at-200000-bytes-mid-character", files=_retained(JOB, {"committed.patch": cut})))
     cut_exact = b"diff --git a/" + b"b" * (200000 - 13) + b"\ndiff --git a/after b/after\n"
     add(_retry_case("retry-patch-cut-at-200000-bytes-exact", files=_retained(JOB, {"committed.patch": cut_exact})))
+    # Only the first 200000 bytes are searched for headers: an early header is
+    # listed, one that starts after the cut is not.
+    capped = (b"diff --git a/early b/early\n" + b"z" * 200100 + b"\ndiff --git a/late b/late\n")
+    add(_retry_case("retry-patch-header-after-200000-cap-not-listed", files=_retained(JOB, {"committed.patch": capped})))
+    add(_retry_case("retry-patch-header-in-last-cap-byte-listed", files=_retained(JOB, {
+        "committed.patch": b"y" * (200000 - 28) + b"\ndiff --git a/x b/x\n" + b"z" * 100})))
     add(_retry_case("retry-patch-nul-bytes-in-path-removed", files=_retained(JOB, {
         "committed.patch": b"diff --git a/x\x00y b/x\x00y\n"})))
     add(_retry_case("retry-patch-spans-three-files", files=_retained(JOB, {

@@ -10,6 +10,13 @@
  * snapshot refuses at a different point in each order and the effects before
  * it (the request file, the receipt file) are durable. A Python exception
  * that escapes uncaught is ported as a typed error carrying `pythonError`.
+ *
+ * Known parity trait: finding ids and delivery keys reach the file seams
+ * unsanitised, exactly as in Python, where `findings/triage/<id>.json` is built
+ * by string concatenation (an id such as `../x` leaves `triage/`). This port
+ * keeps that behaviour. Any filesystem adapter that implements
+ * `FindingDeliveryFiles` must validate ids and keys itself and enforce
+ * containment under `state/` before it touches a path; nothing here does.
  */
 import { JsonObject, type JsonValue } from '../../../../policy/crq/jsonValue.js';
 import {
