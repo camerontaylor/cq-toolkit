@@ -592,8 +592,8 @@ export class FindingDispositions {
       const quoted = options.quotedText;
       if (
         selected.size === 0 ||
-        Math.min(...selected) < 1 ||
-        Math.max(...selected) > text.length ||
+        (ordered[0] as number) < 1 ||
+        (ordered[ordered.length - 1] as number) > text.length ||
         typeof quoted !== 'string' ||
         pythonStrip(quoted).length === 0 ||
         quote !== quoted

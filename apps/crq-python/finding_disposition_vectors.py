@@ -566,6 +566,8 @@ def triage_cases() -> List[Dict[str, Any]]:
     q("quote-over-unverified-finding", "two", [[2, 2]],
       row=_row(_finding_row(anchor_status="unverified", intervals=[]), RID))
     q("quote-over-verified-lost-anchor", "two", [[2, 2]], repo=_quote_repo(_hex("one\ntwo\n"), carry=[lost]))
+    # Large intervals: a JS `Math.min(...set)` spread throws RangeError past the argument limit.
+    q("quote-huge-interval-past-end", "x", [[1, 200000]], "x\n" * 3)
     t("quote-needs-human-ignores-current-path", FID, HEAD, "needs-human", "agent", "r", AT,
       repo=_quote_repo(_hex("one\n"), carry=[full]), current_path="src/a.ts", current_lines=[[1, 1]],
       quoted_text="one")
