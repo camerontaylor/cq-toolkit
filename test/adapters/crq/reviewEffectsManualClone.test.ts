@@ -2,7 +2,7 @@
 // repository once, on demand, under its state (review_transport.provision),
 // reusing the primary origin's transport; it never joins the `repos` list.
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readdir, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
@@ -14,6 +14,7 @@ import {
   manualCloneUrl,
 } from '../../../src/adapters/crq/reviewEffects.js';
 import { GitPool } from '../../../src/adapters/crq/gitExec.js';
+import { ledgerDigestOf } from '../../../src/policy/crq/ledger.js';
 
 const PRIMARY = 'camerontaylor/cq-toolkit';
 const pools: GitPool[] = [];
@@ -124,5 +125,147 @@ describe('manual review clones', () => {
     await expect(stat(join(root, 'state', 'review-repos'))).rejects.toMatchObject({
       code: 'ENOENT',
     });
+  });
+});
+
+describe('retained review records', () => {
+  // A review record valid under the ledger schema, from the B1 `valid-review` vector.
+  const BASE = {
+    schema: 'cq.review-ledger/v1',
+    event_type: 'review',
+    source_key: 'camerontaylor/cq-toolkit:crq-runner-app:run-1',
+    occurred_at: '2026-10-30T00:00:00Z',
+    payload: {
+      repo: 'camerontaylor/cq-toolkit',
+      subject_id: 'subject',
+      job_id: 'subject:0',
+      attempt_id: 'subject:0:1',
+      source: {
+        repo: 'camerontaylor/cq-toolkit',
+        producer: 'crq-runner-app',
+        type: 'crq-run',
+        id: 'run-1',
+        authenticated: true,
+      },
+      base: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      head: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      head_tree: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      target: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      target_tree: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      policy_digest: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      scope_digest: 'c38ff74dbe52efc3cc353a69aaeec07f6315d2a02cf02c64c4809b0f89a53c78',
+      paths: [
+        {
+          path: 'src/雪.ts',
+          blob: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          mode: '100644',
+          disposition: 'included',
+          reason: 'verified',
+          baseline: {},
+        },
+      ],
+      requested_scope: [
+        {
+          path: 'src/雪.ts',
+          blob: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          intervals: [[1, 2]],
+        },
+      ],
+      input_scope: [
+        {
+          path: 'src/雪.ts',
+          blob: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          intervals: [[1, 2]],
+        },
+      ],
+      reviewed_scope: [
+        {
+          path: 'src/雪.ts',
+          blob: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          intervals: [[1, 2]],
+        },
+      ],
+      completion: {
+        terminal: true,
+        skipped: false,
+        scope_verified: true,
+        exit_code: 0,
+        errors: [],
+      },
+      outcome: 'completed',
+      artifacts: [
+        {
+          sha256: 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+          location:
+            '/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+        },
+      ],
+      findings: [
+        {
+          id: 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+          severity: 'major',
+          source_id: null,
+          path: 'src/雪.ts',
+          blob: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          intervals: [[1, 1]],
+          title: '标题 😀',
+          body: 'details \u0001 with control',
+          status: 'untriaged',
+          anchor_status: 'verified',
+        },
+      ],
+    },
+  } as Record<string, unknown>;
+
+  function record(title: string): Buffer {
+    const payload = structuredClone(BASE.payload) as { findings: Array<{ title: string }> };
+    payload.findings[0]!.title = title;
+    const body = { ...BASE, payload };
+    const parsed = parseJsonValue(JSON.stringify(body));
+    if (!(parsed instanceof JsonObject)) throw new Error('not an object');
+    const id = ledgerDigestOf(parsed);
+    return Buffer.from(JSON.stringify({ ...body, id }));
+  }
+
+  async function pendingDir(root: string): Promise<string> {
+    const pending = join(root, 'state', 'record-outbox', 'pending');
+    await mkdir(pending, { recursive: true });
+    return pending;
+  }
+
+  test('corrupt or non-object files are skipped and the scan still reaches a later valid record', async () => {
+    const { root, effects } = await fixture();
+    const pending = await pendingDir(root);
+    await writeFile(join(pending, 'a-truncated.json'), '{"event_type":"review","id":');
+    await writeFile(join(pending, 'b-badutf8.json'), Buffer.from([0x7b, 0xff, 0xfe, 0x7d]));
+    await writeFile(join(pending, 'c-array.json'), '[1]');
+    await writeFile(join(pending, 'z-valid.json'), record('ok'));
+    const records = await effects.retainedRecords();
+    expect(records).toHaveLength(1);
+    expect(records[0]!.get('event_type')).toBe('review');
+  });
+
+  test('a lone 0xff is refused like Python, not decoded to U+FFFD', async () => {
+    const { root, effects } = await fixture();
+    const pending = await pendingDir(root);
+    // The record's content legitimately contains U+FFFD, so its id hashes the
+    // replacement character. Replacing those three bytes (EF BF BD) with a single
+    // 0xff makes the file invalid UTF-8; a lenient decoder maps it back to U+FFFD,
+    // reproduces the hash and accepts it, while Python's strict decode refuses it.
+    const valid = record('a\ufffdb');
+    expect(await writeAndRead(pending, 'ok.json', valid)).toHaveLength(1);
+    const corrupt = Buffer.concat([
+      valid.subarray(0, valid.indexOf(Buffer.from([0xef, 0xbf, 0xbd]))),
+      Buffer.from([0xff]),
+      valid.subarray(valid.indexOf(Buffer.from([0xef, 0xbf, 0xbd])) + 3),
+    ]);
+    await rm(join(pending, 'ok.json'));
+    await writeFile(join(pending, 'bad.json'), corrupt);
+    expect(await effects.retainedRecords()).toEqual([]);
+
+    async function writeAndRead(dir: string, name: string, bytes: Buffer) {
+      await writeFile(join(dir, name), bytes);
+      return effects.retainedRecords();
+    }
   });
 });

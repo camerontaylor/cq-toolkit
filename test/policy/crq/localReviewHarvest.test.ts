@@ -148,6 +148,7 @@ describe('local review completion', () => {
               identity_inputs: identity,
               profile,
               run: { run_id: 'run-1' },
+              receipt_unavailable: true,
               observers: [],
             },
           ],
@@ -194,6 +195,8 @@ describe('local review completion', () => {
       expect(result.queue).toBe(saved);
       const updated = (result.queue.get('items') as JsonObject[])[0]!;
       expect(updated.get('state')).toBe('failed');
+      // Completion clears a stale receipt-unavailable mark (Python complete(), 0cf499194).
+      expect(updated.has('receipt_unavailable')).toBe(false);
       expect(updated.get('run')).toBeNull();
       expect(updated.get('scope_adequate')).toBe(false);
       const attempts = updated.get('attempts') as JsonObject[];
