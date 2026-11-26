@@ -2817,6 +2817,939 @@
       "id": "b"
      }
     ],
+    "plans": [
+     {
+      "action": "needs-human",
+      "escalate": false,
+      "id": "m",
+      "kwargs_json": "{\"failure_class\": \"evidence\"}",
+      "reason": "finding has no repository path"
+     }
+    ]
+   },
+   "expected": {
+    "report_json": "{\"total\": 3, \"judged\": 0, \"unjudged\": 2, \"counts\": {\"needs-human\": 1}, \"delivered\": 0, \"delivery_deferred\": 0, \"context_errors\": [], \"stop_report\": {\"stop\": \"deferred\", \"errorClass\": \"context-scan\", \"reason\": \"policy unreadable at /x\"}, \"stopped\": \"deferred\", \"dry_run\": false, \"judgment_candidates\": [], \"outcomes\": [{\"finding_id\": \"m\", \"action\": \"needs-human\", \"reason\": \"finding has no repository path\"}]}",
+    "trace": [
+     [
+      "context",
+      "a",
+      false
+     ],
+     [
+      "context_error",
+      "a",
+      "ev0-a",
+      "null"
+     ],
+     [
+      "judge",
+      "a",
+      "{\"packed\": \"a\"}",
+      600,
+      false
+     ],
+     [
+      "triage",
+      "m",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "needs-human",
+      "crq-triage/deterministic",
+      "finding has no repository path",
+      "2026-11-26T00:00:00Z",
+      "{\"expected_previous_event_id\": \"ev0-m\", \"failure_class\": \"evidence\"}"
+     ]
+    ]
+   },
+   "judge": {
+    "a": {
+     "injected_form": true,
+     "message": "policy   unreadable\nat /x",
+     "raises": "ContextScanError"
+    }
+   },
+   "name": "judge-context-scan-injected-form",
+   "rows": [
+    {
+     "id": "m",
+     "kind": "pathless"
+    },
+    {
+     "id": "a",
+     "kind": "pending"
+    },
+    {
+     "id": "b",
+     "kind": "pending"
+    }
+   ],
+   "rows_json": [
+    "{\"finding\": {\"id\": \"m\", \"severity\": \"major\", \"path\": \"\", \"title\": \"T m\", \"body\": \"B m\", \"anchor_status\": \"verified\"}, \"status\": \"untriaged\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-m\", \"previous_event_id\": \"ev0-m\"}",
+    "{\"finding\": {\"id\": \"a\", \"severity\": \"major\", \"path\": \"src/a.py\", \"title\": \"T a\", \"body\": \"B a\", \"anchor_status\": \"verified\"}, \"status\": \"untriaged\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-a\", \"previous_event_id\": \"ev0-a\"}",
+    "{\"finding\": {\"id\": \"b\", \"severity\": \"major\", \"path\": \"src/b.py\", \"title\": \"T b\", \"body\": \"B b\", \"anchor_status\": \"verified\"}, \"status\": \"untriaged\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-b\", \"previous_event_id\": \"ev0-b\"}"
+   ],
+   "ts_refuses": false
+  },
+  {
+   "boundary": {
+    "candidates": [
+     {
+      "escalate": false,
+      "id": "a"
+     },
+     {
+      "escalate": false,
+      "id": "b"
+     }
+    ],
+    "plans": []
+   },
+   "expected": {
+    "report_json": "{\"total\": 2, \"judged\": 0, \"unjudged\": 2, \"counts\": {}, \"delivered\": 0, \"delivery_deferred\": 0, \"context_errors\": [], \"stop_report\": {\"stop\": \"deferred\", \"errorClass\": \"judge-error\", \"reason\": \"round ceiling\"}, \"stopped\": \"deferred\", \"dry_run\": false, \"judgment_candidates\": [], \"outcomes\": []}",
+    "trace": [
+     [
+      "context",
+      "a",
+      false
+     ],
+     [
+      "context_error",
+      "a",
+      "ev0-a",
+      "null"
+     ],
+     [
+      "judge",
+      "a",
+      "{\"packed\": \"a\"}",
+      600,
+      false
+     ]
+    ]
+   },
+   "judge": {
+    "a": {
+     "injected_form": true,
+     "message": "round   ceiling",
+     "raises": "RepairRoundCeiling"
+    }
+   },
+   "name": "judge-ceiling-injected-form",
+   "rows": [
+    {
+     "id": "a",
+     "kind": "pending"
+    },
+    {
+     "id": "b",
+     "kind": "pending"
+    }
+   ],
+   "rows_json": [
+    "{\"finding\": {\"id\": \"a\", \"severity\": \"major\", \"path\": \"src/a.py\", \"title\": \"T a\", \"body\": \"B a\", \"anchor_status\": \"verified\"}, \"status\": \"untriaged\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-a\", \"previous_event_id\": \"ev0-a\"}",
+    "{\"finding\": {\"id\": \"b\", \"severity\": \"major\", \"path\": \"src/b.py\", \"title\": \"T b\", \"body\": \"B b\", \"anchor_status\": \"verified\"}, \"status\": \"untriaged\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-b\", \"previous_event_id\": \"ev0-b\"}"
+   ],
+   "ts_refuses": false
+  },
+  {
+   "boundary": {
+    "candidates": [],
+    "plans": []
+   },
+   "deliver": {
+    "c1": {
+     "injected_form": true,
+     "message": "ceiling at pin",
+     "raises": "RepairRoundCeiling"
+    }
+   },
+   "expected": {
+    "report_json": "{\"total\": 2, \"judged\": 0, \"unjudged\": 0, \"counts\": {}, \"delivered\": 1, \"delivery_deferred\": 0, \"context_errors\": [], \"stop_report\": {}, \"stopped\": null, \"dry_run\": false, \"judgment_candidates\": [], \"outcomes\": []}",
+    "trace": [
+     [
+      "deliver",
+      "c1",
+      "transport",
+      "2026-11-26T00:00:00Z"
+     ],
+     [
+      "triage",
+      "c1",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "needs-human",
+      "crq-triage/delivery",
+      "ceiling at pin",
+      "2026-11-26T00:00:00Z",
+      "{\"failure_class\": \"exhausted\", \"expected_previous_event_id\": \"ev0-c1\"}"
+     ],
+     [
+      "deliver",
+      "c2",
+      "transport",
+      "2026-11-26T00:00:00Z"
+     ]
+    ]
+   },
+   "judge": {},
+   "name": "delivery-ceiling-injected-form",
+   "rows": [
+    {
+     "id": "c1",
+     "kind": "confirmed"
+    },
+    {
+     "id": "c2",
+     "kind": "confirmed"
+    }
+   ],
+   "rows_json": [
+    "{\"finding\": {\"id\": \"c1\", \"severity\": \"major\", \"path\": \"src/c1.py\", \"title\": \"T c1\", \"body\": \"B c1\", \"anchor_status\": \"verified\"}, \"status\": \"confirmed\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-c1\", \"previous_event_id\": \"ev0-c1\", \"target_current\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+    "{\"finding\": {\"id\": \"c2\", \"severity\": \"major\", \"path\": \"src/c2.py\", \"title\": \"T c2\", \"body\": \"B c2\", \"anchor_status\": \"verified\"}, \"status\": \"confirmed\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-c2\", \"previous_event_id\": \"ev0-c2\", \"target_current\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}"
+   ],
+   "ts_refuses": false
+  },
+  {
+   "boundary": {
+    "candidates": [
+     {
+      "escalate": false,
+      "id": "a"
+     }
+    ],
+    "plans": []
+   },
+   "context_error": {
+    "a": {
+     "clear": {
+      "corrupt": {
+       "delete": true,
+       "field": "finding",
+       "id": "c1"
+      }
+     }
+    }
+   },
+   "expected": {
+    "raises": "KeyError",
+    "trace": [
+     [
+      "context",
+      "a",
+      false
+     ],
+     [
+      "context_error",
+      "a",
+      "ev0-a",
+      "null"
+     ],
+     [
+      "judge",
+      "a",
+      "{\"packed\": \"a\"}",
+      600,
+      false
+     ],
+     [
+      "triage",
+      "a",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "dismissed",
+      "crq-triage/judge",
+      "default",
+      "2026-11-26T00:00:00Z",
+      "{\"expected_previous_event_id\": \"ev0-a\", \"failure_class\": \"exhausted\"}"
+     ]
+    ]
+   },
+   "judge": {},
+   "name": "delivery-malformed-finding-missing",
+   "rows": [
+    {
+     "id": "a",
+     "kind": "pending"
+    },
+    {
+     "id": "c1",
+     "kind": "confirmed"
+    },
+    {
+     "id": "c2",
+     "kind": "confirmed"
+    }
+   ],
+   "rows_json": [
+    "{\"finding\": {\"id\": \"a\", \"severity\": \"major\", \"path\": \"src/a.py\", \"title\": \"T a\", \"body\": \"B a\", \"anchor_status\": \"verified\"}, \"status\": \"untriaged\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-a\", \"previous_event_id\": \"ev0-a\"}",
+    "{\"finding\": {\"id\": \"c1\", \"severity\": \"major\", \"path\": \"src/c1.py\", \"title\": \"T c1\", \"body\": \"B c1\", \"anchor_status\": \"verified\"}, \"status\": \"confirmed\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-c1\", \"previous_event_id\": \"ev0-c1\", \"target_current\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+    "{\"finding\": {\"id\": \"c2\", \"severity\": \"major\", \"path\": \"src/c2.py\", \"title\": \"T c2\", \"body\": \"B c2\", \"anchor_status\": \"verified\"}, \"status\": \"confirmed\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-c2\", \"previous_event_id\": \"ev0-c2\", \"target_current\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}"
+   ],
+   "ts_refuses": false
+  },
+  {
+   "boundary": {
+    "candidates": [
+     {
+      "escalate": false,
+      "id": "a"
+     }
+    ],
+    "plans": []
+   },
+   "context_error": {
+    "a": {
+     "clear": {
+      "corrupt": {
+       "field": "finding",
+       "id": "c1",
+       "value": null
+      }
+     }
+    }
+   },
+   "expected": {
+    "raises": "TypeError",
+    "trace": [
+     [
+      "context",
+      "a",
+      false
+     ],
+     [
+      "context_error",
+      "a",
+      "ev0-a",
+      "null"
+     ],
+     [
+      "judge",
+      "a",
+      "{\"packed\": \"a\"}",
+      600,
+      false
+     ],
+     [
+      "triage",
+      "a",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "dismissed",
+      "crq-triage/judge",
+      "default",
+      "2026-11-26T00:00:00Z",
+      "{\"expected_previous_event_id\": \"ev0-a\", \"failure_class\": \"exhausted\"}"
+     ]
+    ]
+   },
+   "judge": {},
+   "name": "delivery-malformed-finding-null",
+   "rows": [
+    {
+     "id": "a",
+     "kind": "pending"
+    },
+    {
+     "id": "c1",
+     "kind": "confirmed"
+    },
+    {
+     "id": "c2",
+     "kind": "confirmed"
+    }
+   ],
+   "rows_json": [
+    "{\"finding\": {\"id\": \"a\", \"severity\": \"major\", \"path\": \"src/a.py\", \"title\": \"T a\", \"body\": \"B a\", \"anchor_status\": \"verified\"}, \"status\": \"untriaged\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-a\", \"previous_event_id\": \"ev0-a\"}",
+    "{\"finding\": {\"id\": \"c1\", \"severity\": \"major\", \"path\": \"src/c1.py\", \"title\": \"T c1\", \"body\": \"B c1\", \"anchor_status\": \"verified\"}, \"status\": \"confirmed\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-c1\", \"previous_event_id\": \"ev0-c1\", \"target_current\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+    "{\"finding\": {\"id\": \"c2\", \"severity\": \"major\", \"path\": \"src/c2.py\", \"title\": \"T c2\", \"body\": \"B c2\", \"anchor_status\": \"verified\"}, \"status\": \"confirmed\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-c2\", \"previous_event_id\": \"ev0-c2\", \"target_current\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}"
+   ],
+   "ts_refuses": false
+  },
+  {
+   "boundary": {
+    "candidates": [
+     {
+      "escalate": false,
+      "id": "a"
+     }
+    ],
+    "plans": []
+   },
+   "context_error": {
+    "a": {
+     "clear": {
+      "corrupt": {
+       "field": "finding",
+       "id": "c1",
+       "value": []
+      }
+     }
+    }
+   },
+   "expected": {
+    "raises": "TypeError",
+    "trace": [
+     [
+      "context",
+      "a",
+      false
+     ],
+     [
+      "context_error",
+      "a",
+      "ev0-a",
+      "null"
+     ],
+     [
+      "judge",
+      "a",
+      "{\"packed\": \"a\"}",
+      600,
+      false
+     ],
+     [
+      "triage",
+      "a",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "dismissed",
+      "crq-triage/judge",
+      "default",
+      "2026-11-26T00:00:00Z",
+      "{\"expected_previous_event_id\": \"ev0-a\", \"failure_class\": \"exhausted\"}"
+     ]
+    ]
+   },
+   "judge": {},
+   "name": "delivery-malformed-finding-list",
+   "rows": [
+    {
+     "id": "a",
+     "kind": "pending"
+    },
+    {
+     "id": "c1",
+     "kind": "confirmed"
+    },
+    {
+     "id": "c2",
+     "kind": "confirmed"
+    }
+   ],
+   "rows_json": [
+    "{\"finding\": {\"id\": \"a\", \"severity\": \"major\", \"path\": \"src/a.py\", \"title\": \"T a\", \"body\": \"B a\", \"anchor_status\": \"verified\"}, \"status\": \"untriaged\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-a\", \"previous_event_id\": \"ev0-a\"}",
+    "{\"finding\": {\"id\": \"c1\", \"severity\": \"major\", \"path\": \"src/c1.py\", \"title\": \"T c1\", \"body\": \"B c1\", \"anchor_status\": \"verified\"}, \"status\": \"confirmed\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-c1\", \"previous_event_id\": \"ev0-c1\", \"target_current\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+    "{\"finding\": {\"id\": \"c2\", \"severity\": \"major\", \"path\": \"src/c2.py\", \"title\": \"T c2\", \"body\": \"B c2\", \"anchor_status\": \"verified\"}, \"status\": \"confirmed\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-c2\", \"previous_event_id\": \"ev0-c2\", \"target_current\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}"
+   ],
+   "ts_refuses": false
+  },
+  {
+   "boundary": {
+    "candidates": [
+     {
+      "escalate": false,
+      "id": "a"
+     }
+    ],
+    "plans": []
+   },
+   "context_error": {
+    "a": {
+     "clear": {
+      "corrupt": {
+       "field": "finding",
+       "id": "c1",
+       "value": "x"
+      }
+     }
+    }
+   },
+   "expected": {
+    "raises": "TypeError",
+    "trace": [
+     [
+      "context",
+      "a",
+      false
+     ],
+     [
+      "context_error",
+      "a",
+      "ev0-a",
+      "null"
+     ],
+     [
+      "judge",
+      "a",
+      "{\"packed\": \"a\"}",
+      600,
+      false
+     ],
+     [
+      "triage",
+      "a",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "dismissed",
+      "crq-triage/judge",
+      "default",
+      "2026-11-26T00:00:00Z",
+      "{\"expected_previous_event_id\": \"ev0-a\", \"failure_class\": \"exhausted\"}"
+     ]
+    ]
+   },
+   "judge": {},
+   "name": "delivery-malformed-finding-string",
+   "rows": [
+    {
+     "id": "a",
+     "kind": "pending"
+    },
+    {
+     "id": "c1",
+     "kind": "confirmed"
+    },
+    {
+     "id": "c2",
+     "kind": "confirmed"
+    }
+   ],
+   "rows_json": [
+    "{\"finding\": {\"id\": \"a\", \"severity\": \"major\", \"path\": \"src/a.py\", \"title\": \"T a\", \"body\": \"B a\", \"anchor_status\": \"verified\"}, \"status\": \"untriaged\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-a\", \"previous_event_id\": \"ev0-a\"}",
+    "{\"finding\": {\"id\": \"c1\", \"severity\": \"major\", \"path\": \"src/c1.py\", \"title\": \"T c1\", \"body\": \"B c1\", \"anchor_status\": \"verified\"}, \"status\": \"confirmed\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-c1\", \"previous_event_id\": \"ev0-c1\", \"target_current\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+    "{\"finding\": {\"id\": \"c2\", \"severity\": \"major\", \"path\": \"src/c2.py\", \"title\": \"T c2\", \"body\": \"B c2\", \"anchor_status\": \"verified\"}, \"status\": \"confirmed\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-c2\", \"previous_event_id\": \"ev0-c2\", \"target_current\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}"
+   ],
+   "ts_refuses": false
+  },
+  {
+   "boundary": {
+    "candidates": [
+     {
+      "escalate": false,
+      "id": "a"
+     }
+    ],
+    "plans": []
+   },
+   "context_error": {
+    "a": {
+     "clear": {
+      "corrupt": {
+       "field": "finding",
+       "id": "c1",
+       "value": 5
+      }
+     }
+    }
+   },
+   "expected": {
+    "raises": "TypeError",
+    "trace": [
+     [
+      "context",
+      "a",
+      false
+     ],
+     [
+      "context_error",
+      "a",
+      "ev0-a",
+      "null"
+     ],
+     [
+      "judge",
+      "a",
+      "{\"packed\": \"a\"}",
+      600,
+      false
+     ],
+     [
+      "triage",
+      "a",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "dismissed",
+      "crq-triage/judge",
+      "default",
+      "2026-11-26T00:00:00Z",
+      "{\"expected_previous_event_id\": \"ev0-a\", \"failure_class\": \"exhausted\"}"
+     ]
+    ]
+   },
+   "judge": {},
+   "name": "delivery-malformed-finding-number",
+   "rows": [
+    {
+     "id": "a",
+     "kind": "pending"
+    },
+    {
+     "id": "c1",
+     "kind": "confirmed"
+    },
+    {
+     "id": "c2",
+     "kind": "confirmed"
+    }
+   ],
+   "rows_json": [
+    "{\"finding\": {\"id\": \"a\", \"severity\": \"major\", \"path\": \"src/a.py\", \"title\": \"T a\", \"body\": \"B a\", \"anchor_status\": \"verified\"}, \"status\": \"untriaged\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-a\", \"previous_event_id\": \"ev0-a\"}",
+    "{\"finding\": {\"id\": \"c1\", \"severity\": \"major\", \"path\": \"src/c1.py\", \"title\": \"T c1\", \"body\": \"B c1\", \"anchor_status\": \"verified\"}, \"status\": \"confirmed\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-c1\", \"previous_event_id\": \"ev0-c1\", \"target_current\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+    "{\"finding\": {\"id\": \"c2\", \"severity\": \"major\", \"path\": \"src/c2.py\", \"title\": \"T c2\", \"body\": \"B c2\", \"anchor_status\": \"verified\"}, \"status\": \"confirmed\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-c2\", \"previous_event_id\": \"ev0-c2\", \"target_current\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}"
+   ],
+   "ts_refuses": false
+  },
+  {
+   "boundary": {
+    "candidates": [
+     {
+      "escalate": false,
+      "id": "a"
+     }
+    ],
+    "plans": []
+   },
+   "context_error": {
+    "a": {
+     "clear": {
+      "corrupt": {
+       "field": "finding",
+       "id": "c1",
+       "value": {
+        "id": "c1"
+       }
+      }
+     }
+    }
+   },
+   "expected": {
+    "raises": "KeyError",
+    "trace": [
+     [
+      "context",
+      "a",
+      false
+     ],
+     [
+      "context_error",
+      "a",
+      "ev0-a",
+      "null"
+     ],
+     [
+      "judge",
+      "a",
+      "{\"packed\": \"a\"}",
+      600,
+      false
+     ],
+     [
+      "triage",
+      "a",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "dismissed",
+      "crq-triage/judge",
+      "default",
+      "2026-11-26T00:00:00Z",
+      "{\"expected_previous_event_id\": \"ev0-a\", \"failure_class\": \"exhausted\"}"
+     ]
+    ]
+   },
+   "judge": {},
+   "name": "delivery-malformed-finding-no-severity",
+   "rows": [
+    {
+     "id": "a",
+     "kind": "pending"
+    },
+    {
+     "id": "c1",
+     "kind": "confirmed"
+    },
+    {
+     "id": "c2",
+     "kind": "confirmed"
+    }
+   ],
+   "rows_json": [
+    "{\"finding\": {\"id\": \"a\", \"severity\": \"major\", \"path\": \"src/a.py\", \"title\": \"T a\", \"body\": \"B a\", \"anchor_status\": \"verified\"}, \"status\": \"untriaged\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-a\", \"previous_event_id\": \"ev0-a\"}",
+    "{\"finding\": {\"id\": \"c1\", \"severity\": \"major\", \"path\": \"src/c1.py\", \"title\": \"T c1\", \"body\": \"B c1\", \"anchor_status\": \"verified\"}, \"status\": \"confirmed\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-c1\", \"previous_event_id\": \"ev0-c1\", \"target_current\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+    "{\"finding\": {\"id\": \"c2\", \"severity\": \"major\", \"path\": \"src/c2.py\", \"title\": \"T c2\", \"body\": \"B c2\", \"anchor_status\": \"verified\"}, \"status\": \"confirmed\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-c2\", \"previous_event_id\": \"ev0-c2\", \"target_current\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}"
+   ],
+   "ts_refuses": false
+  },
+  {
+   "boundary": {
+    "candidates": [
+     {
+      "escalate": false,
+      "id": "a"
+     }
+    ],
+    "plans": []
+   },
+   "context_error": {
+    "a": {
+     "clear": {
+      "corrupt": {
+       "field": "finding",
+       "id": "c1",
+       "value": {
+        "id": "c1",
+        "severity": null
+       }
+      }
+     }
+    }
+   },
+   "expected": {
+    "report_json": "{\"total\": 3, \"judged\": 1, \"unjudged\": 0, \"counts\": {\"dismissed\": 1}, \"delivered\": 1, \"delivery_deferred\": 0, \"context_errors\": [], \"stop_report\": {}, \"stopped\": null, \"dry_run\": false, \"judgment_candidates\": [], \"outcomes\": [{\"finding_id\": \"a\", \"action\": \"dismissed\", \"reason\": \"default\"}]}",
+    "trace": [
+     [
+      "context",
+      "a",
+      false
+     ],
+     [
+      "context_error",
+      "a",
+      "ev0-a",
+      "null"
+     ],
+     [
+      "judge",
+      "a",
+      "{\"packed\": \"a\"}",
+      600,
+      false
+     ],
+     [
+      "triage",
+      "a",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "dismissed",
+      "crq-triage/judge",
+      "default",
+      "2026-11-26T00:00:00Z",
+      "{\"expected_previous_event_id\": \"ev0-a\", \"failure_class\": \"exhausted\"}"
+     ],
+     [
+      "deliver",
+      "c2",
+      "transport",
+      "2026-11-26T00:00:00Z"
+     ]
+    ]
+   },
+   "judge": {},
+   "name": "delivery-malformed-finding-null-severity",
+   "rows": [
+    {
+     "id": "a",
+     "kind": "pending"
+    },
+    {
+     "id": "c1",
+     "kind": "confirmed"
+    },
+    {
+     "id": "c2",
+     "kind": "confirmed"
+    }
+   ],
+   "rows_json": [
+    "{\"finding\": {\"id\": \"a\", \"severity\": \"major\", \"path\": \"src/a.py\", \"title\": \"T a\", \"body\": \"B a\", \"anchor_status\": \"verified\"}, \"status\": \"untriaged\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-a\", \"previous_event_id\": \"ev0-a\"}",
+    "{\"finding\": {\"id\": \"c1\", \"severity\": \"major\", \"path\": \"src/c1.py\", \"title\": \"T c1\", \"body\": \"B c1\", \"anchor_status\": \"verified\"}, \"status\": \"confirmed\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-c1\", \"previous_event_id\": \"ev0-c1\", \"target_current\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+    "{\"finding\": {\"id\": \"c2\", \"severity\": \"major\", \"path\": \"src/c2.py\", \"title\": \"T c2\", \"body\": \"B c2\", \"anchor_status\": \"verified\"}, \"status\": \"confirmed\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-c2\", \"previous_event_id\": \"ev0-c2\", \"target_current\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}"
+   ],
+   "ts_refuses": false
+  },
+  {
+   "boundary": {
+    "candidates": [
+     {
+      "escalate": false,
+      "id": "a"
+     },
+     {
+      "escalate": false,
+      "id": "s1"
+     }
+    ],
+    "plans": []
+   },
+   "context_error": {
+    "a": {
+     "clear": {
+      "corrupt": {
+       "field": "finding",
+       "id": "f1",
+       "value": null
+      }
+     }
+    }
+   },
+   "expected": {
+    "report_json": "{\"total\": 3, \"judged\": 2, \"unjudged\": 0, \"counts\": {\"dismissed\": 2}, \"delivered\": 0, \"delivery_deferred\": 0, \"context_errors\": [], \"stop_report\": {}, \"stopped\": null, \"dry_run\": false, \"judgment_candidates\": [], \"outcomes\": [{\"finding_id\": \"a\", \"action\": \"dismissed\", \"reason\": \"default\"}, {\"finding_id\": \"s1\", \"action\": \"dismissed\", \"reason\": \"default\"}]}",
+    "trace": [
+     [
+      "context",
+      "a",
+      false
+     ],
+     [
+      "context_error",
+      "a",
+      "ev0-a",
+      "null"
+     ],
+     [
+      "judge",
+      "a",
+      "{\"packed\": \"a\"}",
+      600,
+      false
+     ],
+     [
+      "context",
+      "s1",
+      false
+     ],
+     [
+      "context_error",
+      "s1",
+      "ev0-s1",
+      "null"
+     ],
+     [
+      "judge",
+      "s1",
+      "{\"packed\": \"s1\"}",
+      600,
+      false
+     ],
+     [
+      "triage",
+      "a",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "dismissed",
+      "crq-triage/judge",
+      "default",
+      "2026-11-26T00:00:00Z",
+      "{\"expected_previous_event_id\": \"ev0-a\", \"failure_class\": \"exhausted\"}"
+     ],
+     [
+      "triage",
+      "s1",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "dismissed",
+      "crq-triage/judge",
+      "default",
+      "2026-11-26T00:00:00Z",
+      "{\"expected_previous_event_id\": \"ev0-s1\", \"failure_class\": \"exhausted\"}"
+     ]
+    ]
+   },
+   "judge": {},
+   "name": "delivery-malformed-finding-ineligible-skipped",
+   "rows": [
+    {
+     "id": "a",
+     "kind": "pending"
+    },
+    {
+     "id": "f1",
+     "kind": "fixed"
+    },
+    {
+     "id": "s1",
+     "kind": "stale"
+    }
+   ],
+   "rows_json": [
+    "{\"finding\": {\"id\": \"a\", \"severity\": \"major\", \"path\": \"src/a.py\", \"title\": \"T a\", \"body\": \"B a\", \"anchor_status\": \"verified\"}, \"status\": \"untriaged\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-a\", \"previous_event_id\": \"ev0-a\"}",
+    "{\"finding\": {\"id\": \"f1\", \"severity\": \"major\", \"path\": \"src/f1.py\", \"title\": \"T f1\", \"body\": \"B f1\", \"anchor_status\": \"verified\"}, \"status\": \"fixed\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-f1\", \"previous_event_id\": \"ev0-f1\"}",
+    "{\"finding\": {\"id\": \"s1\", \"severity\": \"major\", \"path\": \"src/s1.py\", \"title\": \"T s1\", \"body\": \"B s1\", \"anchor_status\": \"verified\"}, \"status\": \"confirmed\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-s1\", \"previous_event_id\": \"ev0-s1\", \"target_current\": \"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}"
+   ],
+   "ts_refuses": false
+  },
+  {
+   "boundary": {
+    "candidates": [
+     {
+      "escalate": false,
+      "id": "a"
+     }
+    ],
+    "plans": []
+   },
+   "context_error": {
+    "a": {
+     "clear": {
+      "corrupt": {
+       "delete": true,
+       "field": "status",
+       "id": "c1"
+      }
+     }
+    }
+   },
+   "expected": {
+    "raises": "KeyError",
+    "trace": [
+     [
+      "context",
+      "a",
+      false
+     ],
+     [
+      "context_error",
+      "a",
+      "ev0-a",
+      "null"
+     ],
+     [
+      "judge",
+      "a",
+      "{\"packed\": \"a\"}",
+      600,
+      false
+     ],
+     [
+      "triage",
+      "a",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "dismissed",
+      "crq-triage/judge",
+      "default",
+      "2026-11-26T00:00:00Z",
+      "{\"expected_previous_event_id\": \"ev0-a\", \"failure_class\": \"exhausted\"}"
+     ]
+    ]
+   },
+   "judge": {},
+   "name": "delivery-malformed-status-missing",
+   "rows": [
+    {
+     "id": "a",
+     "kind": "pending"
+    },
+    {
+     "id": "c1",
+     "kind": "confirmed"
+    }
+   ],
+   "rows_json": [
+    "{\"finding\": {\"id\": \"a\", \"severity\": \"major\", \"path\": \"src/a.py\", \"title\": \"T a\", \"body\": \"B a\", \"anchor_status\": \"verified\"}, \"status\": \"untriaged\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-a\", \"previous_event_id\": \"ev0-a\"}",
+    "{\"finding\": {\"id\": \"c1\", \"severity\": \"major\", \"path\": \"src/c1.py\", \"title\": \"T c1\", \"body\": \"B c1\", \"anchor_status\": \"verified\"}, \"status\": \"confirmed\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-c1\", \"previous_event_id\": \"ev0-c1\", \"target_current\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}"
+   ],
+   "ts_refuses": false
+  },
+  {
+   "boundary": {
+    "candidates": [
+     {
+      "escalate": false,
+      "id": "a"
+     },
+     {
+      "escalate": false,
+      "id": "b"
+     }
+    ],
     "plans": []
    },
    "context": {

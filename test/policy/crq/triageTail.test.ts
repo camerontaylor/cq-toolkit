@@ -60,7 +60,7 @@ interface PhaseCase {
   context?: Record<string, { advance?: number; raises?: string; message?: string }>;
   context_error?: Script;
   triage?: Script;
-  deliver?: Record<string, { raises?: string; message?: string }>;
+  deliver?: Record<string, { raises?: string; message?: string; injected_form?: boolean }>;
   boundary: {
     candidates: Array<{ id: string; escalate: boolean }>;
     plans: Array<{
@@ -203,6 +203,15 @@ async function replay(item: PhaseCase): Promise<{ trace: unknown[][]; report?: s
     contextError(fid, previous, error) {
       trace.push(['context_error', fid, toPlainJson(previous), pyDump(error)]);
       const entry = item.context_error?.[fid]?.[error === null ? 'clear' : 'set'] ?? {};
+      const corrupt = entry.corrupt as
+        | { id: string; field: string; delete?: boolean; value?: unknown }
+        | undefined;
+      if (corrupt !== undefined) {
+        // Damage a row the head already loaded: only the delivery re-read sees it.
+        const damaged = store.get(corrupt.id) as Record<string, unknown>;
+        if (corrupt.delete === true) delete damaged[corrupt.field];
+        else damaged[corrupt.field] = corrupt.value;
+      }
       if (typeof entry.raises === 'string') raise(entry.raises, String(entry.message ?? ''));
       return Promise.resolve('result' in entry ? (entry.result as boolean) : true);
     },
@@ -249,7 +258,12 @@ async function replay(item: PhaseCase): Promise<{ trace: unknown[][]; report?: s
     deliver(fid, transport, at) {
       trace.push(['deliver', fid, transport, at]);
       const entry = item.deliver?.[fid] ?? {};
-      if (typeof entry.raises === 'string') raise(entry.raises, String(entry.message ?? ''));
+      if (typeof entry.raises === 'string') {
+        if (entry.injected_form === true) {
+          throw new TriageInjectedFailure(entry.raises, String(entry.message ?? ''));
+        }
+        raise(entry.raises, String(entry.message ?? ''));
+      }
       return Promise.resolve({ receipt: fid });
     },
   };
@@ -291,7 +305,8 @@ async function replay(item: PhaseCase): Promise<{ trace: unknown[][]; report?: s
       };
       clock.now += entry.advance ?? 0;
       if (typeof entry.raises === 'string') {
-        if (entry.injected_form === true) throw new TriageInjectedFailure(entry.raises);
+        if (entry.injected_form === true)
+          throw new TriageInjectedFailure(entry.raises, String(entry.message ?? ''));
         raise(entry.raises, String(entry.message ?? ''));
       }
       return parseJsonValue(entry.report_json as string);

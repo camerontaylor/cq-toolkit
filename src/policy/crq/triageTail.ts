@@ -381,12 +381,18 @@ export async function triagePhaseTail<TTransport>(
         ]);
         break;
       }
-      if (failure instanceof ContextScanError) {
+      if (failure instanceof ContextScanError || injectedIn(failure, ['ContextScanError'])) {
         stopped = 'deferred';
         stopReport = object([
           ['stop', 'deferred'],
           ['errorClass', 'context-scan'],
-          ['reason', failure.reason],
+          // An injected failure carries the cause text; Python normalizes it in the constructor.
+          [
+            'reason',
+            failure instanceof ContextScanError
+              ? failure.reason
+              : errorReason((failure as Error).message, 'ContextScanError'),
+          ],
         ]);
         break;
       }
@@ -478,19 +484,19 @@ export async function triagePhaseTail<TTransport>(
   let deliveryDeferred = 0;
   if (!dryRun) {
     for (const row of await inbox.readTriageRows()) {
-      const finding = row.get('finding');
       if (
         rowKey(row, 'status') === 'confirmed' &&
         row.get('target_current') === tip &&
-        finding instanceof JsonObject &&
-        ['critical', 'major', 'minor'].includes(severity(finding) as string)
+        // Python evaluates `row['finding']['severity']` for an eligible row, so
+        // a missing or non-object finding raises instead of being skipped.
+        ['critical', 'major', 'minor'].includes(severity(deliveryFinding(row)) as string)
       ) {
         const id = findingId(row);
         try {
           await inbox.deliver(id, input.transport, at);
           delivered += 1;
         } catch (failure) {
-          if (failure instanceof RepairRoundCeilingError) {
+          if (isRepairRoundCeiling(failure)) {
             await inbox.triage({
               findingId: id,
               action: 'needs-human',
@@ -535,6 +541,18 @@ export async function triagePhaseTail<TTransport>(
 /** Python `report.get('model', 'judge')`: a present null stays null. */
 function modelOf(report: JsonObject): JsonValue {
   return report.has('model') ? (report.get('model') as JsonValue) : 'judge';
+}
+
+/** `row['finding']` for an eligible delivery row; KeyError/TypeError otherwise. */
+function deliveryFinding(row: JsonObject): JsonObject {
+  const finding = rowKey(row, 'finding');
+  if (!(finding instanceof JsonObject)) refuse('row finding is not an object (TypeError)');
+  return finding;
+}
+
+/** `finding_delivery.RepairRoundCeiling`, as the dedicated class or by class name. */
+function isRepairRoundCeiling(error: unknown): error is Error {
+  return error instanceof RepairRoundCeilingError || injectedIn(error, ['RepairRoundCeiling']);
 }
 
 function severity(finding: JsonObject): JsonValue {

@@ -140,6 +140,15 @@ class FakeInbox:
         script = self._script("context_error", fid)
         key = "clear" if error is None else "set"
         entry = script.get(key, {})
+        corrupt = entry.get("corrupt")
+        if corrupt:
+            # Damage a re-read row after the head loaded it: only the delivery loop sees it.
+            damaged = self.store[corrupt["id"]]
+            if corrupt.get("delete"):
+                damaged.pop(corrupt["field"], None)
+            else:
+                damaged[corrupt["field"]] = corrupt["value"]
+            (self.root / "triage" / (corrupt["id"] + ".json")).write_text(dump(damaged), encoding="utf-8")
         if "raises" in entry:
             raise EXCEPTIONS[entry["raises"]](entry.get("message", ""))
         if "result" in entry:
@@ -428,6 +437,26 @@ def cases() -> list[dict]:
         "a": {"raises": "TimeoutExpired", "injected_form": True},
     }))
 
+    add(case("judge-context-scan-injected-form", [R("m", "pathless"), R("a"), R("b")], judge={
+        "a": {"raises": "ContextScanError", "message": "policy   unreadable\nat /x", "injected_form": True},
+    }))
+    add(case("judge-ceiling-injected-form", [R("a"), R("b")], judge={
+        "a": {"raises": "RepairRoundCeiling", "message": "round   ceiling", "injected_form": True},
+    }))
+    add(case("delivery-ceiling-injected-form", [R("c1", "confirmed"), R("c2", "confirmed")], deliver={
+        "c1": {"raises": "RepairRoundCeiling", "message": "ceiling at pin", "injected_form": True},
+    }))
+    for label, spec_ in (
+        ("missing", {"delete": True}), ("null", {"value": None}), ("list", {"value": []}),
+        ("string", {"value": "x"}), ("number", {"value": 5}),
+        ("no-severity", {"value": {"id": "c1"}}), ("null-severity", {"value": {"id": "c1", "severity": None}}),
+    ):
+        add(case("delivery-malformed-finding-" + label, [R("a"), R("c1", "confirmed"), R("c2", "confirmed")],
+                 context_error={"a": {"clear": {"corrupt": {"id": "c1", "field": "finding", **spec_}}}}))
+    add(case("delivery-malformed-finding-ineligible-skipped", [R("a"), R("f1", "fixed"), R("s1", "stale")],
+             context_error={"a": {"clear": {"corrupt": {"id": "f1", "field": "finding", "value": None}}}}))
+    add(case("delivery-malformed-status-missing", [R("a"), R("c1", "confirmed")],
+             context_error={"a": {"clear": {"corrupt": {"id": "c1", "field": "status", "delete": True}}}}))
     context_failures = (
         ("key", "KeyError"), ("type", "TypeError"), ("value", "ValueError"),
         ("integrity", "IntegrityError"), ("process", "CalledProcessError"),
