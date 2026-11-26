@@ -65,7 +65,7 @@ both are empty. `TICK_MISSING_EFFECTS` (`src/queue-runner/tick.ts`) repeats
 `STAGED_GAPS` (a test keeps them in step):
 
 - `harvest-review-effects`: `fileHarvestReviewEffects` (`src/adapters/crq/harvestReviewEffects.ts`) binds findings.md for non-local kinds, `removeWorktree`, `writeReceipt` and `requestPrReview`, each differentially pinned against Python. `repairEnqueue` is bound from the repair-backfill input (`crq_repair.findings` is ported in `src/queue-runner/repairFindings.ts` and read from `RUNS/<run>/review.ndjson`; git, the repair config and the merged-current flag stay injected), `backfillHarvest` is bound by `backfillHarvestEffect` (`src/adapters/crq/backfillHarvestEffect.ts`, differentially pinned, not routed) over the injected git, outbox, inbox, store, `state_event`, queue save and cleanup, but not Python's unverified-terminal retain strings or its quota-cause/no-cooldown outcomes, which throw, and the coverage seam has no harvest-side implementation (start-one `CoverageEffects`).
-- `repair-harvest-effects`: `repair_tick.harvest` queue side. `markFindingOutcome` and `recordUnpublishedFixedSibling` (`fileRepairOutcomeEffects`, `src/adapters/crq/repairOutcomeEffects.ts`) and `cleanupHarvested` (`fileRepairCleanup`, `src/adapters/crq/repairCleanupEffects.ts`) are file-backed and differentially pinned against Python (`apps/crq-python/repair_harvest_effects_vectors.py`); none is composed into the tick. The job/result reads (`readJob`, `readResult`, `resultExists`) are bound in `src/adapters/crq/repairHarvestReads.ts`, not by `fileRepairHarvestEffects`, and this emitter does not pin them. Still unbound: `makeWorktree`/`removeWorktree`, `verify`, `mechanical`, `requireCanonicalDelivery`, `saveQueue`, `publish` (push, PR creation, hack detector) and `replayBudget`; they need TS ports of the repair worktree, verify and detector runners and the publish path, so the row stays open.
+- `repair-harvest-effects`: `repair_tick.harvest` queue side. `markFindingOutcome` and `recordUnpublishedFixedSibling` (`fileRepairOutcomeEffects`, `src/adapters/crq/repairOutcomeEffects.ts`) and `cleanupHarvested` (`fileRepairCleanup`, `src/adapters/crq/repairCleanupEffects.ts`) are file-backed and differentially pinned against Python (`apps/crq-python/repair_harvest_effects_vectors.py`); none is composed into the tick. The job/result reads (`readJob`, `readResult`, `resultExists`) are bound in `src/adapters/crq/repairHarvestReads.ts`, not by `fileRepairHarvestEffects`, and this emitter does not pin them. Bound offline but not composed into the tick or routed: `makeWorktree`/`removeWorktree`, `verify` and `mechanical` (`src/adapters/crq/repairHarvestRunners.ts`), `requireCanonicalDelivery`, `saveQueue` and `replayBudget` (`repairHarvestState.ts`), and `publish` with its leased push (`repairHarvestPublish.ts`, exercised against a local bare remote). Still injected: the forge reads and writes (`gh pr view|list|create`), `newItem`, the clock and the gitleaks binary; the admission-history compaction log is not ported. The row stays open until the slots are composed into the tick.
 - `start-one-effects`: `fileLaunchEffects` (`src/adapters/crq/launchEffects.ts`) binds the clock, repo identity, band, run directory, worktree, `meta.json`, work record, event and `_review` spawn effects. Its scans, blocked receipt, author lease, on-demand clone and queue save stay required injected seams, and `CoverageEffects` `select` (it launches, and `launch` is unbound), `buildSynthetic` (a git-writing plumbing sequence) and the tick clocks and queue helpers stay injected. `makeCoverageEffects` (`src/adapters/crq/coverageEffects.ts`) binds `mergeQueueSha`, `diffNameOnly`, `measureMerged`, `coverageCandidate`, `legacyOrigins`, `legacyRetryAllowed`, and, over `src/adapters/crq/coverageBackfillSeams.ts` (differentially pinned by `coverage_backfill_vectors.py`), `rank4Gate` (`backfill_runtime.py:123`), `bindRun` and `cancelBeforeVendor` (`backfill_jobs.py:165`/`:173`). The rank4 gate's clock, ordinary eligibility, usage refresh, state-event outbox and queue writer stay injected as `Rank4Collaborators`.
 - `shadow-d2`: only the plan is shadowed, not the composed phases.
 
@@ -86,12 +86,11 @@ the prepared head is published but the later open-PR read is still at the
 journaled `target`, and the stale and finalize outcomes. What
 `repair-harvest-effects` still lacks for publication:
 
-- The real `push` binding: `leasedPush` (`src/adapters/git/leasedPush.ts`)
-  takes the same `(branch, expected, sha)` but needs a resolved
-  `PushDestination` and a checkout path, and its not-fast-forward message
-  differs from the one Python raises (`recoverPublication` refuses first with
-  Python's text). Unlike Python's `git push origin`, it also treats a remote
-  already at `sha` after a failed push as success.
+- The `push` binding is `repairHarvestPublish.ts`: Python's exact
+  `git push origin --force-with-lease=refs/heads/<b>:<expected> <sha>:refs/heads/<b>`,
+  failing with `c.git`'s RuntimeError text, not `leasedPush` (whose
+  not-fast-forward message and already-at-`sha` success differ). It is only
+  exercised against a local bare remote.
 - The real bindings of `finalize_publication`'s effects (below): its state
   transitions are ported, see S6-i.
 - The first-publication arm of `publish` (journal absent): its decision
