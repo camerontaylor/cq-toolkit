@@ -49,7 +49,13 @@ interface PhaseCase {
   ts_refuses: boolean;
   judge?: Record<
     string,
-    { report_json?: string; advance?: number; raises?: string; message?: string }
+    {
+      report_json?: string;
+      advance?: number;
+      raises?: string;
+      message?: string;
+      injected_form?: boolean;
+    }
   >;
   context?: Record<string, { advance?: number; raises?: string; message?: string }>;
   context_error?: Script;
