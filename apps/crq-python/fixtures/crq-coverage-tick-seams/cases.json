@@ -30,6 +30,132 @@
    ]
   }
  ],
+ "deps_numeric": [
+  {
+   "deps": [
+    {
+     "ok": true
+    },
+    {
+     "ok": false
+    }
+   ],
+   "items": [
+    {
+     "id": 1,
+     "kind": "open",
+     "state": "pending"
+    },
+    {
+     "depends_on": 1,
+     "id": "c",
+     "kind": "open",
+     "state": "pending"
+    }
+   ],
+   "name": "numeric-dep-pending"
+  },
+  {
+   "deps": [
+    {
+     "ok": true
+    },
+    {
+     "ok": true
+    }
+   ],
+   "items": [
+    {
+     "id": 1,
+     "kind": "open",
+     "state": "done"
+    },
+    {
+     "depends_on": 1,
+     "id": "c",
+     "kind": "open",
+     "state": "pending"
+    }
+   ],
+   "name": "numeric-dep-done"
+  },
+  {
+   "deps": [
+    {
+     "ok": true
+    },
+    {
+     "ok": false
+    }
+   ],
+   "items": [
+    {
+     "id": {
+      "$float": "2.5"
+     },
+     "kind": "open",
+     "state": "pending"
+    },
+    {
+     "depends_on": {
+      "$float": "2.5"
+     },
+     "id": "c",
+     "kind": "open",
+     "state": "pending"
+    }
+   ],
+   "name": "numeric-dep-float-id"
+  },
+  {
+   "deps": [
+    {
+     "ok": true
+    },
+    {
+     "ok": true
+    }
+   ],
+   "items": [
+    {
+     "id": 0,
+     "kind": "open",
+     "state": "pending"
+    },
+    {
+     "depends_on": 0,
+     "id": "c",
+     "kind": "open",
+     "state": "pending"
+    }
+   ],
+   "name": "numeric-dep-zero"
+  },
+  {
+   "deps": [
+    {
+     "ok": true
+    },
+    {
+     "ok": true
+    }
+   ],
+   "items": [
+    {
+     "id": 1,
+     "kind": "open",
+     "state": "pending"
+    },
+    {
+     "depends_on": 7,
+     "id": "c",
+     "kind": "open",
+     "state": "pending"
+    }
+   ],
+   "name": "numeric-dep-gone"
+  }
+ ],
  "malformed": [
   {
    "live": {

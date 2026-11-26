@@ -163,6 +163,22 @@ def queue_case(queue: dict, config: dict) -> dict:
     return {"queue": queue["name"], "items": queue["items"], "config": config["name"], "live": live, "sorted": ordered, "deps": deps}
 
 
+# A dependency named by a numeric id: `candidate["id"] == dependency` compares numbers.
+DEPS_NUMERIC: list[dict] = [
+    {"name": "numeric-dep-pending", "items": [item(1), item("c", depends_on=1)]},
+    {"name": "numeric-dep-done", "items": [item(1, state="done"), item("c", depends_on=1)]},
+    {"name": "numeric-dep-float-id", "items": [item(2.5), item("c", depends_on=2.5)]},
+    {"name": "numeric-dep-zero", "items": [item(0), item("c", depends_on=0)]},
+    {"name": "numeric-dep-gone", "items": [item(1), item("c", depends_on=7)]},
+]
+
+
+def deps_numeric_case(spec: dict) -> dict:
+    q = {"items": copy.deepcopy(spec["items"])}
+    return {"name": spec["name"], "items": spec["items"],
+            "deps": [guarded(lambda i=i: bool(crq.deps_met(q, i))) for i in q["items"]]}
+
+
 MALFORMED: list[dict] = [
     {"name": "items-not-a-list", "queue": {"items": "nope"}},
     {"name": "items-missing", "queue": {}},
@@ -300,6 +316,7 @@ def build() -> dict:
         "queues": [queue_case(q, c) for q in QUEUES for c in CONFIGS],
         "configs": CONFIGS,
         "malformed": [malformed_case(m) for m in MALFORMED],
+        "deps_numeric": [deps_numeric_case(d) for d in DEPS_NUMERIC],
         "settings": [settings_case(s) for s in SETTINGS],
     }
 

@@ -48,6 +48,7 @@ interface Fixture {
     deps: Record<string, Outcome>;
   }[];
   malformed: { name: string; queue: unknown; live: Outcome }[];
+  deps_numeric: { name: string; items: unknown[]; deps: Outcome[] }[];
   settings: {
     name: string;
     outcome: Outcome;
@@ -208,6 +209,22 @@ describe('coverage tick seams against the Python oracle', () => {
             const id = (item as { id: string }).id;
             expect(seams.depsMet(queue, item)).toBe(testCase.deps[id]!.ok);
           }
+        }
+      });
+    }
+
+    // A numeric dependency id compares by value in Python, in either number shape.
+    for (const testCase of fixture.deps_numeric) {
+      it(`deps ${testCase.name}`, () => {
+        const seams = bindTickSeams({
+          clock: () => NOW_MS,
+          schedule: { primaryRepo: fixture.primary, repos: [], localReviewAgingMinutes: 60 },
+        });
+        for (const shape of [decodePlain, decode]) {
+          const queue = { items: shape(testCase.items) } as Queue;
+          queue.items.forEach((item, index) => {
+            expect(seams.depsMet(queue, item)).toBe(testCase.deps[index]!.ok);
+          });
         }
       });
     }
