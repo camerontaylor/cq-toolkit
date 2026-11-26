@@ -6,7 +6,7 @@ Usage: python3.14 -I repairUnitOracle.py <apps/crq-python dir>
 Reads {"cases": [case]} on stdin and writes {"results": [result]}. A case is
 {"op": "worker_limit" | "dispatch_paused" | "blocked" | "fetch_clone" | "inbox_order" |
  "inbox_item" | "read_queue" | "read_backlog" | "pending" | "unreadable_result" |
- "mark_stale", "files": {"<path under state/>": text | {"dir": true}},
+ "mark_stale" | "classify_job" | "hold_backfill", "files": {"<path under state/>": text | {"dir": true}},
  "mtimes": {"<path>": epoch seconds}, "clone": "repo" | "none", "clock": ["<ISO UTC>"],
  "env": {name: value}, "holdLock": bool (fetch_clone: another description holds tick.lock),
  "args": {...}}.
@@ -14,6 +14,9 @@ Reads {"cases": [case]} on stdin and writes {"results": [result]}. A case is
 `hold_backfill_groups`, copied here statement for statement because Python has no function
 for them. `inbox_item` reports a non-string or unreadable item as null (the drain skips both);
 `read_queue`/`read_backlog` report an OSError/ValueError as {"unreadable": true}.
+`classify_job` is `bounded.drain_job` over a clone seeded from args.seed (a list of {files: {path: text}, push?: branch}
+commits pushed to origin/main, or to origin/<push>, with a fixed identity); `hold_backfill` is `hold_backfill_groups`
+with every group dispatchable, reporting the kept items and the narrated lines.
 A result is {"ok": value, "files": {path: text}} or {"error": "<exception class>"}.
 No network: the only git is a local bare origin created inside the temporary ROOT.
 """
@@ -32,6 +35,37 @@ sys.path.insert(0, sys.argv[1])
 SPEC = importlib.util.spec_from_file_location('crq_repair_script', Path(sys.argv[1]) / 'crq_repair.py')
 repair = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(repair)
+from crq_repair import bounded  # noqa: E402 - needs the sys.path entry above
+
+GIT_IDENTITY = {
+    'GIT_AUTHOR_NAME': 'oracle', 'GIT_AUTHOR_EMAIL': 'oracle@example.invalid',
+    'GIT_COMMITTER_NAME': 'oracle', 'GIT_COMMITTER_EMAIL': 'oracle@example.invalid',
+    'GIT_AUTHOR_DATE': '2026-01-01T00:00:00Z', 'GIT_COMMITTER_DATE': '2026-01-01T00:00:00Z',
+}
+
+
+def seed_clone(clone, commits):
+    """Commit each {files: {path: text}, push?: branch} entry onto origin. Fixed identity and dates make the
+    commit ids identical to the TS test's, so jobs can name them."""
+    env = {**os.environ, **GIT_IDENTITY, 'PATH': '/usr/local/bin:/usr/bin:/bin'}
+    def run_git(*argv):
+        subprocess.run(['git', '-C', clone, '-c', 'commit.gpgsign=false', *argv], check=True,
+                       env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    def head():
+        return subprocess.run(['git', '-C', clone, 'rev-parse', 'HEAD'], check=True, env=env,
+                              capture_output=True, text=True).stdout.strip()
+    for index, entry in enumerate(commits):
+        before = head() if index else None
+        for rel, text in entry['files'].items():
+            target = Path(clone) / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text)
+            run_git('add', rel)
+        run_git('commit', '--quiet', '-m', 'seed ' + str(index))
+        branch = entry.get('push', 'main')
+        run_git('push', '--quiet', 'origin', 'HEAD:refs/heads/' + branch)
+        if branch != 'main':
+            run_git('reset', '--quiet', '--hard', before)  # the commit lives only on origin/<branch>
 
 
 def parse_clock(text):
@@ -137,6 +171,17 @@ def run(case, tmp):
         return repair.unreadable_result(args['job'])
     if op == 'mark_stale':
         return repair.mark_stale(args['jobObject'], args['reason'])
+    if op == 'classify_job':
+        config = {'clone': make_clone(tmp, case.get('clone', 'repo'))}
+        if args.get('seed') and case.get('clone', 'repo') != 'none':
+            seed_clone(config['clone'], args['seed'])
+        status, job, reason = bounded.drain_job(repair.ROOT, config, args['queue'], args['job'])
+        return {'status': status, 'job': job, 'reason': reason}
+    if op == 'hold_backfill':
+        lines = []
+        repair.narrate = lines.append
+        kept = repair.hold_backfill_groups({item: ['x'] for item in args['items']})
+        return {'kept': list(kept), 'narrated': lines}
     raise SystemExit('unknown op ' + op)
 
 

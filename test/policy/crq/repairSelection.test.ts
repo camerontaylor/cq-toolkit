@@ -405,12 +405,18 @@ describe('repair selection refusal cases', () => {
 
   test('a malformed queue is a typed skip, not an exception', () => {
     const { input } = drainInputOf(base);
-    for (const queue of [new JsonObject([]), new JsonObject([['items', 'not-an-array']])]) {
-      const outcome = drainJob({ ...input, queue });
-      expect(outcome.status).toBe('skip');
-      if (outcome.status === 'run') throw new Error('unreachable');
-      expect(outcome.refusal).toBe('selection-malformed');
-    }
+    const outcome = drainJob({ ...input, queue: new JsonObject([['items', 'not-an-array']]) });
+    expect(outcome.status).toBe('skip');
+    if (outcome.status === 'run') throw new Error('unreachable');
+    expect(outcome.refusal).toBe('selection-malformed');
+  });
+
+  test('a queue with no items key is empty, as queue.get("items", []), not malformed', () => {
+    const { input } = drainInputOf(base);
+    const outcome = drainJob({ ...input, queue: new JsonObject([]) });
+    expect(outcome.status).toBe('skip');
+    if (outcome.status === 'run') throw new Error('unreachable');
+    expect(outcome.refusal).toBe('no-queued-run');
   });
 
   test('a missing source blob is a typed stale/skip, never a crash', () => {
@@ -503,6 +509,17 @@ describe('repair explicit selection', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.selection.originJob).toEqual(jobOrigin);
+  });
+
+  test('a queue with no items key stays a KeyError for select_job (queue["items"]), unlike drain_job', () => {
+    const { input } = selectInputOf(caseByName('select-prepared'));
+    expect(selectJob(input).ok).toBe(true);
+    // select_job reads `queue['items']`; drain_job reads `queue.get('items', [])` and treats the
+    // same document as an empty queue (see the drainJob test of the same shape).
+    expect(selectJob({ ...input, queue: new JsonObject([]) })).toMatchObject({
+      ok: false,
+      refusal: 'selection-malformed',
+    });
   });
 
   test('numeric and boolean item ids match across independently parsed documents', () => {
