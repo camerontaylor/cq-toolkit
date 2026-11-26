@@ -286,6 +286,10 @@ def build_scenarios() -> None:
     scenario("scan: a context with no path at all is a KeyError after the earlier scans", scan=(True,),
              script=[scan_op({"retained_patch": "x", "retained_attempts": [],
                               "current_contract": {"path": "p", "text": ""}})])
+    scenario("scan: a truthy non-string current_path is a TypeError", scan=(True,),
+             script=[scan_op(context(current_path=5))])
+    scenario("scan: a truthy non-string finding path is a TypeError", scan=(True,),
+             script=[scan_op(context(finding={"path": 7}))])
     scenario("scan: the finding path default is used when both paths are falsy", scan=(True,),
              script=[scan_op(context(finding={"path": ""}))])
     scenario("scan: strings are flattened in document order with splitlines edges", scan=(True,),
