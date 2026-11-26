@@ -6,6 +6,7 @@ import {
   fileRepairHarvestEffects,
   findingLedgerRoots,
 } from '../../../src/adapters/crq/repairHarvestSource.js';
+import { PyError } from '../../../src/queue-runner/pyErrors.js';
 
 let root: string;
 beforeEach(async () => {
@@ -32,9 +33,10 @@ describe('fileRepairHarvestEffects', () => {
   it('fails closed when the rollout file is absent or invalid', async () => {
     const { publication } = fileRepairHarvestEffects(root);
     const message = 'backfill repair write-back requires existing ledger configuration';
-    await expect(publication.retained()).rejects.toThrow(message);
+    const valueError = new PyError('ValueError', message);
+    await expect(publication.retained()).rejects.toEqual(valueError);
     await writeFile(join(root, 'backfill-rollout.json'), '{nope');
-    await expect(publication.spool({} as never)).rejects.toThrow(message);
+    await expect(publication.spool({} as never)).rejects.toEqual(valueError);
   });
 
   it('binds the publication outbox once the rollout names an artifact root', async () => {

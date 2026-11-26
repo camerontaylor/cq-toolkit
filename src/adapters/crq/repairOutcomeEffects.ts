@@ -68,7 +68,6 @@ function concatError(value: unknown): PyError {
 }
 
 function jobIdOf(job: Rec): string {
-  if (!Object.hasOwn(job, 'job')) throw new PyError('KeyError', "'job'");
   const id = job['job'];
   if (typeof id !== 'string') {
     throw new PyError('TypeError', `repair job id must be a string, not '${pyTypeName(id)}'`);
@@ -78,6 +77,14 @@ function jobIdOf(job: Rec): string {
 
 export function fileRepairOutcomeEffects(input: FileRepairOutcomeInput): FileRepairOutcomeEffects {
   const harvest = fileRepairHarvestEffects(input.stateRoot);
+  /** `job['job']` after `finding_inbox(c)`: a missing rollout ValueError wins over the KeyError. */
+  async function requireJobId(job: Rec): Promise<string> {
+    if (!Object.hasOwn(job, 'job')) {
+      await harvest.publication.retained();
+      throw new PyError('KeyError', "'job'");
+    }
+    return jobIdOf(job);
+  }
   const dispositions = new FindingDispositions(harvest.files, NO_ARTIFACTS);
 
   /** `inbox.repair_outcome(...)`: `finding_inbox(c)` first, then a non-string id after `recover`. */
@@ -142,7 +149,7 @@ export function fileRepairOutcomeEffects(input: FileRepairOutcomeInput): FileRep
       }
       if (action === undefined) return;
       const reason = pyTruthy(result['reason']) ? result['reason'] : verdict;
-      await write(findingId, jobIdOf(job), action, fromPlainJson(reason), {
+      await write(findingId, await requireJobId(job), action, fromPlainJson(reason), {
         failureClass,
         repairBase: job['repair_base'],
         maxFindingRetries: input.maxFindingRetries,

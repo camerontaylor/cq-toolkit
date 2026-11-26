@@ -59,6 +59,7 @@ const plain = JSON.parse(readFileSync(FIXTURE, 'utf8')) as {
     op: string;
     job: Record<string, unknown>;
     result: Record<string, unknown>;
+    no_rollout?: boolean;
   }[];
 };
 const cases = array(document.get('outcome_cases'), 'outcome_cases').map((value) =>
@@ -73,7 +74,7 @@ describe('repair outcome effects against the Python oracle', () => {
   test('the fixture is not vacuous', () => {
     expect(cases.length).toBeGreaterThan(25);
     const errors = new Set(cases.map((c) => object(c.get('expected'), 'e').get('error')));
-    expect(errors).toEqual(new Set([null, 'KeyError', 'TypeError']));
+    expect(errors).toEqual(new Set([null, 'KeyError', 'TypeError', 'ValueError']));
   });
 
   test.each(cases.map((value, index) => [text(value.get('name'), 'name'), index] as const))(
@@ -85,10 +86,11 @@ describe('repair outcome effects against the Python oracle', () => {
       const root = await mkdtemp(join(tmpdir(), 'crq-outcome-effects-'));
       temporary.push(root);
       await mkdir(root, { recursive: true });
-      await writeFile(
-        join(root, 'backfill-rollout.json'),
-        JSON.stringify({ durable_artifact_root: join(root, 'artifacts') }),
-      );
+      if (!raw.no_rollout)
+        await writeFile(
+          join(root, 'backfill-rollout.json'),
+          JSON.stringify({ durable_artifact_root: join(root, 'artifacts') }),
+        );
       const files = fileFindingInbox(join(root, 'backfill', 'findings'));
       const publication = fileFindingPublication({
         root: join(root, 'backfill', 'publication'),

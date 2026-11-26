@@ -228,6 +228,8 @@ def _outcome_run(case: dict) -> dict:
         result = copy.deepcopy(case.get("result"))
 
         def settings(_state, **_kwargs):
+            if case.get("no_rollout"):
+                raise ValueError("backfill repair write-back requires existing ledger configuration")
             return {"durable_artifact_root": str(root / "artifacts")}
 
         error = None
@@ -292,6 +294,8 @@ def outcome_cases() -> list[dict]:
              job={k: v for k, v in base._job_doc().items() if k != "job"}),
         mark("missing-repair-base-writes-null-base", {"verdict": "FAILED"},
              job={k: v for k, v in base._job_doc().items() if k != "repair_base"}),
+        mark("missing-job-id-without-rollout-value-error", {"verdict": "FAILED"},
+             job={k: v for k, v in base._job_doc().items() if k != "job"}, no_rollout=True),
         mark("row-bound-to-newer-job-preserved", {"verdict": "FAILED", "reason": "late"}, repair_task="crq-newer"),
     ]
     sibling_result = {"job": "sib-1", "item": base.ITEM, "verdict": "FIXED"}

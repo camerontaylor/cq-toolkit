@@ -8,8 +8,10 @@
  * and answers with the worktree a caller MAY remove, or a typed refusal. The
  * caller owns `git worktree remove <worktree>` (cwd = CLONE) and, as in Python,
  * reports that command's exit status as the cleanup's outcome. Inactive:
- * nothing imports this outside tests; `RepairHarvestEffects.cleanupHarvested`
- * stays unbound (docs/crq/tick-slot-missing-effects.md).
+ * nothing imports this outside tests. `fileRepairCleanup`
+ * (src/adapters/crq/repairCleanupEffects.ts) binds `RepairHarvestEffects.cleanupHarvested`
+ * over real probes, but it is not composed into the tick
+ * (docs/crq/tick-slot-missing-effects.md).
  *
  * Policy mirrored from Python, including its quirks:
  *
