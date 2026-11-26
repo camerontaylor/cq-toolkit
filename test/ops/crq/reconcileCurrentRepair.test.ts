@@ -110,8 +110,11 @@ describe('current repair reconciliation', () => {
       }),
     ],
     [
-      'not-fixed marker',
-      (r: ReturnType<typeof fixture>['record']) => ({ ...r, not_fixed: { reason: 'closed' } }),
+      'fresh not-fixed marker',
+      (r: ReturnType<typeof fixture>['record']) => ({
+        ...r,
+        not_fixed: { reason: 'closed', at: `${new Date().toISOString().slice(0, 19)}Z` },
+      }),
     ],
   ])('does not credit a record with invalid %s', async (_name, change) => {
     const { item, effects, record } = fixture();

@@ -1,0 +1,2446 @@
+{
+ "current": [
+  {
+   "result": {
+    "counts": {
+     "deferred": 0,
+     "errors": [],
+     "starved": 0
+    },
+    "evidence_merges": [],
+    "forge_calls": [
+     9
+    ],
+    "item": {
+     "capture": {
+      "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "kind": "merged-current",
+     "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a",
+     "remediation_state": "pending-merged-evidence",
+     "repair_runs": {
+      "run": {
+       "fix_pr": {
+        "number": 9
+       },
+       "jobs": [
+        "j"
+       ],
+       "not_fixed": {
+        "at": "2026-11-27T03:04:05Z",
+        "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "pr": 9,
+        "reason": "closed-or-head-mismatch",
+        "state": "CLOSED"
+       },
+       "publication": {
+        "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+       },
+       "receipt_findings": [
+        "3bed56c55daf1db41dcf10cd9d9f36485bb4a2f55f2fd7f05622d1aceca63b8a"
+       ],
+       "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a",
+       "repair_findings": [
+        "ecc21e7106a7c8078d3f2e2b7a942252d0291f211479452873ba249ce66b80f6"
+       ],
+       "state": "published",
+       "verdicts": [
+        {
+         "finding": {
+          "body": "fix",
+          "severity": "major"
+         },
+         "job": "j",
+         "verdict": "FIXED"
+        }
+       ]
+      }
+     },
+     "state": "done",
+     "subject": {
+      "repo": "o/r",
+      "target_selector": "promoted-main"
+     }
+    },
+    "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a"
+   },
+   "spec": {
+    "extra": {},
+    "forge": {
+     "baseRefName": "main",
+     "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "number": 9,
+     "state": "CLOSED"
+    },
+    "name": "a closed PR is stamped with at"
+   }
+  },
+  {
+   "result": {
+    "counts": {
+     "deferred": 0,
+     "errors": [],
+     "starved": 0
+    },
+    "evidence_merges": [],
+    "forge_calls": [
+     9
+    ],
+    "item": {
+     "capture": {
+      "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "kind": "merged-current",
+     "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a",
+     "remediation_state": "pending-merged-evidence",
+     "repair_runs": {
+      "run": {
+       "fix_pr": {
+        "number": 9
+       },
+       "jobs": [
+        "j"
+       ],
+       "not_fixed": {
+        "at": "2026-11-27T03:04:05Z",
+        "head": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "pr": 9,
+        "reason": "closed-or-head-mismatch",
+        "state": "MERGED"
+       },
+       "publication": {
+        "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+       },
+       "receipt_findings": [
+        "3bed56c55daf1db41dcf10cd9d9f36485bb4a2f55f2fd7f05622d1aceca63b8a"
+       ],
+       "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a",
+       "repair_findings": [
+        "ecc21e7106a7c8078d3f2e2b7a942252d0291f211479452873ba249ce66b80f6"
+       ],
+       "state": "published",
+       "verdicts": [
+        {
+         "finding": {
+          "body": "fix",
+          "severity": "major"
+         },
+         "job": "j",
+         "verdict": "FIXED"
+        }
+       ]
+      }
+     },
+     "state": "done",
+     "subject": {
+      "repo": "o/r",
+      "target_selector": "promoted-main"
+     }
+    },
+    "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a"
+   },
+   "spec": {
+    "extra": {},
+    "forge": {
+     "baseRefName": "main",
+     "headRefOid": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+     "mergeCommit": {
+      "oid": "cccccccccccccccccccccccccccccccccccccccc"
+     },
+     "number": 9,
+     "state": "MERGED"
+    },
+    "name": "a head mismatch is stamped with at"
+   }
+  },
+  {
+   "result": {
+    "counts": {
+     "deferred": 0,
+     "errors": [],
+     "starved": 0
+    },
+    "evidence_merges": [],
+    "forge_calls": [],
+    "item": {
+     "capture": {
+      "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "kind": "merged-current",
+     "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a",
+     "remediation_state": "pending-merged-evidence",
+     "repair_runs": {
+      "run": {
+       "fix_pr": {
+        "number": 9
+       },
+       "jobs": [
+        "j"
+       ],
+       "not_fixed": {
+        "at": "2026-11-27T02:04:05Z",
+        "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "pr": 9,
+        "reason": "closed-or-head-mismatch",
+        "state": "CLOSED"
+       },
+       "publication": {
+        "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+       },
+       "receipt_findings": [
+        "3bed56c55daf1db41dcf10cd9d9f36485bb4a2f55f2fd7f05622d1aceca63b8a"
+       ],
+       "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a",
+       "repair_findings": [
+        "ecc21e7106a7c8078d3f2e2b7a942252d0291f211479452873ba249ce66b80f6"
+       ],
+       "state": "published",
+       "verdicts": [
+        {
+         "finding": {
+          "body": "fix",
+          "severity": "major"
+         },
+         "job": "j",
+         "verdict": "FIXED"
+        }
+       ]
+      }
+     },
+     "state": "done",
+     "subject": {
+      "repo": "o/r",
+      "target_selector": "promoted-main"
+     }
+    },
+    "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a"
+   },
+   "spec": {
+    "extra": {
+     "not_fixed": {
+      "at": "2026-11-27T02:04:05Z",
+      "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "pr": 9,
+      "reason": "closed-or-head-mismatch",
+      "state": "CLOSED"
+     }
+    },
+    "forge": {
+     "baseRefName": "main",
+     "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "mergeCommit": {
+      "oid": "cccccccccccccccccccccccccccccccccccccccc"
+     },
+     "number": 9,
+     "state": "MERGED"
+    },
+    "name": "a fresh marker is skipped without a forge call"
+   }
+  },
+  {
+   "result": {
+    "counts": {
+     "deferred": 0,
+     "errors": [],
+     "starved": 0
+    },
+    "evidence_merges": [],
+    "forge_calls": [
+     9
+    ],
+    "item": {
+     "capture": {
+      "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "kind": "merged-current",
+     "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a",
+     "remediation_state": "pending-merged-evidence",
+     "repair_runs": {
+      "run": {
+       "fix_pr": {
+        "number": 9
+       },
+       "jobs": [
+        "j"
+       ],
+       "not_fixed": {
+        "at": "2026-11-27T03:04:05Z",
+        "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "pr": 9,
+        "reason": "closed-or-head-mismatch",
+        "state": "CLOSED"
+       },
+       "publication": {
+        "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+       },
+       "receipt_findings": [
+        "3bed56c55daf1db41dcf10cd9d9f36485bb4a2f55f2fd7f05622d1aceca63b8a"
+       ],
+       "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a",
+       "repair_findings": [
+        "ecc21e7106a7c8078d3f2e2b7a942252d0291f211479452873ba249ce66b80f6"
+       ],
+       "state": "published",
+       "verdicts": [
+        {
+         "finding": {
+          "body": "fix",
+          "severity": "major"
+         },
+         "job": "j",
+         "verdict": "FIXED"
+        }
+       ]
+      }
+     },
+     "state": "done",
+     "subject": {
+      "repo": "o/r",
+      "target_selector": "promoted-main"
+     }
+    },
+    "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a"
+   },
+   "spec": {
+    "extra": {
+     "not_fixed": {
+      "at": "2026-11-26T03:04:05Z",
+      "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "pr": 9,
+      "reason": "closed-or-head-mismatch",
+      "state": "CLOSED"
+     }
+    },
+    "forge": {
+     "baseRefName": "main",
+     "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "number": 9,
+     "state": "CLOSED"
+    },
+    "name": "a stale marker that is still closed is restamped"
+   }
+  },
+  {
+   "result": {
+    "counts": {
+     "deferred": 0,
+     "errors": [],
+     "starved": 0
+    },
+    "evidence_merges": [
+     "cccccccccccccccccccccccccccccccccccccccc"
+    ],
+    "forge_calls": [
+     9
+    ],
+    "item": {
+     "capture": {
+      "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "kind": "merged-current",
+     "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a",
+     "remediation": {
+      "capture_digest": "82ea79996a377bab25d800af1d5d08381b7c8efd704fe44900d702d72d42a028",
+      "findings": [
+       "3bed56c55daf1db41dcf10cd9d9f36485bb4a2f55f2fd7f05622d1aceca63b8a"
+      ],
+      "fix_pr": 9,
+      "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "merge": "cccccccccccccccccccccccccccccccccccccccc",
+      "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a",
+      "subject": {
+       "repo": "o/r",
+       "target_selector": "promoted-main"
+      },
+      "target": "dddddddddddddddddddddddddddddddddddddddd"
+     },
+     "remediation_state": "fixed",
+     "repair_runs": {
+      "run": {
+       "fix_pr": {
+        "number": 9
+       },
+       "jobs": [
+        "j"
+       ],
+       "merged_fix": {
+        "baseRefName": "main",
+        "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "mergeCommit": {
+         "oid": "cccccccccccccccccccccccccccccccccccccccc"
+        },
+        "number": 9,
+        "state": "MERGED"
+       },
+       "publication": {
+        "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+       },
+       "receipt_findings": [
+        "3bed56c55daf1db41dcf10cd9d9f36485bb4a2f55f2fd7f05622d1aceca63b8a"
+       ],
+       "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a",
+       "repair_findings": [
+        "ecc21e7106a7c8078d3f2e2b7a942252d0291f211479452873ba249ce66b80f6"
+       ],
+       "state": "published",
+       "verdicts": [
+        {
+         "finding": {
+          "body": "fix",
+          "severity": "major"
+         },
+         "job": "j",
+         "verdict": "FIXED"
+        }
+       ]
+      }
+     },
+     "state": "done",
+     "subject": {
+      "repo": "o/r",
+      "target_selector": "promoted-main"
+     }
+    },
+    "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a"
+   },
+   "spec": {
+    "extra": {
+     "not_fixed": {
+      "at": "2026-11-26T03:04:05Z",
+      "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "pr": 9,
+      "reason": "closed-or-head-mismatch",
+      "state": "CLOSED"
+     }
+    },
+    "forge": {
+     "baseRefName": "main",
+     "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "mergeCommit": {
+      "oid": "cccccccccccccccccccccccccccccccccccccccc"
+     },
+     "number": 9,
+     "state": "MERGED"
+    },
+    "name": "a stale marker that merged at head is credited and popped"
+   }
+  },
+  {
+   "result": {
+    "counts": {
+     "deferred": 0,
+     "errors": [],
+     "starved": 0
+    },
+    "evidence_merges": [],
+    "forge_calls": [
+     9
+    ],
+    "item": {
+     "capture": {
+      "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "kind": "merged-current",
+     "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a",
+     "remediation_state": "pending-merged-evidence",
+     "repair_runs": {
+      "run": {
+       "fix_pr": {
+        "number": 9
+       },
+       "jobs": [
+        "j"
+       ],
+       "publication": {
+        "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+       },
+       "receipt_findings": [
+        "3bed56c55daf1db41dcf10cd9d9f36485bb4a2f55f2fd7f05622d1aceca63b8a"
+       ],
+       "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a",
+       "repair_findings": [
+        "ecc21e7106a7c8078d3f2e2b7a942252d0291f211479452873ba249ce66b80f6"
+       ],
+       "state": "published",
+       "verdicts": [
+        {
+         "finding": {
+          "body": "fix",
+          "severity": "major"
+         },
+         "job": "j",
+         "verdict": "FIXED"
+        }
+       ]
+      }
+     },
+     "state": "done",
+     "subject": {
+      "repo": "o/r",
+      "target_selector": "promoted-main"
+     }
+    },
+    "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a"
+   },
+   "spec": {
+    "extra": {
+     "not_fixed": {
+      "at": "2026-11-26T03:04:05Z",
+      "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "pr": 9,
+      "reason": "closed-or-head-mismatch",
+      "state": "CLOSED"
+     }
+    },
+    "forge": {
+     "baseRefName": "main",
+     "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "number": 9,
+     "state": "OPEN"
+    },
+    "name": "a stale marker that reopened is popped without credit"
+   }
+  },
+  {
+   "result": {
+    "counts": {
+     "deferred": 0,
+     "errors": [],
+     "starved": 0
+    },
+    "evidence_merges": [
+     "cccccccccccccccccccccccccccccccccccccccc"
+    ],
+    "forge_calls": [
+     9
+    ],
+    "item": {
+     "capture": {
+      "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "kind": "merged-current",
+     "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a",
+     "remediation": {
+      "capture_digest": "82ea79996a377bab25d800af1d5d08381b7c8efd704fe44900d702d72d42a028",
+      "findings": [
+       "3bed56c55daf1db41dcf10cd9d9f36485bb4a2f55f2fd7f05622d1aceca63b8a"
+      ],
+      "fix_pr": 9,
+      "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "merge": "cccccccccccccccccccccccccccccccccccccccc",
+      "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a",
+      "subject": {
+       "repo": "o/r",
+       "target_selector": "promoted-main"
+      },
+      "target": "dddddddddddddddddddddddddddddddddddddddd"
+     },
+     "remediation_state": "fixed",
+     "repair_runs": {
+      "run": {
+       "fix_pr": {
+        "number": 9
+       },
+       "jobs": [
+        "j"
+       ],
+       "merged_fix": {
+        "baseRefName": "main",
+        "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "mergeCommit": {
+         "oid": "cccccccccccccccccccccccccccccccccccccccc"
+        },
+        "number": 9,
+        "state": "MERGED"
+       },
+       "publication": {
+        "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+       },
+       "receipt_findings": [
+        "3bed56c55daf1db41dcf10cd9d9f36485bb4a2f55f2fd7f05622d1aceca63b8a"
+       ],
+       "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a",
+       "repair_findings": [
+        "ecc21e7106a7c8078d3f2e2b7a942252d0291f211479452873ba249ce66b80f6"
+       ],
+       "state": "published",
+       "verdicts": [
+        {
+         "finding": {
+          "body": "fix",
+          "severity": "major"
+         },
+         "job": "j",
+         "verdict": "FIXED"
+        }
+       ]
+      }
+     },
+     "state": "done",
+     "subject": {
+      "repo": "o/r",
+      "target_selector": "promoted-main"
+     }
+    },
+    "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a"
+   },
+   "spec": {
+    "extra": {
+     "not_fixed": {
+      "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "pr": 9,
+      "reason": "closed-or-head-mismatch",
+      "state": "CLOSED"
+     }
+    },
+    "forge": {
+     "baseRefName": "main",
+     "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "mergeCommit": {
+      "oid": "cccccccccccccccccccccccccccccccccccccccc"
+     },
+     "number": 9,
+     "state": "MERGED"
+    },
+    "name": "a pre-cadence marker without at is due"
+   }
+  },
+  {
+   "result": {
+    "counts": {
+     "deferred": 0,
+     "errors": [],
+     "starved": 0
+    },
+    "evidence_merges": [
+     "cccccccccccccccccccccccccccccccccccccccc"
+    ],
+    "forge_calls": [
+     9
+    ],
+    "item": {
+     "capture": {
+      "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "kind": "merged-current",
+     "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a",
+     "remediation": {
+      "capture_digest": "82ea79996a377bab25d800af1d5d08381b7c8efd704fe44900d702d72d42a028",
+      "findings": [
+       "3bed56c55daf1db41dcf10cd9d9f36485bb4a2f55f2fd7f05622d1aceca63b8a"
+      ],
+      "fix_pr": 9,
+      "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "merge": "cccccccccccccccccccccccccccccccccccccccc",
+      "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a",
+      "subject": {
+       "repo": "o/r",
+       "target_selector": "promoted-main"
+      },
+      "target": "dddddddddddddddddddddddddddddddddddddddd"
+     },
+     "remediation_state": "fixed",
+     "repair_runs": {
+      "run": {
+       "fix_pr": {
+        "number": 9
+       },
+       "jobs": [
+        "j"
+       ],
+       "merged_fix": {
+        "baseRefName": "main",
+        "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "mergeCommit": {
+         "oid": "cccccccccccccccccccccccccccccccccccccccc"
+        },
+        "number": 9,
+        "state": "MERGED"
+       },
+       "publication": {
+        "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+       },
+       "receipt_findings": [
+        "3bed56c55daf1db41dcf10cd9d9f36485bb4a2f55f2fd7f05622d1aceca63b8a"
+       ],
+       "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a",
+       "repair_findings": [
+        "ecc21e7106a7c8078d3f2e2b7a942252d0291f211479452873ba249ce66b80f6"
+       ],
+       "state": "published",
+       "verdicts": [
+        {
+         "finding": {
+          "body": "fix",
+          "severity": "major"
+         },
+         "job": "j",
+         "verdict": "FIXED"
+        }
+       ]
+      }
+     },
+     "state": "done",
+     "subject": {
+      "repo": "o/r",
+      "target_selector": "promoted-main"
+     }
+    },
+    "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a"
+   },
+   "spec": {
+    "extra": {
+     "not_fixed": {
+      "at": 7,
+      "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "pr": 9,
+      "reason": "closed-or-head-mismatch",
+      "state": "CLOSED"
+     }
+    },
+    "forge": {
+     "baseRefName": "main",
+     "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "mergeCommit": {
+      "oid": "cccccccccccccccccccccccccccccccccccccccc"
+     },
+     "number": 9,
+     "state": "MERGED"
+    },
+    "name": "a marker with an integer at is due"
+   }
+  },
+  {
+   "result": {
+    "counts": {
+     "deferred": 0,
+     "errors": [],
+     "starved": 0
+    },
+    "evidence_merges": [],
+    "forge_calls": [
+     9
+    ],
+    "item": {
+     "capture": {
+      "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "kind": "merged-current",
+     "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a",
+     "remediation_state": "pending-merged-evidence",
+     "repair_runs": {
+      "run": {
+       "fix_pr": {
+        "number": 9
+       },
+       "jobs": [
+        "j"
+       ],
+       "publication": {
+        "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+       },
+       "receipt_findings": [
+        "3bed56c55daf1db41dcf10cd9d9f36485bb4a2f55f2fd7f05622d1aceca63b8a"
+       ],
+       "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a",
+       "repair_findings": [
+        "ecc21e7106a7c8078d3f2e2b7a942252d0291f211479452873ba249ce66b80f6"
+       ],
+       "state": "published",
+       "verdicts": [
+        {
+         "finding": {
+          "body": "fix",
+          "severity": "major"
+         },
+         "job": "j",
+         "verdict": "FIXED"
+        }
+       ]
+      }
+     },
+     "state": "done",
+     "subject": {
+      "repo": "o/r",
+      "target_selector": "promoted-main"
+     }
+    },
+    "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a"
+   },
+   "spec": {
+    "extra": {
+     "not_fixed": {
+      "at": "never",
+      "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "pr": 9,
+      "reason": "closed-or-head-mismatch",
+      "state": "CLOSED"
+     }
+    },
+    "forge": {
+     "baseRefName": "main",
+     "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "number": 9,
+     "state": "OPEN"
+    },
+    "name": "a marker with a garbage at is due"
+   }
+  },
+  {
+   "result": {
+    "counts": {
+     "deferred": 0,
+     "errors": [],
+     "starved": 0
+    },
+    "evidence_merges": [],
+    "forge_calls": [],
+    "item": {
+     "capture": {
+      "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "kind": "merged-current",
+     "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a",
+     "remediation_state": "pending-merged-evidence",
+     "repair_runs": {
+      "run": {
+       "fix_pr": {
+        "number": 9
+       },
+       "jobs": [
+        "j"
+       ],
+       "not_fixed": {
+        "at": "2026-11-27T04:04:05Z",
+        "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "pr": 9,
+        "reason": "closed-or-head-mismatch",
+        "state": "CLOSED"
+       },
+       "publication": {
+        "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+       },
+       "receipt_findings": [
+        "3bed56c55daf1db41dcf10cd9d9f36485bb4a2f55f2fd7f05622d1aceca63b8a"
+       ],
+       "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a",
+       "repair_findings": [
+        "ecc21e7106a7c8078d3f2e2b7a942252d0291f211479452873ba249ce66b80f6"
+       ],
+       "state": "published",
+       "verdicts": [
+        {
+         "finding": {
+          "body": "fix",
+          "severity": "major"
+         },
+         "job": "j",
+         "verdict": "FIXED"
+        }
+       ]
+      }
+     },
+     "state": "done",
+     "subject": {
+      "repo": "o/r",
+      "target_selector": "promoted-main"
+     }
+    },
+    "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a"
+   },
+   "spec": {
+    "extra": {
+     "not_fixed": {
+      "at": "2026-11-27T04:04:05Z",
+      "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "pr": 9,
+      "reason": "closed-or-head-mismatch",
+      "state": "CLOSED"
+     }
+    },
+    "forge": {
+     "baseRefName": "main",
+     "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "mergeCommit": {
+      "oid": "cccccccccccccccccccccccccccccccccccccccc"
+     },
+     "number": 9,
+     "state": "MERGED"
+    },
+    "name": "a marker with a future at is not due"
+   }
+  },
+  {
+   "result": {
+    "counts": {
+     "deferred": 0,
+     "errors": [],
+     "starved": 0
+    },
+    "evidence_merges": [],
+    "forge_calls": [
+     9
+    ],
+    "item": {
+     "capture": {
+      "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "kind": "merged-current",
+     "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a",
+     "remediation_state": "pending-merged-evidence",
+     "repair_runs": {
+      "run": {
+       "fix_pr": {
+        "number": 9
+       },
+       "jobs": [
+        "j"
+       ],
+       "not_fixed": {
+        "at": "2026-11-27T03:04:05Z",
+        "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "pr": 9,
+        "reason": "closed-or-head-mismatch",
+        "state": "CLOSED"
+       },
+       "publication": {
+        "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+       },
+       "receipt_findings": [
+        "3bed56c55daf1db41dcf10cd9d9f36485bb4a2f55f2fd7f05622d1aceca63b8a"
+       ],
+       "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a",
+       "repair_findings": [
+        "ecc21e7106a7c8078d3f2e2b7a942252d0291f211479452873ba249ce66b80f6"
+       ],
+       "state": "published",
+       "verdicts": [
+        {
+         "finding": {
+          "body": "fix",
+          "severity": "major"
+         },
+         "job": "j",
+         "verdict": "FIXED"
+        }
+       ]
+      }
+     },
+     "state": "done",
+     "subject": {
+      "repo": "o/r",
+      "target_selector": "promoted-main"
+     }
+    },
+    "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a"
+   },
+   "spec": {
+    "extra": {
+     "not_fixed": {}
+    },
+    "forge": {
+     "baseRefName": "main",
+     "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "number": 9,
+     "state": "CLOSED"
+    },
+    "name": "an empty marker is falsy and examined"
+   }
+  },
+  {
+   "result": {
+    "counts": {
+     "deferred": 0,
+     "errors": [],
+     "starved": 0
+    },
+    "evidence_merges": [],
+    "forge_calls": [
+     9
+    ],
+    "item": {
+     "capture": {
+      "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "kind": "merged-current",
+     "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a",
+     "remediation_state": "pending-merged-evidence",
+     "repair_runs": {
+      "run": {
+       "fix_pr": {
+        "number": 9
+       },
+       "jobs": [
+        "j"
+       ],
+       "publication": {
+        "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+       },
+       "receipt_findings": [
+        "3bed56c55daf1db41dcf10cd9d9f36485bb4a2f55f2fd7f05622d1aceca63b8a"
+       ],
+       "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a",
+       "repair_findings": [
+        "ecc21e7106a7c8078d3f2e2b7a942252d0291f211479452873ba249ce66b80f6"
+       ],
+       "state": "published",
+       "verdicts": [
+        {
+         "finding": {
+          "body": "fix",
+          "severity": "major"
+         },
+         "job": "j",
+         "verdict": "FIXED"
+        }
+       ]
+      }
+     },
+     "state": "done",
+     "subject": {
+      "repo": "o/r",
+      "target_selector": "promoted-main"
+     }
+    },
+    "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a"
+   },
+   "spec": {
+    "extra": {
+     "not_fixed": "2026-11-26T03:04:05Z"
+    },
+    "forge": {
+     "baseRefName": "main",
+     "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "number": 9,
+     "state": "OPEN"
+    },
+    "name": "a legacy truthy string marker that parses as a stale stamp is due"
+   }
+  },
+  {
+   "result": {
+    "counts": {
+     "deferred": 0,
+     "errors": [],
+     "starved": 0
+    },
+    "evidence_merges": [],
+    "forge_calls": [],
+    "item": {
+     "capture": {
+      "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "kind": "merged-current",
+     "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a",
+     "remediation_state": "pending-merged-evidence",
+     "repair_runs": {
+      "run": {
+       "fix_pr": {
+        "number": 9
+       },
+       "jobs": [
+        "j"
+       ],
+       "not_fixed": "2026-11-27T02:04:05Z",
+       "publication": {
+        "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+       },
+       "receipt_findings": [
+        "3bed56c55daf1db41dcf10cd9d9f36485bb4a2f55f2fd7f05622d1aceca63b8a"
+       ],
+       "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a",
+       "repair_findings": [
+        "ecc21e7106a7c8078d3f2e2b7a942252d0291f211479452873ba249ce66b80f6"
+       ],
+       "state": "published",
+       "verdicts": [
+        {
+         "finding": {
+          "body": "fix",
+          "severity": "major"
+         },
+         "job": "j",
+         "verdict": "FIXED"
+        }
+       ]
+      }
+     },
+     "state": "done",
+     "subject": {
+      "repo": "o/r",
+      "target_selector": "promoted-main"
+     }
+    },
+    "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a"
+   },
+   "spec": {
+    "extra": {
+     "not_fixed": "2026-11-27T02:04:05Z"
+    },
+    "forge": {
+     "baseRefName": "main",
+     "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "mergeCommit": {
+      "oid": "cccccccccccccccccccccccccccccccccccccccc"
+     },
+     "number": 9,
+     "state": "MERGED"
+    },
+    "name": "a legacy truthy string marker that parses as a fresh stamp is not due"
+   }
+  },
+  {
+   "result": {
+    "counts": {
+     "deferred": 0,
+     "errors": [],
+     "starved": 0
+    },
+    "evidence_merges": [],
+    "forge_calls": [
+     9
+    ],
+    "item": {
+     "capture": {
+      "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "kind": "merged-current",
+     "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a",
+     "remediation_state": "pending-merged-evidence",
+     "repair_runs": {
+      "run": {
+       "fix_pr": {
+        "number": 9
+       },
+       "jobs": [
+        "j"
+       ],
+       "publication": {
+        "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+       },
+       "receipt_findings": [
+        "3bed56c55daf1db41dcf10cd9d9f36485bb4a2f55f2fd7f05622d1aceca63b8a"
+       ],
+       "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a",
+       "repair_findings": [
+        "ecc21e7106a7c8078d3f2e2b7a942252d0291f211479452873ba249ce66b80f6"
+       ],
+       "state": "published",
+       "verdicts": [
+        {
+         "finding": {
+          "body": "fix",
+          "severity": "major"
+         },
+         "job": "j",
+         "verdict": "FIXED"
+        }
+       ]
+      }
+     },
+     "state": "done",
+     "subject": {
+      "repo": "o/r",
+      "target_selector": "promoted-main"
+     }
+    },
+    "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a"
+   },
+   "spec": {
+    "extra": {
+     "not_fixed": "legacy"
+    },
+    "forge": {
+     "baseRefName": "main",
+     "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "number": 9,
+     "state": "OPEN"
+    },
+    "name": "a legacy truthy string marker that does not parse is due"
+   }
+  },
+  {
+   "result": {
+    "counts": {
+     "deferred": 0,
+     "errors": [],
+     "starved": 0
+    },
+    "evidence_merges": [],
+    "forge_calls": [
+     9
+    ],
+    "item": {
+     "capture": {
+      "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "kind": "merged-current",
+     "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a",
+     "remediation_state": "pending-merged-evidence",
+     "repair_runs": {
+      "run": {
+       "fix_pr": {
+        "number": 9
+       },
+       "jobs": [
+        "j"
+       ],
+       "publication": {
+        "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+       },
+       "receipt_findings": [
+        "3bed56c55daf1db41dcf10cd9d9f36485bb4a2f55f2fd7f05622d1aceca63b8a"
+       ],
+       "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a",
+       "repair_findings": [
+        "ecc21e7106a7c8078d3f2e2b7a942252d0291f211479452873ba249ce66b80f6"
+       ],
+       "state": "published",
+       "verdicts": [
+        {
+         "finding": {
+          "body": "fix",
+          "severity": "major"
+         },
+         "job": "j",
+         "verdict": "FIXED"
+        }
+       ]
+      }
+     },
+     "state": "done",
+     "subject": {
+      "repo": "o/r",
+      "target_selector": "promoted-main"
+     }
+    },
+    "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a"
+   },
+   "spec": {
+    "extra": {
+     "not_fixed": true
+    },
+    "forge": {
+     "baseRefName": "main",
+     "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "number": 9,
+     "state": "OPEN"
+    },
+    "name": "a true marker is due"
+   }
+  },
+  {
+   "result": {
+    "counts": {
+     "deferred": 1,
+     "errors": [
+      "RuntimeError: boom"
+     ],
+     "starved": 0
+    },
+    "evidence_merges": [],
+    "forge_calls": [
+     9
+    ],
+    "item": {
+     "capture": {
+      "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "kind": "merged-current",
+     "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a",
+     "remediation_state": "pending-merged-evidence",
+     "repair_runs": {
+      "run": {
+       "fix_pr": {
+        "number": 9
+       },
+       "jobs": [
+        "j"
+       ],
+       "not_fixed": {
+        "at": "2026-11-26T03:04:05Z",
+        "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "pr": 9,
+        "reason": "closed-or-head-mismatch",
+        "state": "CLOSED"
+       },
+       "publication": {
+        "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+       },
+       "receipt_findings": [
+        "3bed56c55daf1db41dcf10cd9d9f36485bb4a2f55f2fd7f05622d1aceca63b8a"
+       ],
+       "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a",
+       "repair_findings": [
+        "ecc21e7106a7c8078d3f2e2b7a942252d0291f211479452873ba249ce66b80f6"
+       ],
+       "state": "published",
+       "verdicts": [
+        {
+         "finding": {
+          "body": "fix",
+          "severity": "major"
+         },
+         "job": "j",
+         "verdict": "FIXED"
+        }
+       ]
+      }
+     },
+     "state": "done",
+     "subject": {
+      "repo": "o/r",
+      "target_selector": "promoted-main"
+     }
+    },
+    "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a"
+   },
+   "spec": {
+    "extra": {
+     "not_fixed": {
+      "at": "2026-11-26T03:04:05Z",
+      "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "pr": 9,
+      "reason": "closed-or-head-mismatch",
+      "state": "CLOSED"
+     }
+    },
+    "forge": {
+     "raise": "boom"
+    },
+    "name": "a forge failure leaves a stale marker untouched"
+   }
+  },
+  {
+   "result": {
+    "counts": {
+     "deferred": 0,
+     "errors": [],
+     "starved": 0
+    },
+    "evidence_merges": [
+     "cccccccccccccccccccccccccccccccccccccccc"
+    ],
+    "forge_calls": [],
+    "item": {
+     "capture": {
+      "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "kind": "merged-current",
+     "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a",
+     "remediation": {
+      "capture_digest": "82ea79996a377bab25d800af1d5d08381b7c8efd704fe44900d702d72d42a028",
+      "findings": [
+       "3bed56c55daf1db41dcf10cd9d9f36485bb4a2f55f2fd7f05622d1aceca63b8a"
+      ],
+      "fix_pr": 9,
+      "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "merge": "cccccccccccccccccccccccccccccccccccccccc",
+      "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a",
+      "subject": {
+       "repo": "o/r",
+       "target_selector": "promoted-main"
+      },
+      "target": "dddddddddddddddddddddddddddddddddddddddd"
+     },
+     "remediation_state": "fixed",
+     "repair_runs": {
+      "run": {
+       "fix_pr": {
+        "number": 9
+       },
+       "jobs": [
+        "j"
+       ],
+       "merged_fix": {
+        "baseRefName": "main",
+        "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "mergeCommit": {
+         "oid": "cccccccccccccccccccccccccccccccccccccccc"
+        },
+        "number": 9,
+        "state": "MERGED"
+       },
+       "publication": {
+        "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+       },
+       "receipt_findings": [
+        "3bed56c55daf1db41dcf10cd9d9f36485bb4a2f55f2fd7f05622d1aceca63b8a"
+       ],
+       "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a",
+       "repair_findings": [
+        "ecc21e7106a7c8078d3f2e2b7a942252d0291f211479452873ba249ce66b80f6"
+       ],
+       "state": "published",
+       "verdicts": [
+        {
+         "finding": {
+          "body": "fix",
+          "severity": "major"
+         },
+         "job": "j",
+         "verdict": "FIXED"
+        }
+       ]
+      }
+     },
+     "state": "done",
+     "subject": {
+      "repo": "o/r",
+      "target_selector": "promoted-main"
+     }
+    },
+    "receipt_id": "cfe4d7e20f03bc45a6f22d490655b0cd53d89817235b2df4d9bd43aa0a2a526a"
+   },
+   "spec": {
+    "extra": {
+     "merged_fix": {
+      "baseRefName": "main",
+      "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "mergeCommit": {
+       "oid": "cccccccccccccccccccccccccccccccccccccccc"
+      },
+      "number": 9,
+      "state": "MERGED"
+     },
+     "not_fixed": {
+      "at": "2026-11-26T03:04:05Z",
+      "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "pr": 9,
+      "reason": "closed-or-head-mismatch",
+      "state": "CLOSED"
+     }
+    },
+    "forge": {
+     "raise": "unused"
+    },
+    "name": "a cached merged_fix replaces the forge read for a stale marker"
+   }
+  }
+ ],
+ "doc": {
+  "capture": {
+   "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "classification": {
+   "counted": true,
+   "outcome": "completed"
+  },
+  "counted": true,
+  "findings": [
+   {
+    "comment": "fix",
+    "severity": "major",
+    "type": "finding"
+   }
+  ],
+  "outcome": "terminal-with-findings",
+  "source": {
+   "repo": "o/r",
+   "target_selector": "promoted-main"
+  }
+ },
+ "due": [
+  {
+   "due": true,
+   "marker": "2026-11-26T03:04:05Z",
+   "name": "stale string"
+  },
+  {
+   "due": false,
+   "marker": "2026-11-26T03:04:06Z",
+   "name": "one second short of the window"
+  },
+  {
+   "due": true,
+   "marker": "2026-11-26T03:04:05Z",
+   "name": "exactly the window"
+  },
+  {
+   "due": true,
+   "marker": "2026-11-26T03:04:04Z",
+   "name": "one second over the window"
+  },
+  {
+   "due": false,
+   "marker": "2026-11-27T02:04:05Z",
+   "name": "fresh string"
+  },
+  {
+   "due": false,
+   "marker": "2026-11-27T04:04:05Z",
+   "name": "future string"
+  },
+  {
+   "due": true,
+   "marker": "2026-11-26T03:04:05",
+   "name": "naive means UTC, stale"
+  },
+  {
+   "due": false,
+   "marker": "2026-11-27T02:04:05",
+   "name": "naive means UTC, fresh"
+  },
+  {
+   "due": false,
+   "marker": "2026-11-27T12:04:05+10:00",
+   "name": "explicit offset keeps the instant"
+  },
+  {
+   "due": true,
+   "marker": "2026-11-26T13:04:05+10:00",
+   "name": "offset that crosses the window"
+  },
+  {
+   "due": false,
+   "marker": "20261127T020405Z",
+   "name": "compact stamp"
+  },
+  {
+   "due": true,
+   "marker": "2026-11-25",
+   "name": "date only is midnight, stale"
+  },
+  {
+   "due": false,
+   "marker": "2026-11-27",
+   "name": "date only is midnight, fresh"
+  },
+  {
+   "due": false,
+   "marker": "2026-11-27T02:04:05.123456Z",
+   "name": "microseconds"
+  },
+  {
+   "due": true,
+   "marker": "",
+   "name": "empty string"
+  },
+  {
+   "due": true,
+   "marker": " ",
+   "name": "whitespace"
+  },
+  {
+   "due": true,
+   "marker": "yes",
+   "name": "garbage string"
+  },
+  {
+   "due": true,
+   "marker": "2026-11-27T02:04:05z",
+   "name": "lowercase z is not an offset"
+  },
+  {
+   "due": true,
+   "marker": "9999-12-31T23:59:59-01:00",
+   "name": "year overflow through offset"
+  },
+  {
+   "due": true,
+   "marker": "0001-01-01T00:00:00+01:00",
+   "name": "year 0001 underflow through offset"
+  },
+  {
+   "due": true,
+   "marker": 5,
+   "name": "integer"
+  },
+  {
+   "due": true,
+   "marker": 0,
+   "name": "zero"
+  },
+  {
+   "due": true,
+   "marker": 1.5,
+   "name": "float"
+  },
+  {
+   "due": true,
+   "marker": true,
+   "name": "true"
+  },
+  {
+   "due": true,
+   "marker": false,
+   "name": "false"
+  },
+  {
+   "due": true,
+   "marker": null,
+   "name": "null"
+  },
+  {
+   "due": true,
+   "marker": [
+    "2026-11-27T02:04:05Z"
+   ],
+   "name": "list"
+  },
+  {
+   "due": true,
+   "marker": [],
+   "name": "empty list"
+  },
+  {
+   "due": true,
+   "marker": {
+    "at": "2026-11-26T03:04:05Z"
+   },
+   "name": "dict with stale at"
+  },
+  {
+   "due": false,
+   "marker": {
+    "at": "2026-11-27T02:04:05Z"
+   },
+   "name": "dict with fresh at"
+  },
+  {
+   "due": false,
+   "marker": {
+    "at": "2026-11-27T04:04:05Z"
+   },
+   "name": "dict with future at"
+  },
+  {
+   "due": true,
+   "marker": {
+    "at": 7
+   },
+   "name": "dict with integer at"
+  },
+  {
+   "due": true,
+   "marker": {
+    "at": null
+   },
+   "name": "dict with null at"
+  },
+  {
+   "due": true,
+   "marker": {
+    "at": "never"
+   },
+   "name": "dict with garbage at"
+  },
+  {
+   "due": true,
+   "marker": {},
+   "name": "empty dict"
+  },
+  {
+   "due": true,
+   "marker": {
+    "pr": 9,
+    "state": "CLOSED"
+   },
+   "name": "dict without at"
+  },
+  {
+   "due": true,
+   "marker": {
+    "at": {
+     "at": "2026-11-27T02:04:05Z"
+    }
+   },
+   "name": "dict with nested at dict"
+  }
+ ],
+ "fix_prs": [
+  {
+   "result": {
+    "forge_calls": [
+     99
+    ],
+    "record": {
+     "fix_closed": "2026-11-27T03:04:05Z",
+     "fix_pr": {
+      "number": 99,
+      "state": "CLOSED",
+      "url": "https://github.com/example/repo/pull/99"
+     }
+    },
+    "stats": [
+     {
+      "deferred": 0,
+      "errors": [],
+      "examined": 1,
+      "projected": 0,
+      "starved": 0
+     }
+    ]
+   },
+   "spec": {
+    "ancestor": true,
+    "forge": [
+     {
+      "state": "CLOSED"
+     }
+    ],
+    "name": "first close stamps the marker",
+    "passes": 1,
+    "record": {
+     "fix_pr": {
+      "number": 99,
+      "url": "https://github.com/example/repo/pull/99"
+     }
+    }
+   }
+  },
+  {
+   "result": {
+    "forge_calls": [],
+    "record": {
+     "fix_closed": "2026-11-27T02:04:05Z",
+     "fix_pr": {
+      "number": 99,
+      "url": "https://github.com/example/repo/pull/99"
+     }
+    },
+    "stats": [
+     {
+      "deferred": 0,
+      "errors": [],
+      "examined": 0,
+      "projected": 0,
+      "starved": 0
+     }
+    ]
+   },
+   "spec": {
+    "ancestor": true,
+    "forge": [
+     {
+      "state": "CLOSED"
+     }
+    ],
+    "name": "a fresh marker costs no forge call",
+    "passes": 1,
+    "record": {
+     "fix_closed": "2026-11-27T02:04:05Z",
+     "fix_pr": {
+      "number": 99,
+      "url": "https://github.com/example/repo/pull/99"
+     }
+    }
+   }
+  },
+  {
+   "result": {
+    "forge_calls": [],
+    "record": {
+     "fix_closed": "2026-11-26T03:04:06Z",
+     "fix_pr": {
+      "number": 99,
+      "url": "https://github.com/example/repo/pull/99"
+     }
+    },
+    "stats": [
+     {
+      "deferred": 0,
+      "errors": [],
+      "examined": 0,
+      "projected": 0,
+      "starved": 0
+     }
+    ]
+   },
+   "spec": {
+    "ancestor": true,
+    "forge": [
+     {
+      "state": "CLOSED"
+     }
+    ],
+    "name": "a marker one second short of the window is skipped",
+    "passes": 1,
+    "record": {
+     "fix_closed": "2026-11-26T03:04:06Z",
+     "fix_pr": {
+      "number": 99,
+      "url": "https://github.com/example/repo/pull/99"
+     }
+    }
+   }
+  },
+  {
+   "result": {
+    "forge_calls": [
+     99
+    ],
+    "record": {
+     "fix_closed": "2026-11-27T03:04:05Z",
+     "fix_pr": {
+      "number": 99,
+      "state": "CLOSED",
+      "url": "https://github.com/example/repo/pull/99"
+     }
+    },
+    "stats": [
+     {
+      "deferred": 0,
+      "errors": [],
+      "examined": 1,
+      "projected": 0,
+      "starved": 0
+     }
+    ]
+   },
+   "spec": {
+    "ancestor": true,
+    "forge": [
+     {
+      "state": "CLOSED"
+     }
+    ],
+    "name": "a marker at exactly the window is rechecked and restamped",
+    "passes": 1,
+    "record": {
+     "fix_closed": "2026-11-26T03:04:05Z",
+     "fix_pr": {
+      "number": 99,
+      "url": "https://github.com/example/repo/pull/99"
+     }
+    }
+   }
+  },
+  {
+   "result": {
+    "forge_calls": [
+     99
+    ],
+    "record": {
+     "fix_pr": {
+      "number": 99,
+      "state": "OPEN",
+      "url": "https://github.com/example/repo/pull/99"
+     }
+    },
+    "stats": [
+     {
+      "deferred": 0,
+      "errors": [],
+      "examined": 1,
+      "projected": 0,
+      "starved": 0
+     }
+    ]
+   },
+   "spec": {
+    "ancestor": true,
+    "forge": [
+     {
+      "state": "OPEN"
+     }
+    ],
+    "name": "a stale marker that reopened is popped",
+    "passes": 1,
+    "record": {
+     "fix_closed": "2026-11-26T03:04:05Z",
+     "fix_pr": {
+      "number": 99,
+      "url": "https://github.com/example/repo/pull/99"
+     }
+    }
+   }
+  },
+  {
+   "result": {
+    "forge_calls": [
+     99
+    ],
+    "record": {
+     "fix_pr": {
+      "number": 99,
+      "state": "MERGED",
+      "url": "https://github.com/example/repo/pull/99"
+     }
+    },
+    "stats": [
+     {
+      "deferred": 0,
+      "errors": [],
+      "examined": 1,
+      "projected": 0,
+      "starved": 0
+     }
+    ]
+   },
+   "spec": {
+    "ancestor": true,
+    "forge": [
+     {
+      "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "number": 99,
+      "state": "MERGED"
+     }
+    ],
+    "name": "a stale marker that merged with no merge commit is popped",
+    "passes": 1,
+    "record": {
+     "fix_closed": "2026-11-26T03:04:05Z",
+     "fix_pr": {
+      "number": 99,
+      "url": "https://github.com/example/repo/pull/99"
+     }
+    }
+   }
+  },
+  {
+   "result": {
+    "forge_calls": [
+     99
+    ],
+    "record": {
+     "fix_pr": {
+      "number": 99,
+      "state": "MERGED",
+      "url": "https://github.com/example/repo/pull/99"
+     }
+    },
+    "stats": [
+     {
+      "deferred": 0,
+      "errors": [],
+      "examined": 1,
+      "projected": 0,
+      "starved": 0
+     }
+    ]
+   },
+   "spec": {
+    "ancestor": false,
+    "forge": [
+     {
+      "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "mergeCommit": {
+       "oid": "cccccccccccccccccccccccccccccccccccccccc"
+      },
+      "number": 99,
+      "state": "MERGED"
+     }
+    ],
+    "name": "a stale marker that merged off the default tip is popped",
+    "passes": 1,
+    "record": {
+     "fix_closed": "2026-11-26T03:04:05Z",
+     "fix_pr": {
+      "number": 99,
+      "url": "https://github.com/example/repo/pull/99"
+     }
+    }
+   }
+  },
+  {
+   "result": {
+    "forge_calls": [
+     99
+    ],
+    "record": {
+     "fix_closed": "2026-11-27T03:04:05Z",
+     "fix_pr": {
+      "number": 99,
+      "state": "CLOSED",
+      "url": "https://github.com/example/repo/pull/99"
+     }
+    },
+    "stats": [
+     {
+      "deferred": 0,
+      "errors": [],
+      "examined": 1,
+      "projected": 0,
+      "starved": 0
+     }
+    ]
+   },
+   "spec": {
+    "ancestor": true,
+    "forge": [
+     {
+      "state": "CLOSED"
+     }
+    ],
+    "name": "an unreadable marker is due",
+    "passes": 1,
+    "record": {
+     "fix_closed": "yes",
+     "fix_pr": {
+      "number": 99,
+      "url": "https://github.com/example/repo/pull/99"
+     }
+    }
+   }
+  },
+  {
+   "result": {
+    "forge_calls": [
+     99
+    ],
+    "record": {
+     "fix_pr": {
+      "number": 99,
+      "state": "OPEN",
+      "url": "https://github.com/example/repo/pull/99"
+     }
+    },
+    "stats": [
+     {
+      "deferred": 0,
+      "errors": [],
+      "examined": 1,
+      "projected": 0,
+      "starved": 0
+     }
+    ]
+   },
+   "spec": {
+    "ancestor": true,
+    "forge": [
+     {
+      "state": "OPEN"
+     }
+    ],
+    "name": "an integer marker is due",
+    "passes": 1,
+    "record": {
+     "fix_closed": 5,
+     "fix_pr": {
+      "number": 99,
+      "url": "https://github.com/example/repo/pull/99"
+     }
+    }
+   }
+  },
+  {
+   "result": {
+    "forge_calls": [
+     99
+    ],
+    "record": {
+     "fix_pr": {
+      "number": 99,
+      "state": "OPEN",
+      "url": "https://github.com/example/repo/pull/99"
+     }
+    },
+    "stats": [
+     {
+      "deferred": 0,
+      "errors": [],
+      "examined": 1,
+      "projected": 0,
+      "starved": 0
+     }
+    ]
+   },
+   "spec": {
+    "ancestor": true,
+    "forge": [
+     {
+      "state": "OPEN"
+     }
+    ],
+    "name": "a true marker is due",
+    "passes": 1,
+    "record": {
+     "fix_closed": true,
+     "fix_pr": {
+      "number": 99,
+      "url": "https://github.com/example/repo/pull/99"
+     }
+    }
+   }
+  },
+  {
+   "result": {
+    "forge_calls": [],
+    "record": {
+     "fix_closed": "2026-11-27T04:04:05Z",
+     "fix_pr": {
+      "number": 99,
+      "url": "https://github.com/example/repo/pull/99"
+     }
+    },
+    "stats": [
+     {
+      "deferred": 0,
+      "errors": [],
+      "examined": 0,
+      "projected": 0,
+      "starved": 0
+     }
+    ]
+   },
+   "spec": {
+    "ancestor": true,
+    "forge": [
+     {
+      "state": "CLOSED"
+     }
+    ],
+    "name": "a future marker is not due",
+    "passes": 1,
+    "record": {
+     "fix_closed": "2026-11-27T04:04:05Z",
+     "fix_pr": {
+      "number": 99,
+      "url": "https://github.com/example/repo/pull/99"
+     }
+    }
+   }
+  },
+  {
+   "result": {
+    "forge_calls": [
+     99
+    ],
+    "record": {
+     "fix_closed": "2026-11-27T03:04:05Z",
+     "fix_pr": {
+      "number": 99,
+      "state": "CLOSED",
+      "url": "https://github.com/example/repo/pull/99"
+     }
+    },
+    "stats": [
+     {
+      "deferred": 0,
+      "errors": [],
+      "examined": 1,
+      "projected": 0,
+      "starved": 0
+     }
+    ]
+   },
+   "spec": {
+    "ancestor": true,
+    "forge": [
+     {
+      "state": "CLOSED"
+     }
+    ],
+    "name": "an empty marker is falsy and examined as a first close",
+    "passes": 1,
+    "record": {
+     "fix_closed": "",
+     "fix_pr": {
+      "number": 99,
+      "url": "https://github.com/example/repo/pull/99"
+     }
+    }
+   }
+  },
+  {
+   "result": {
+    "forge_calls": [
+     99
+    ],
+    "record": {
+     "fix_pr": {
+      "number": 99,
+      "state": "OPEN",
+      "url": "https://github.com/example/repo/pull/99"
+     }
+    },
+    "stats": [
+     {
+      "deferred": 0,
+      "errors": [],
+      "examined": 1,
+      "projected": 0,
+      "starved": 0
+     }
+    ]
+   },
+   "spec": {
+    "ancestor": true,
+    "forge": [
+     {
+      "state": "OPEN"
+     }
+    ],
+    "name": "a zero marker is falsy and examined as a first close",
+    "passes": 1,
+    "record": {
+     "fix_closed": 0,
+     "fix_pr": {
+      "number": 99,
+      "url": "https://github.com/example/repo/pull/99"
+     }
+    }
+   }
+  },
+  {
+   "result": {
+    "forge_calls": [
+     99
+    ],
+    "record": {
+     "fix_pr": {
+      "number": 99,
+      "state": "OPEN",
+      "url": "https://github.com/example/repo/pull/99"
+     }
+    },
+    "stats": [
+     {
+      "deferred": 0,
+      "errors": [],
+      "examined": 1,
+      "projected": 0,
+      "starved": 0
+     }
+    ]
+   },
+   "spec": {
+    "ancestor": true,
+    "forge": [
+     {
+      "state": "OPEN"
+     }
+    ],
+    "name": "a dict marker with a stale at is due",
+    "passes": 1,
+    "record": {
+     "fix_closed": {
+      "at": "2026-11-26T03:04:05Z"
+     },
+     "fix_pr": {
+      "number": 99,
+      "url": "https://github.com/example/repo/pull/99"
+     }
+    }
+   }
+  },
+  {
+   "result": {
+    "forge_calls": [],
+    "record": {
+     "fix_closed": {
+      "at": "2026-11-27T02:04:05Z"
+     },
+     "fix_pr": {
+      "number": 99,
+      "url": "https://github.com/example/repo/pull/99"
+     }
+    },
+    "stats": [
+     {
+      "deferred": 0,
+      "errors": [],
+      "examined": 0,
+      "projected": 0,
+      "starved": 0
+     }
+    ]
+   },
+   "spec": {
+    "ancestor": true,
+    "forge": [
+     {
+      "state": "OPEN"
+     }
+    ],
+    "name": "a dict marker with a fresh at is not due",
+    "passes": 1,
+    "record": {
+     "fix_closed": {
+      "at": "2026-11-27T02:04:05Z"
+     },
+     "fix_pr": {
+      "number": 99,
+      "url": "https://github.com/example/repo/pull/99"
+     }
+    }
+   }
+  },
+  {
+   "result": {
+    "forge_calls": [],
+    "record": {
+     "fix_closed": "2026-11-26T03:04:05Z",
+     "fix_merged": "t",
+     "fix_pr": {
+      "number": 99,
+      "url": "https://github.com/example/repo/pull/99"
+     }
+    },
+    "stats": [
+     {
+      "deferred": 0,
+      "errors": [],
+      "examined": 0,
+      "projected": 0,
+      "starved": 0
+     }
+    ]
+   },
+   "spec": {
+    "ancestor": true,
+    "forge": [
+     {
+      "state": "OPEN"
+     }
+    ],
+    "name": "a merged run is never rechecked",
+    "passes": 1,
+    "record": {
+     "fix_closed": "2026-11-26T03:04:05Z",
+     "fix_merged": "t",
+     "fix_pr": {
+      "number": 99,
+      "url": "https://github.com/example/repo/pull/99"
+     }
+    }
+   }
+  },
+  {
+   "result": {
+    "forge_calls": [],
+    "record": {
+     "fix_closed": "2026-11-26T03:04:05Z"
+    },
+    "stats": [
+     {
+      "deferred": 0,
+      "errors": [],
+      "examined": 0,
+      "projected": 0,
+      "starved": 0
+     }
+    ]
+   },
+   "spec": {
+    "ancestor": true,
+    "forge": [
+     {
+      "state": "OPEN"
+     }
+    ],
+    "name": "a run without a fix pr is never examined",
+    "passes": 1,
+    "record": {
+     "fix_closed": "2026-11-26T03:04:05Z"
+    }
+   }
+  },
+  {
+   "result": {
+    "forge_calls": [
+     99
+    ],
+    "record": {
+     "fix_closed": "2026-11-26T03:04:05Z",
+     "fix_pr": {
+      "number": 99,
+      "url": "https://github.com/example/repo/pull/99"
+     }
+    },
+    "stats": [
+     {
+      "deferred": 1,
+      "errors": [
+       {
+        "error": "RuntimeError: boom",
+        "item": "item-1",
+        "run": "run1"
+       }
+      ],
+      "examined": 1,
+      "projected": 0,
+      "starved": 0
+     }
+    ]
+   },
+   "spec": {
+    "ancestor": true,
+    "forge": [
+     {
+      "raise": "boom"
+     }
+    ],
+    "name": "a forge failure leaves a stale marker untouched",
+    "passes": 1,
+    "record": {
+     "fix_closed": "2026-11-26T03:04:05Z",
+     "fix_pr": {
+      "number": 99,
+      "url": "https://github.com/example/repo/pull/99"
+     }
+    }
+   }
+  },
+  {
+   "result": {
+    "forge_calls": [
+     99
+    ],
+    "record": {
+     "fix_closed": "2026-11-27T03:04:05Z",
+     "fix_pr": {
+      "number": 99,
+      "state": "CLOSED",
+      "url": "https://github.com/example/repo/pull/99"
+     }
+    },
+    "stats": [
+     {
+      "deferred": 0,
+      "errors": [],
+      "examined": 1,
+      "projected": 0,
+      "starved": 0
+     },
+     {
+      "deferred": 0,
+      "errors": [],
+      "examined": 0,
+      "projected": 0,
+      "starved": 0
+     }
+    ]
+   },
+   "spec": {
+    "ancestor": true,
+    "forge": [
+     {
+      "state": "CLOSED"
+     },
+     {
+      "state": "CLOSED"
+     }
+    ],
+    "name": "a stale marker is restamped while still closed, then skipped when fresh",
+    "passes": 2,
+    "record": {
+     "fix_closed": "2026-11-26T03:04:05Z",
+     "fix_pr": {
+      "number": 99,
+      "url": "https://github.com/example/repo/pull/99"
+     }
+    }
+   }
+  }
+ ],
+ "now": "2026-11-27T03:04:05Z"
+}
