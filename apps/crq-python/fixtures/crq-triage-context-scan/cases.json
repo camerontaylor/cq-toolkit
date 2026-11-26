@@ -1,0 +1,1115 @@
+{
+ "flatten": [
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [{\"line\": 1, \"text\": \"one\"}]}",
+   "name": "basic",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+src/a.py\n+src/a.py\n+T\n+B\n+one\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [{\"line\": 1, \"text\": \"one\"}]}",
+   "name": "verdict dirty is returned",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+src/a.py\n+src/a.py\n+T\n+B\n+one\n",
+    "scanner_calls": 1,
+    "verdict": false
+   },
+   "scanner": "dirty"
+  },
+  {
+   "context_json": "{\"current_path\": \"p\", \"finding\": {\"zeta\": \"z1\", \"alpha\": [\"a1\", {\"k\": \"a2\"}, 7, true, null, 1.5]}, \"secret-key-name\": \"v\", \"n\": 3}",
+   "name": "string values only, document order, keys never scanned",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/p b/p\n@@ -0,0 +1 @@\n+p\n+z1\n+a1\n+a2\n+v\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": \"cur.py\", \"finding\": {\"path\": \"old.py\"}, \"region\": [{\"line\": 1, \"text\": \"one\"}]}",
+   "name": "current_path wins over finding path",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/cur.py b/cur.py\n@@ -0,0 +1 @@\n+cur.py\n+old.py\n+one\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": \"\", \"finding\": {\"path\": \"fallback.py\", \"b\": \"x\"}}",
+   "name": "falsy current_path (empty string) falls back to finding path",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/fallback.py b/fallback.py\n@@ -0,0 +1 @@\n+\n+fallback.py\n+x\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": 0, \"finding\": {\"path\": \"fallback.py\", \"b\": \"x\"}}",
+   "name": "falsy current_path (zero) falls back to finding path",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/fallback.py b/fallback.py\n@@ -0,0 +1 @@\n+fallback.py\n+x\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": null, \"finding\": {\"path\": \"fallback.py\", \"b\": \"x\"}}",
+   "name": "falsy current_path (null) falls back to finding path",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/fallback.py b/fallback.py\n@@ -0,0 +1 @@\n+fallback.py\n+x\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": false, \"finding\": {\"path\": \"fallback.py\", \"b\": \"x\"}}",
+   "name": "falsy current_path (false) falls back to finding path",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/fallback.py b/fallback.py\n@@ -0,0 +1 @@\n+fallback.py\n+x\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": [], \"finding\": {\"path\": \"fallback.py\", \"b\": \"x\"}}",
+   "name": "falsy current_path (empty list) falls back to finding path",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/fallback.py b/fallback.py\n@@ -0,0 +1 @@\n+fallback.py\n+x\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": {}, \"finding\": {\"path\": \"fallback.py\", \"b\": \"x\"}}",
+   "name": "falsy current_path (empty object) falls back to finding path",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/fallback.py b/fallback.py\n@@ -0,0 +1 @@\n+fallback.py\n+x\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": 0.0, \"finding\": {\"path\": \"fallback.py\", \"b\": \"x\"}}",
+   "name": "falsy current_path (zero float) falls back to finding path",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/fallback.py b/fallback.py\n@@ -0,0 +1 @@\n+fallback.py\n+x\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"finding\": {\"path\": \"only.py\"}}",
+   "name": "absent current_path uses finding path",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/only.py b/only.py\n@@ -0,0 +1 @@\n+only.py\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"finding\": {\"path\": \"\", \"t\": \"x\"}}",
+   "name": "falsy finding path (empty string) uses the default name",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/triage-context.txt b/triage-context.txt\n@@ -0,0 +1 @@\n+\n+x\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"finding\": {\"path\": null, \"t\": \"x\"}}",
+   "name": "falsy finding path (null) uses the default name",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/triage-context.txt b/triage-context.txt\n@@ -0,0 +1 @@\n+x\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"finding\": {\"path\": 0, \"t\": \"x\"}}",
+   "name": "falsy finding path (zero) uses the default name",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/triage-context.txt b/triage-context.txt\n@@ -0,0 +1 @@\n+x\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"finding\": {\"path\": [], \"t\": \"x\"}}",
+   "name": "falsy finding path (empty list) uses the default name",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/triage-context.txt b/triage-context.txt\n@@ -0,0 +1 @@\n+x\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"finding\": {\"t\": \"x\"}}",
+   "name": "finding without path uses the default name",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/triage-context.txt b/triage-context.txt\n@@ -0,0 +1 @@\n+x\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": \"\", \"finding\": {\"path\": \"\"}}",
+   "name": "current_path falsy and finding path falsy uses the default name",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/triage-context.txt b/triage-context.txt\n@@ -0,0 +1 @@\n+\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a b/\\u00e9.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [{\"line\": 1, \"text\": \"one\"}]}",
+   "name": "path with spaces and unicode",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a b/\u00e9.py b/src/a b/\u00e9.py\n@@ -0,0 +1 @@\n+src/a b/\u00e9.py\n+src/a.py\n+T\n+B\n+one\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": true, \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [{\"line\": 1, \"text\": \"one\"}]}",
+   "name": "truthy non-string current_path (true) raises TypeError",
+   "result": {
+    "output_passed_through": false,
+    "patch": null,
+    "raises": "TypeError",
+    "scanner_calls": 0
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": 1, \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [{\"line\": 1, \"text\": \"one\"}]}",
+   "name": "truthy non-string current_path (one) raises TypeError",
+   "result": {
+    "output_passed_through": false,
+    "patch": null,
+    "raises": "TypeError",
+    "scanner_calls": 0
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": 2.5, \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [{\"line\": 1, \"text\": \"one\"}]}",
+   "name": "truthy non-string current_path (float) raises TypeError",
+   "result": {
+    "output_passed_through": false,
+    "patch": null,
+    "raises": "TypeError",
+    "scanner_calls": 0
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": [\"a\"], \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [{\"line\": 1, \"text\": \"one\"}]}",
+   "name": "truthy non-string current_path (list) raises TypeError",
+   "result": {
+    "output_passed_through": false,
+    "patch": null,
+    "raises": "TypeError",
+    "scanner_calls": 0
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": {\"a\": 1}, \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [{\"line\": 1, \"text\": \"one\"}]}",
+   "name": "truthy non-string current_path (object) raises TypeError",
+   "result": {
+    "output_passed_through": false,
+    "patch": null,
+    "raises": "TypeError",
+    "scanner_calls": 0
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": \"\", \"finding\": {\"path\": 5}}",
+   "name": "truthy non-string finding path raises TypeError",
+   "result": {
+    "output_passed_through": false,
+    "patch": null,
+    "raises": "TypeError",
+    "scanner_calls": 0
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": \"\"}",
+   "name": "missing finding with falsy current_path raises KeyError",
+   "result": {
+    "output_passed_through": false,
+    "patch": null,
+    "raises": "KeyError",
+    "scanner_calls": 0
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"region\": [\"x\"]}",
+   "name": "missing finding and current_path raises KeyError",
+   "result": {
+    "output_passed_through": false,
+    "patch": null,
+    "raises": "KeyError",
+    "scanner_calls": 0
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": \"\", \"finding\": null}",
+   "name": "non-object finding (null) raises AttributeError",
+   "result": {
+    "output_passed_through": false,
+    "patch": null,
+    "raises": "AttributeError",
+    "scanner_calls": 0
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": \"\", \"finding\": \"s\"}",
+   "name": "non-object finding (string) raises AttributeError",
+   "result": {
+    "output_passed_through": false,
+    "patch": null,
+    "raises": "AttributeError",
+    "scanner_calls": 0
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": \"\", \"finding\": [1]}",
+   "name": "non-object finding (list) raises AttributeError",
+   "result": {
+    "output_passed_through": false,
+    "patch": null,
+    "raises": "AttributeError",
+    "scanner_calls": 0
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": \"\", \"finding\": 3}",
+   "name": "non-object finding (number) raises AttributeError",
+   "result": {
+    "output_passed_through": false,
+    "patch": null,
+    "raises": "AttributeError",
+    "scanner_calls": 0
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": \"\", \"finding\": true}",
+   "name": "non-object finding (true) raises AttributeError",
+   "result": {
+    "output_passed_through": false,
+    "patch": null,
+    "raises": "AttributeError",
+    "scanner_calls": 0
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": \"p\", \"finding\": \"s\"}",
+   "name": "non-object finding is not read when current_path is truthy",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/p b/p\n@@ -0,0 +1 @@\n+p\n+s\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "\"just text\"",
+   "name": "string context raises AttributeError",
+   "result": {
+    "output_passed_through": false,
+    "patch": null,
+    "raises": "AttributeError",
+    "scanner_calls": 0
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "[\"a\", \"b\"]",
+   "name": "list context raises AttributeError",
+   "result": {
+    "output_passed_through": false,
+    "patch": null,
+    "raises": "AttributeError",
+    "scanner_calls": 0
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "null",
+   "name": "null context raises AttributeError",
+   "result": {
+    "output_passed_through": false,
+    "patch": null,
+    "raises": "AttributeError",
+    "scanner_calls": 0
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "7",
+   "name": "number context raises AttributeError",
+   "result": {
+    "output_passed_through": false,
+    "patch": null,
+    "raises": "AttributeError",
+    "scanner_calls": 0
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{}",
+   "name": "empty object raises KeyError",
+   "result": {
+    "output_passed_through": false,
+    "patch": null,
+    "raises": "KeyError",
+    "scanner_calls": 0
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"a\\nb\"]}",
+   "name": "splitlines: lf",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+src/a.py\n+src/a.py\n+T\n+B\n+a\n+b\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"a\\r\\nb\"]}",
+   "name": "splitlines: crlf",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+src/a.py\n+src/a.py\n+T\n+B\n+a\n+b\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"a\\rb\"]}",
+   "name": "splitlines: lone cr",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+src/a.py\n+src/a.py\n+T\n+B\n+a\n+b\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"a\\n\\rb\"]}",
+   "name": "splitlines: lfcr",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+src/a.py\n+src/a.py\n+T\n+B\n+a\n+\n+b\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"a\\u000bb\"]}",
+   "name": "splitlines: vt",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+src/a.py\n+src/a.py\n+T\n+B\n+a\n+b\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"a\\fb\"]}",
+   "name": "splitlines: ff",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+src/a.py\n+src/a.py\n+T\n+B\n+a\n+b\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"a\\u001cb\"]}",
+   "name": "splitlines: fs",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+src/a.py\n+src/a.py\n+T\n+B\n+a\n+b\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"a\\u001db\"]}",
+   "name": "splitlines: gs",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+src/a.py\n+src/a.py\n+T\n+B\n+a\n+b\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"a\\u001eb\"]}",
+   "name": "splitlines: rs",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+src/a.py\n+src/a.py\n+T\n+B\n+a\n+b\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"a\\u0085b\"]}",
+   "name": "splitlines: nel",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+src/a.py\n+src/a.py\n+T\n+B\n+a\n+b\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"a\\u2028b\"]}",
+   "name": "splitlines: ls",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+src/a.py\n+src/a.py\n+T\n+B\n+a\n+b\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"a\\u2029b\"]}",
+   "name": "splitlines: ps",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+src/a.py\n+src/a.py\n+T\n+B\n+a\n+b\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"a\\n\"]}",
+   "name": "splitlines: trailing newline",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+src/a.py\n+src/a.py\n+T\n+B\n+a\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"a\\r\\n\"]}",
+   "name": "splitlines: trailing crlf",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+src/a.py\n+src/a.py\n+T\n+B\n+a\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"\\na\"]}",
+   "name": "splitlines: leading newline",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+src/a.py\n+src/a.py\n+T\n+B\n+\n+a\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"\\n\"]}",
+   "name": "splitlines: only newline",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+src/a.py\n+src/a.py\n+T\n+B\n+\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"a\\n\\nb\"]}",
+   "name": "splitlines: blank line between",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+src/a.py\n+src/a.py\n+T\n+B\n+a\n+\n+b\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"\"]}",
+   "name": "splitlines: empty",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+src/a.py\n+src/a.py\n+T\n+B\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"a\\u200bb\\u00a0c\"]}",
+   "name": "splitlines: zero width and nbsp are not breaks",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+src/a.py\n+src/a.py\n+T\n+B\n+a\u200bb\u00a0c\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"a\\tb\"]}",
+   "name": "splitlines: tab is not a break",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+src/a.py\n+src/a.py\n+T\n+B\n+a\tb\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"x\\ud83d\\ude00y\\nz\"]}",
+   "name": "splitlines: astral",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+src/a.py\n+src/a.py\n+T\n+B\n+x\ud83d\ude00y\n+z\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"a\\u0000b\"]}",
+   "name": "splitlines: nul",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+src/a.py\n+src/a.py\n+T\n+B\n+a\u0000b\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"+x\\n-y\"]}",
+   "name": "splitlines: plus and minus lead",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+src/a.py\n+src/a.py\n+T\n+B\n++x\n+-y\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"finding\": {}}",
+   "name": "empty context strings give an empty hunk",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/triage-context.txt b/triage-context.txt\n@@ -0,0 +1 @@\n\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"finding\": {}, \"n\": 1, \"t\": true, \"z\": null}",
+   "name": "only non-string leaves give an empty hunk",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/triage-context.txt b/triage-context.txt\n@@ -0,0 +1 @@\n\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": \"p\", \"a\": \"\", \"b\": \"\", \"c\": \"x\"}",
+   "name": "empty string values keep their join newlines",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/p b/p\n@@ -0,0 +1 @@\n+p\n+\n+\n+x\n",
+    "scanner_calls": 1,
+    "verdict": true
+   },
+   "scanner": "clean"
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [{\"line\": 1, \"text\": \"one\"}]}",
+   "name": "scanner raises OSError",
+   "result": {
+    "message": "cannot read policy",
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+src/a.py\n+src/a.py\n+T\n+B\n+one\n",
+    "raises": "ContextScanError",
+    "reason": "cannot read policy",
+    "scanner_calls": 1
+   },
+   "scanner": {
+    "message": "cannot read policy",
+    "raises": "OSError"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [{\"line\": 1, \"text\": \"one\"}]}",
+   "name": "scanner raises RuntimeError",
+   "result": {
+    "message": "denylist parse failed (fail closed)",
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+src/a.py\n+src/a.py\n+T\n+B\n+one\n",
+    "raises": "ContextScanError",
+    "reason": "denylist parse failed (fail closed)",
+    "scanner_calls": 1
+   },
+   "scanner": {
+    "message": "denylist parse failed (fail closed)",
+    "raises": "RuntimeError"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [{\"line\": 1, \"text\": \"one\"}]}",
+   "name": "scanner raises whitespace collapsed",
+   "result": {
+    "message": "a b c d e f",
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+src/a.py\n+src/a.py\n+T\n+B\n+one\n",
+    "raises": "ContextScanError",
+    "reason": "a b c d e f",
+    "scanner_calls": 1
+   },
+   "scanner": {
+    "message": "  a\t b\n\n c\u00a0d\u2003e\u001cf  ",
+    "raises": "RuntimeError"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [{\"line\": 1, \"text\": \"one\"}]}",
+   "name": "scanner raises empty message uses the class name",
+   "result": {
+    "message": "OSError",
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+src/a.py\n+src/a.py\n+T\n+B\n+one\n",
+    "raises": "ContextScanError",
+    "reason": "OSError",
+    "scanner_calls": 1
+   },
+   "scanner": {
+    "message": "",
+    "raises": "OSError"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [{\"line\": 1, \"text\": \"one\"}]}",
+   "name": "scanner raises blank message uses the class name",
+   "result": {
+    "message": "RuntimeError",
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+src/a.py\n+src/a.py\n+T\n+B\n+one\n",
+    "raises": "ContextScanError",
+    "reason": "RuntimeError",
+    "scanner_calls": 1
+   },
+   "scanner": {
+    "message": " \n\t\u00a0 ",
+    "raises": "RuntimeError"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [{\"line\": 1, \"text\": \"one\"}]}",
+   "name": "scanner raises limit is 300 code points",
+   "result": {
+    "message": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+src/a.py\n+src/a.py\n+T\n+B\n+one\n",
+    "raises": "ContextScanError",
+    "reason": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "scanner_calls": 1
+   },
+   "scanner": {
+    "message": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxtail",
+    "raises": "RuntimeError"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [{\"line\": 1, \"text\": \"one\"}]}",
+   "name": "scanner raises limit counts astral as one",
+   "result": {
+    "message": "\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00",
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+src/a.py\n+src/a.py\n+T\n+B\n+one\n",
+    "raises": "ContextScanError",
+    "reason": "\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00",
+    "scanner_calls": 1
+   },
+   "scanner": {
+    "message": "\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00",
+    "raises": "RuntimeError"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [{\"line\": 1, \"text\": \"one\"}]}",
+   "name": "scanner raises limit lands before a joined space",
+   "result": {
+    "message": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy ",
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+src/a.py\n+src/a.py\n+T\n+B\n+one\n",
+    "raises": "ContextScanError",
+    "reason": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy ",
+    "scanner_calls": 1
+   },
+   "scanner": {
+    "message": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy z",
+    "raises": "RuntimeError"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [{\"line\": 1, \"text\": \"one\"}]}",
+   "name": "scanner raises limit lands after a joined space",
+   "result": {
+    "message": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy z",
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+src/a.py\n+src/a.py\n+T\n+B\n+one\n",
+    "raises": "ContextScanError",
+    "reason": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy z",
+    "scanner_calls": 1
+   },
+   "scanner": {
+    "message": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy zwwwwwwwwww",
+    "raises": "RuntimeError"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [{\"line\": 1, \"text\": \"one\"}]}",
+   "name": "scanner raises limit trailing space is kept",
+   "result": {
+    "message": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy ",
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+src/a.py\n+src/a.py\n+T\n+B\n+one\n",
+    "raises": "ContextScanError",
+    "reason": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy ",
+    "scanner_calls": 1
+   },
+   "scanner": {
+    "message": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy  tail",
+    "raises": "RuntimeError"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [{\"line\": 1, \"text\": \"one\"}]}",
+   "name": "scanner ValueError propagates unchanged",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+src/a.py\n+src/a.py\n+T\n+B\n+one\n",
+    "raises": "ValueError",
+    "scanner_calls": 1
+   },
+   "scanner": {
+    "message": "boom",
+    "raises": "ValueError"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [{\"line\": 1, \"text\": \"one\"}]}",
+   "name": "scanner KeyError propagates unchanged",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+src/a.py\n+src/a.py\n+T\n+B\n+one\n",
+    "raises": "KeyError",
+    "scanner_calls": 1
+   },
+   "scanner": {
+    "message": "boom",
+    "raises": "KeyError"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [{\"line\": 1, \"text\": \"one\"}]}",
+   "name": "scanner TypeError propagates unchanged",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+src/a.py\n+src/a.py\n+T\n+B\n+one\n",
+    "raises": "TypeError",
+    "scanner_calls": 1
+   },
+   "scanner": {
+    "message": "boom",
+    "raises": "TypeError"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [{\"line\": 1, \"text\": \"one\"}]}",
+   "name": "scanner subprocess.CalledProcessError propagates unchanged",
+   "result": {
+    "output_passed_through": true,
+    "patch": "diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+src/a.py\n+src/a.py\n+T\n+B\n+one\n",
+    "raises": "subprocess.CalledProcessError",
+    "scanner_calls": 1
+   },
+   "scanner": {
+    "message": "boom",
+    "raises": "subprocess.CalledProcessError"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"\"}",
+   "name": "damaged context raises before the scanner is asked",
+   "result": {
+    "output_passed_through": false,
+    "patch": null,
+    "raises": "KeyError",
+    "scanner_calls": 0
+   },
+   "scanner": {
+    "message": "never reached",
+    "raises": "RuntimeError"
+   }
+  }
+ ],
+ "real": [
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [{\"line\": 1, \"text\": \"one\"}]}",
+   "name": "clean context",
+   "result": {
+    "clean": true,
+    "denylist_hits": 0,
+    "gitleaks": "not-run"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [{\"line\": 1, \"text\": \"token pk-ABCDEFGH12\"}]}",
+   "name": "planted key in a string value",
+   "result": {
+    "clean": false,
+    "denylist_hits": 1,
+    "gitleaks": "not-run"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"body\": \"see pk-ABCDEFGH12 now\"}, \"region\": [{\"line\": 1, \"text\": \"one\"}]}",
+   "name": "planted key in a nested finding",
+   "result": {
+    "clean": false,
+    "denylist_hits": 1,
+    "gitleaks": "not-run"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"pk-short\"]}",
+   "name": "short key shape is clean",
+   "result": {
+    "clean": true,
+    "denylist_hits": 0,
+    "gitleaks": "not-run"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [{\"line\": 1, \"text\": \"one\"}], \"pk-ABCDEFGH12\": \"v\"}",
+   "name": "planted key in a dict key name is not scanned",
+   "result": {
+    "clean": true,
+    "denylist_hits": 0,
+    "gitleaks": "not-run"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"safe\\rpk-ABCDEFGH12\"]}",
+   "name": "planted key after a lone CR is its own line",
+   "result": {
+    "clean": false,
+    "denylist_hits": 1,
+    "gitleaks": "not-run"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"safe\\u2028pk-ABCDEFGH12\"]}",
+   "name": "planted key after a unicode separator is its own line",
+   "result": {
+    "clean": false,
+    "denylist_hits": 1,
+    "gitleaks": "not-run"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"safe\\r\\npk-ABCDEFGH12\"]}",
+   "name": "planted key after CRLF",
+   "result": {
+    "clean": false,
+    "denylist_hits": 1,
+    "gitleaks": "not-run"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"deploy/.env\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"SECRET=1\"]}",
+   "name": "path scoped rule fires on a matching path",
+   "result": {
+    "clean": false,
+    "denylist_hits": 1,
+    "gitleaks": "not-run"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"src/a.py\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"SECRET=1\"]}",
+   "name": "path scoped rule is silent on another path",
+   "result": {
+    "clean": true,
+    "denylist_hits": 0,
+    "gitleaks": "not-run"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"\", \"finding\": {\"path\": \"prod.env\"}, \"region\": [\"SECRET=1\"]}",
+   "name": "path scoped rule fires through the finding path",
+   "result": {
+    "clean": false,
+    "denylist_hits": 1,
+    "gitleaks": "not-run"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"node_modules/x/y.js\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"pk-ABCDEFGH12\"]}",
+   "name": "allowlisted node_modules path is skipped",
+   "result": {
+    "clean": true,
+    "denylist_hits": 0,
+    "gitleaks": "not-run"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"dist/out.js\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"pk-ABCDEFGH12\"]}",
+   "name": "allowlisted dist path is skipped",
+   "result": {
+    "clean": true,
+    "denylist_hits": 0,
+    "gitleaks": "not-run"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \".git/config\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"pk-ABCDEFGH12\"]}",
+   "name": "allowlisted .git path is skipped",
+   "result": {
+    "clean": true,
+    "denylist_hits": 0,
+    "gitleaks": "not-run"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"policy/denylist/patterns.yml\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"pk-ABCDEFGH12\"]}",
+   "name": "allowlisted denylist file is skipped",
+   "result": {
+    "clean": true,
+    "denylist_hits": 0,
+    "gitleaks": "not-run"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"policy/denylist/patterns.yml.bak\", \"finding\": {\"path\": \"src/a.py\", \"title\": \"T\", \"body\": \"B\"}, \"region\": [\"pk-ABCDEFGH12\"]}",
+   "name": "near-miss allowlist path is scanned",
+   "result": {
+    "clean": false,
+    "denylist_hits": 1,
+    "gitleaks": "not-run"
+   }
+  },
+  {
+   "context_json": "{\"finding\": {}, \"region\": [\"pk-ABCDEFGH12\"]}",
+   "name": "default path name is scanned",
+   "result": {
+    "clean": false,
+    "denylist_hits": 1,
+    "gitleaks": "not-run"
+   }
+  },
+  {
+   "context_json": "{\"current_path\": \"p\"}",
+   "name": "empty context is clean",
+   "result": {
+    "clean": true,
+    "denylist_hits": 0,
+    "gitleaks": "not-run"
+   }
+  }
+ ],
+ "rules": [
+  {
+   "id": "planted-key",
+   "regex": "pk-[A-Za-z0-9]{8,}"
+  },
+  {
+   "id": "env-only",
+   "path": "[.]env$",
+   "regex": "SECRET="
+  }
+ ],
+ "schema": "cq.crq-triage-context-scan-vector/v1",
+ "source": "apps/crq-python/crq_repair.py"
+}
