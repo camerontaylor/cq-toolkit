@@ -11,6 +11,7 @@ from pathlib import Path
 import queue_time
 import re
 import tempfile
+import time
 from crq_repair import (DetectorUnavailable, atomic, findings, git as wt_git,
                          hack_detector, verify)
 from crq_repair.bounded import JOB_ID, identity, job_path, require_canonical_delivery, source_path, validate_revalidation
@@ -361,6 +362,7 @@ def record_terminal_failure(c, q, item, record, verdicts, expected, job_id, exc)
         item['last_error'] = 'repair_failed; needs human'
     c.save_queue(q)  # terminal identity before authoritative write-back
     mark_finding_outcome(c, expected, failure)
+    record['siblings_recorded'] = sorted({*(record.get('siblings_recorded') or ()), job_id})
     record_unpublished_siblings(c, record, {job_id})
 
 
@@ -371,10 +373,14 @@ def record_unpublished_siblings(c, record, handled):
     FAILED/NOT-FIXED/STALE siblings record their own verdict through
     `mark_finding_outcome`. `handled` are the jobs whose own outcome the caller
     records. Idempotent, so the terminal replay path can repeat it after a
-    failed ledger write."""
+    failed ledger write. Each job whose outcome is durably recorded (or that has
+    none to record) is added to `record['siblings_recorded']` only after its
+    write succeeds, so a settled run is never replayed again; a job whose
+    result is not yet readable stays unrecorded and is retried."""
     failures = []
+    done = list(record.get('siblings_recorded') or ())
     for other in record.get('jobs') or ():
-        if other in handled or not isinstance(other, str):
+        if other in handled or not isinstance(other, str) or other in done:
             continue
         try:
             result = json.loads((c.STATE / 'repair' / other / 'result.json').read_text())
@@ -384,6 +390,7 @@ def record_unpublished_siblings(c, record, handled):
         if not isinstance(result, dict) or not isinstance(job, dict):
             continue
         if not job.get('canonical_finding_id'):
+            done.append(other)
             continue
         try:
             # Sibling results bypass harvest's validation, so apply the same
@@ -411,12 +418,61 @@ def record_unpublished_siblings(c, record, handled):
                     c.iso(), repair_base=job.get('repair_base'), failure_class='exhausted')
             elif result.get('verdict') in ('FAILED', 'NOT-FIXED', 'STALE'):
                 mark_finding_outcome(c, job, result)
+            done.append(other)
         except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
             # One sibling's ledger write must not skip the healthy ones; the
             # terminal replay retries whatever is left.
             failures.append(exc)
+    if done:
+        record['siblings_recorded'] = done
     if failures:
         raise failures[0]
+
+
+class ReplayBudget:
+    """Bounds the terminal-failure replays one tick may run, so a backlog
+    degrades to slower catch-up instead of a tick that never reaches save.
+
+    A run whose replay did not settle it (a sibling result not yet readable)
+    is stamped and not retried for `retry_seconds`, so such runs cannot
+    monopolize the budget and starve the runs behind them."""
+    def __init__(self, count=25, seconds=240.0, clock=time.monotonic, retry_seconds=900.0, wall=time.time):
+        self.count, self.clock, self.wall, self.retry = count, clock, wall, retry_seconds
+        self.deadline = clock() + seconds
+        self.limits, self.announced = (count, seconds), False
+
+    def exhausted(self):
+        return self.count <= 0 or self.clock() >= self.deadline
+
+    def announce(self):
+        """The log line for a tripped budget, once per tick (None afterwards)."""
+        if self.announced:
+            return None
+        self.announced = True
+        return ('repair replay budget spent (%d runs / %gs): remaining failed runs resume next tick'
+                % self.limits)
+
+    def take(self, record=None):
+        if self.exhausted():
+            return False
+        if record is not None:
+            now = self.wall()
+            last = record.get('replay_attempted')
+            if isinstance(last, (int, float)) and 0 <= now - last < self.retry:
+                return False
+            record['replay_attempted'] = now
+        self.count -= 1
+        return True
+
+
+def begin_tick(c, **limits):
+    c.REPLAY_BUDGET = ReplayBudget(**limits)
+
+
+def replay_settled(record):
+    """True once every job's outcome is durably recorded (flag set after write)."""
+    recorded = record.get('siblings_recorded') or ()
+    return all(job in recorded for job in record.get('jobs') or () if isinstance(job, str))
 
 
 def harvest(c, q, item, dry=False):
@@ -425,7 +481,13 @@ def harvest(c, q, item, dry=False):
         if record['state'] in ('published', 'done', 'failed', 'stale'):
             # A terminal local failure can outlive a failed ledger write. Replay
             # retained FAILED outcomes through the ledger's idempotent event chain.
-            if not dry and record['state'] == 'failed':
+            budget = getattr(c, 'REPLAY_BUDGET', None)
+            pending = not dry and record['state'] == 'failed' and not replay_settled(record)
+            if pending and budget is not None and budget.exhausted():
+                line = budget.announce()
+                if line:
+                    messages.append(line)
+            if pending and (budget is None or budget.take(record)):
                 handled = set()
                 for result in record.get('verdicts', []):
                     if (result.get('verdict') != 'FAILED'
@@ -440,6 +502,7 @@ def harvest(c, q, item, dry=False):
                     if expected.get('canonical_finding_id'):
                         c.save_queue(q)  # also retry any prior failed terminal save
                         mark_finding_outcome(c, expected, result)
+                    record['siblings_recorded'] = sorted({*(record.get('siblings_recorded') or ()), result['job']})
                 # A write-back that failed before the sibling decision is replayed
                 # here; every sibling decision is idempotent.
                 record_unpublished_siblings(c, record, handled)

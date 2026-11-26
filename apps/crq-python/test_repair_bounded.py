@@ -786,6 +786,8 @@ class BoundedRepairTest(unittest.TestCase):
             self.assertEqual(len(out.retained()), 1)
             retained = item['repair_runs'][job['run']]['verdicts'][0]
             retained['item'] = 'wrong-item'
+            # A settled run is not replayed; drop the flag to exercise the replay check.
+            item['repair_runs'][job['run']].pop('siblings_recorded', None)
             with self.assertRaisesRegex(ValueError, 'outcome identity mismatch'):
                 repair_tick.harvest(self.c, self.queue, item)
         self.assertEqual(json.loads(path.read_text()), result)
@@ -869,7 +871,8 @@ class BoundedRepairTest(unittest.TestCase):
             repair_tick.harvest(self.c, self.queue, item)
             repair_tick.harvest(self.c, self.queue, item)
             outcome = inbox.return_value.repair_outcome
-            self.assertEqual(outcome.call_count, 2)
+            # The second harvest finds the run settled (siblings_recorded) and skips the replay.
+            self.assertEqual(outcome.call_count, 1)
             self.assertEqual(outcome.call_args.args[:3], (fid, job_id, 'needs-retriage'))
             self.assertEqual(outcome.call_args.kwargs['failure_class'], 'exhausted')
 

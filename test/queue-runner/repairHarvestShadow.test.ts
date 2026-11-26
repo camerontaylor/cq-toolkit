@@ -985,7 +985,8 @@ describe('S6 repair-harvest shadow: a rejected inbox replayed across durable rel
     ]);
 
     // The port: tick 0 writes J1, persists the terminal failure, then replays J1's outcome once.
-    // Every later process replays J1 once more (its only effect), cleans J1, and never J2.
+    // The run is then settled (every job flagged in siblings_recorded and persisted), so no
+    // later process replays anything: each only cleans J1 and never J2.
     expect(trail(b)).toEqual([
       'tick:0',
       'canonical:crq-R-F1',
@@ -995,7 +996,6 @@ describe('S6 repair-harvest shadow: a rejected inbox replayed across durable rel
       'tick-save',
       'tick:1',
       'restart',
-      'mark:crq-R-F1',
       'cleanup:crq-R-F1:base',
       'wt-remove:crq-repair-pr7-crq-R-F1',
       'cleanup:crq-R-F1:alt',
@@ -1004,7 +1004,6 @@ describe('S6 repair-harvest shadow: a rejected inbox replayed across durable rel
       'tick-save',
       'tick:2',
       'restart',
-      'mark:crq-R-F1',
       'cleanup:crq-R-F1:base',
       'cleanup:crq-R-F1:alt',
       'cleanup:crq-R-F2:base',
@@ -1012,7 +1011,6 @@ describe('S6 repair-harvest shadow: a rejected inbox replayed across durable rel
       'tick-save',
       'tick:3',
       'restart',
-      'mark:crq-R-F1',
       'cleanup:crq-R-F1:base',
       'cleanup:crq-R-F1:alt',
       'cleanup:crq-R-F2:base',
@@ -1020,10 +1018,10 @@ describe('S6 repair-harvest shadow: a rejected inbox replayed across durable rel
       'tick-save',
     ]);
 
-    // J1's outcome payload is the same on both sides, and the port repeats it byte for byte.
+    // J1's outcome payload is the same on both sides, and the port's one replay repeats it byte for byte.
     const pyMarks = markPayloads(a);
     const tsMarks = markPayloads(b);
-    expect(tsMarks).toHaveLength(5);
+    expect(tsMarks).toHaveLength(2);
     expect(new Set(tsMarks).size).toBe(1);
     expect(tsMarks[0]).toBe(pyMarks[0]);
     // Python's second write is J2's own result, filed under the foreign id; the port has none.

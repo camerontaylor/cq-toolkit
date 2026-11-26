@@ -3591,6 +3591,7 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
     # cleared before the read and after the pass, so a publication outside the
     # pass never sees another tick's count (an unread count holds creation).
     repair_tick.reset_fix_pr_backlog()
+    repair_tick.begin_tick(sys.modules[__name__])
     if not dry and repair_tick.backfill_repair_present(q):
         # Before the first publish: the hard cap on backfill fix PRs reads this
         # and the drain reads the file it writes. One forge request under its
