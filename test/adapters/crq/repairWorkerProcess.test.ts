@@ -7,9 +7,11 @@ import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterAll, describe, expect, test } from 'vitest';
+import { afterAll, describe, expect, test, vi } from 'vitest';
+import { closeSync, openSync, readSync } from 'node:fs';
 import {
   fileRepairWorkerStarter,
+  workerExitFromStatus,
   MAX_WORKER_PAYLOAD_BYTES,
   ownedWorkerCount,
   type RepairWorkerLaunch,
@@ -19,6 +21,30 @@ import {
   type RepairDrainEffects,
   type RepairWorkerHandle,
 } from '../../../src/ops/crq/internal/repairDrain.js';
+
+const fsSpy = vi.hoisted(() => ({ reads: [] as number[] }));
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    readSync: ((fd: number, ...rest: unknown[]) => {
+      fsSpy.reads.push(fd);
+      return (actual.readSync as (...a: unknown[]) => number)(fd, ...rest);
+    }) as typeof actual.readSync,
+  };
+});
+const spawnHook = vi.hoisted(() => ({ tweak: null as null | ((pipe: unknown) => void) }));
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    spawn: ((...args: Parameters<typeof actual.spawn>) => {
+      const child = actual.spawn(...args);
+      spawnHook.tweak?.(child.stdio[3]);
+      return child;
+    }) as typeof actual.spawn,
+  };
+});
 
 const STUB = fileURLToPath(new URL('../../helpers/repairWorkerStub.mjs', import.meta.url));
 const SOURCE = fileURLToPath(
@@ -33,6 +59,7 @@ interface Scenario {
   holdUntil?: string;
   afterRelease?: string[];
   reportTo?: string;
+  grandchild?: boolean;
 }
 
 const dirs: string[] = [];
@@ -211,6 +238,34 @@ describe('drainItems over real workers', () => {
     }) as unknown as RepairDrainEffects;
   const groups = (...items: string[]) => new Map(items.map((i) => [i, [`${i}-job`]]));
 
+  test('a worker whose pipe has no descriptor is registered and reaped, not orphaned', async () => {
+    spawnHook.tweak = (pipe) =>
+      Object.defineProperty((pipe as { _handle: object })._handle, 'fd', { value: undefined });
+    const before = ownedWorkerCount();
+    const base = starter({ a: { publish: ['a'] }, b: { publish: ['a'] } });
+    const started: string[] = [];
+    const said: string[] = [];
+    let failures: string[];
+    try {
+      failures = await drainItems(
+        effects((item, ids) => {
+          started.push(item);
+          return base(item, ids);
+        }, said),
+        groups('a', 'b'),
+        ['a', 'b'],
+        2,
+      );
+    } finally {
+      spawnHook.tweak = null;
+    }
+    // Returns the failure (Python's stop-and-reap), rather than rejecting.
+    expect(started).toEqual(['a']);
+    expect(failures).toEqual(['a']);
+    expect(said.join('\n')).toContain('worker exit status lost');
+    expect(ownedWorkerCount()).toBe(before);
+  });
+
   test('a crash stops further admission, the other worker is reaped, the failure is returned', async () => {
     const dir = await tmp();
     const release = join(dir, 'release');
@@ -273,5 +328,97 @@ describe('drainItems over real workers', () => {
     await expect(run).rejects.toThrow('fork failed');
     expect(exited).toBe(true);
     expect(ownedWorkerCount()).toBe(0);
+  });
+});
+
+describe('pipe descriptor lifecycle', () => {
+  const settle = (ms = 80) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  test('takeRefusal never reads after the pipe is closed, even if the number was reused', async () => {
+    const h = starter({ i: { publish: ['a'] } })('i', ['j']);
+    expect(await h.admitted).toBe(true);
+    fsSpy.reads.length = 0;
+    h.takeRefusal();
+    const fd = fsSpy.reads[0];
+    await h.exit;
+    await settle();
+    // Hold files open until one receives the closed pipe's old number.
+    const probe = join(await tmp(), 'f');
+    writeFileSync(probe, 'unrelated file contents');
+    const opened: number[] = [];
+    let reused = -1;
+    for (let i = 0; i < 64 && reused !== fd; i += 1) {
+      reused = openSync(probe, 'r');
+      opened.push(reused);
+    }
+    try {
+      fsSpy.reads.length = 0;
+      expect(h.takeRefusal()).toBe(false);
+      expect(fsSpy.reads).toEqual([]);
+      if (reused === fd) {
+        const rest = Buffer.alloc(64);
+        expect(readSync(reused, rest, 0, 64, null)).toBe(23); // none of it was consumed
+      }
+    } finally {
+      for (const f of opened) closeSync(f);
+    }
+  });
+
+  test('a grandchild holding fd 3 does not keep the coordinator end open after the exit', async () => {
+    const handles = () =>
+      process.getActiveResourcesInfo().filter((name) => name === 'PipeWrap').length;
+    const before = handles();
+    const h = starter({ i: { publish: ['a'], grandchild: true } })('i', ['j']);
+    expect(await h.admitted).toBe(true);
+    expect(await h.exit).toEqual({ kind: 'exit', code: 0 });
+    await settle();
+    expect(handles()).toBe(before);
+  });
+
+  test('a byte written just before exit is still delivered when the end is destroyed', async () => {
+    const h = starter({ i: { publish: ['a', 'x'] } })('i', ['j']);
+    expect(await h.admitted).toBe(true);
+    await h.exit;
+    expect(h.takeRefusal()).toBe(true);
+  });
+
+  test('a pipe with no descriptor at start still yields a reapable handle that fails loudly', async () => {
+    spawnHook.tweak = (pipe) =>
+      Object.defineProperty((pipe as { _handle: object })._handle, 'fd', { value: undefined });
+    const before = ownedWorkerCount();
+    let h: RepairWorkerHandle;
+    try {
+      h = starter({ i: { publish: ['a'] } })('i', ['j']);
+    } finally {
+      spawnHook.tweak = null;
+    }
+    expect(ownedWorkerCount()).toBe(before + 1);
+    expect(h.takeRefusal()).toBe(true); // latches the stop; never throws into the drain
+    expect(await h.exit).toEqual({ kind: 'lost' });
+    expect(ownedWorkerCount()).toBe(before);
+  });
+
+  test('a descriptor lost while the pipe is live stops admission and ends lost, without throwing', async () => {
+    const dir = await tmp();
+    const release = join(dir, 'release');
+    let captured: { _handle: object } | undefined;
+    spawnHook.tweak = (pipe) => {
+      captured = pipe as { _handle: object };
+    };
+    const h = starter({ i: { publish: ['a'], holdUntil: release } })('i', ['j']);
+    spawnHook.tweak = null;
+    expect(await h.admitted).toBe(true);
+    expect(h.takeRefusal()).toBe(false);
+    Object.defineProperty(captured!._handle, 'fd', { value: undefined });
+    expect(h.takeRefusal()).toBe(true);
+    await writeFile(release, '');
+    expect(await h.exit).toEqual({ kind: 'lost' });
+  });
+
+  test('an unrecognised signal name is a signal death, not a lost exit', () => {
+    expect(workerExitFromStatus(null, 'SIGNOPE')).toEqual({ kind: 'signal', signal: 0 });
+    expect(workerExitFromStatus(null, 'SIGKILL')).toEqual({ kind: 'signal', signal: 9 });
+    expect(workerExitFromStatus(null, null)).toEqual({ kind: 'lost' });
+    expect(workerExitFromStatus(3, null)).toEqual({ kind: 'exit', code: 3 });
   });
 });

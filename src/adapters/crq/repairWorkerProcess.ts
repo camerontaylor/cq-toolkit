@@ -14,7 +14,9 @@
  *   the child stays in the coordinator's process group so a unit's cgroup owns
  *   emergency shutdown, as with a Python fork;
  * - the exit comes from `'exit'` (the `waitpid` analogue), not `'close'`, which
- *   would also wait for the pipe;
+ *   would also wait for the pipe. On `'exit'` the coordinator drains what the pipe
+ *   already holds, then destroys its own end (no signal to anyone), so a grandchild
+ *   that inherited fd 3 cannot keep the coordinator's event loop alive;
  * - a launch problem knowable up front (missing entry or interpreter, oversized
  *   payload) throws synchronously, which unwinds `drainItems` after it reaps the
  *   workers already admitted, as Python's failing `os.fork()` does. A residual
@@ -56,6 +58,48 @@ export interface RepairWorkerStartOptions {
   /** The exact text of the loaded `config.json`. */
   readonly configText: string;
   readonly launch: RepairWorkerLaunch;
+}
+
+/**
+ * The socket descriptor behind the worker pipe is unavailable, so the synchronous
+ * refusal read (Python's nonblocking `os.read`) cannot be done. Failing loudly beats a
+ * silent fallback that would admit one more paid item after a refusal.
+ */
+export class RepairWorkerFdUnavailableError extends Error {
+  override readonly name = 'RepairWorkerFdUnavailableError';
+  constructor(detail: string) {
+    super(`repair worker pipe has no readable descriptor: ${detail}`);
+  }
+}
+
+/**
+ * The live descriptor of a worker pipe, or `undefined` once the pipe is destroyed or its handle
+ * closed (the number may then belong to an unrelated file, so it is never kept). Reads the
+ * private `_handle.fd` of Node's `net.Socket`/`Pipe` (absent from `@types/node`; verified on
+ * Node v24.22.0). Throws {@link RepairWorkerFdUnavailableError} when a live pipe has none.
+ */
+function livePipeFd(pipe: Readable): number | undefined {
+  const socket = pipe as Readable & { closed?: boolean; _handle?: { fd?: unknown } | null };
+  if (socket.destroyed || socket.closed === true || socket._handle === null) return undefined;
+  const fd = socket._handle?.fd;
+  if (typeof fd !== 'number' || !Number.isInteger(fd) || fd < 0) {
+    throw new RepairWorkerFdUnavailableError(`_handle.fd is ${String(fd)}`);
+  }
+  return fd;
+}
+
+/**
+ * Python's `reap_completed` status: a signal is always a number. Node reports only the name, so
+ * a name missing from `os.constants.signals` is still a signal death (number 0, unknown), never
+ * `lost`, which is reserved for a missing status.
+ */
+export function workerExitFromStatus(code: number | null, signal: string | null): WorkerExit {
+  if (code !== null) return { kind: 'exit', code };
+  if (signal === null) return { kind: 'lost' };
+  return {
+    kind: 'signal',
+    signal: osConstants.signals[signal as keyof typeof osConstants.signals] ?? 0,
+  };
 }
 
 let owned = 0;
@@ -103,10 +147,12 @@ export function fileRepairWorkerStarter(
       }
     };
     // Python's `refusal_published` does a nonblocking `os.read`. A byte can sit in the socket
-    // before the event loop delivers it, so the refusal check reads the descriptor itself.
-    const fd = (pipe as unknown as { _handle?: { fd?: number } } | null)?._handle?.fd;
+    // before the event loop delivers it, so the refusal check reads the descriptor itself. The
+    // number is looked up on every call and never cached: it is reusable once the pipe closes.
     const drainPending = (): void => {
-      if (typeof fd !== 'number' || fd < 0) return;
+      if (!pipe) return;
+      const fd = livePipeFd(pipe);
+      if (fd === undefined) return;
       const buffer = Buffer.alloc(256);
       for (;;) {
         let read: number;
@@ -130,6 +176,7 @@ export function fileRepairWorkerStarter(
     }
 
     let settled = false;
+    let descriptorFault = false;
     const exit = new Promise<WorkerExit>((resolve) => {
       const settle = (value: WorkerExit): void => {
         if (settled) return;
@@ -138,25 +185,45 @@ export function fileRepairWorkerStarter(
         resolve(value);
       };
       child.once('exit', (code, signal) => {
-        const signalNumber = signal === null ? undefined : osConstants.signals[signal];
-        settle(
-          code !== null
-            ? { kind: 'exit', code }
-            : signalNumber !== undefined
-              ? { kind: 'signal', signal: signalNumber }
-              : { kind: 'lost' },
-        );
+        // The worker is gone: take what it left in the socket, then release our end so a
+        // grandchild holding fd 3 cannot pin the event loop. Destroying signals nobody.
+        try {
+          drainPending();
+        } catch {
+          // an unavailable fd is reported by takeRefusal, not here
+        }
+        pipe?.destroy();
+        settle(descriptorFault ? { kind: 'lost' } : workerExitFromStatus(code, signal));
       });
       child.once('error', () => {
         channel.close();
         settle({ kind: 'lost' });
       });
     });
+    // Startup self-check. The child is already running and is never killed, so throwing here
+    // would orphan it (the caller never gets a handle to reap). Instead the handle is returned
+    // so `drainItems` registers and reaps it. The pass does not abort (Python's drain stops
+    // admitting and reaps): `takeRefusal` reports a refusal, which latches the stop, and the
+    // exit is `lost`, which is a worker failure in the returned status. Never a rejection.
+    if (pipe) {
+      try {
+        livePipeFd(pipe);
+      } catch {
+        descriptorFault = true;
+      }
+    }
     return {
       admitted: channel.admitted,
       takeRefusal: () => {
-        drainPending();
-        return channel.takeRefusal();
+        if (!descriptorFault) {
+          try {
+            drainPending();
+          } catch (error) {
+            if (!(error instanceof RepairWorkerFdUnavailableError)) throw error;
+            descriptorFault = true; // the descriptor vanished from a live pipe: same handling
+          }
+        }
+        return descriptorFault || channel.takeRefusal();
       },
       exit,
     };
