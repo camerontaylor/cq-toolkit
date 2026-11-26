@@ -39,9 +39,12 @@
  *
  * Where Python lets an uncaught exception escape the port throws a
  * {@link PyError} of the same class (the oracle pins class, and the message
- * where this code authors it). Residual: `str()` of a `job['run']`,
- * `job['job']` or `review_diff` that is a float, list or dict uses `pyRepr`
- * and is not pinned by a vector.
+ * where this code authors it).
+ *
+ * Caller contract: `str()` of `job['run']`, `job['job']` and `review_diff` is pinned by
+ * vectors for every JSON type, but a float only keeps its point (`7.0`) if the job arrives
+ * with numbers retained (`parseJsonValue` + `toPlainJsonRetainingNumbers`). A job from plain
+ * `JSON.parse` has already turned `7.0` into `7`, and nothing here can detect that.
  */
 import { pyTruthy } from '../policy/crq/queueDoc.js';
 import { JsonNumber, pythonNumberText } from '../policy/crq/jsonValue.js';
