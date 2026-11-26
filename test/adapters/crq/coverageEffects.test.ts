@@ -20,9 +20,6 @@ const injected = {
   parseIsoMs: unbound('parseIsoMs'),
   depsMet: unbound('depsMet'),
   buildSynthetic: unbound('buildSynthetic'),
-  rank4Gate: unbound('rank4Gate'),
-  bindRun: unbound('bindRun'),
-  cancelBeforeVendor: unbound('cancelBeforeVendor'),
 } as unknown as InjectedCoverageSeams;
 
 function build(coverageConfig: Record<string, unknown> = {}) {
@@ -38,6 +35,12 @@ function build(coverageConfig: Record<string, unknown> = {}) {
     git,
     measure: { defaultRef: 'origin/main', minFileFocus: 0.25, iso: () => '2026-11-20T12:00:00Z' },
     coverageConfig,
+    rank4: {
+      iso: () => '2026-11-20T12:00:00Z',
+      ordinaryEligible: unbound('ordinaryEligible'),
+      stateEvent: unbound('stateEvent') as never,
+      saveQueue: unbound('saveQueue') as never,
+    },
     injected,
   });
   return { effects, calls };
@@ -59,9 +62,20 @@ describe('makeCoverageEffects', () => {
     expect(() => effects.buildSynthetic({} as never, {} as never)).toThrow(
       'buildSynthetic is not bound',
     );
-    expect(() => effects.rank4Gate({} as never, {} as never, false)).toThrow(
-      'rank4Gate is not bound',
+    expect(() => effects.select({} as never, [], false, null)).toThrow('select is not bound');
+  });
+
+  it('binds rank4Gate, bindRun and cancelBeforeVendor, and an unbound collaborator throws', async () => {
+    const { effects } = build();
+    const item = { id: 'job-a', kind: 'backfill', state: 'pending', attempt_id: 'job-a:1' };
+    const queue = { items: [item], backfill_reservations: {} } as unknown as Queue;
+    // The gate reaches its eligibility collaborator first, and it is unbound here.
+    await expect(effects.rank4Gate(queue, item, false)).rejects.toThrow(
+      'ordinaryEligible is not bound',
     );
+    expect(() => effects.bindRun(queue, item, 'run-1')).toThrow(/^'job-a:1'$/);
+    effects.cancelBeforeVendor(queue, item);
+    expect(item).toMatchObject({ vendor_state: 'terminal' });
   });
 
   describe('identity mapping of the exceptions Python catches', () => {

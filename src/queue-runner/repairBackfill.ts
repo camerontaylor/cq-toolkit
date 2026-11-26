@@ -2,8 +2,9 @@
  * The queue side of `repair_tick.enqueue`, `backfill` and `archive_legacy`
  * (repair_tick.py:175-272, 848-892). Inactive: nothing imports this outside
  * tests. Items and queues are plain records edited in place; every read of the
- * run directory, inbox, receipts and git is injected. The review.ndjson parser
- * (`crq_repair.findings`) has no TS port, so `findings` is an injected effect.
+ * run directory, inbox, receipts and git is injected. `findings` is an injected
+ * effect; its file-backed implementation is `parseRepairFindings`
+ * (repairFindings.ts, `crq_repair.findings`).
  *
  * Python raises `KeyError`/`TypeError`/`AttributeError` for malformed records;
  * the port throws at the same points instead of inventing a default.

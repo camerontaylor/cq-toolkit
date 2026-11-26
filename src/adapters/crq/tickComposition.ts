@@ -35,7 +35,11 @@ import {
   FixPrBacklog,
   refreshFixPrBacklog,
 } from '../../queue-runner/fixPrBacklog.js';
-import { repairArchiveLegacy, repairBackfill } from '../../queue-runner/repairBackfill.js';
+import {
+  repairArchiveLegacy,
+  repairBackfill,
+  repairEnqueue,
+} from '../../queue-runner/repairBackfill.js';
 import type { Item, Queue } from '../../queue-runner/repairBackfill.js';
 import type { HarvestReviewEffects } from '../../queue-runner/harvestReview.js';
 import { runReconcilePhase } from '../../queue-runner/tickDiscoveryPhase.js';
@@ -133,8 +137,9 @@ export const STAGED_GAPS: readonly TickGap[] = [
     python: 'harvest_review (crq.py:2619)',
     missing:
       'fileHarvestReviewEffects binds findings.md for non-local kinds, removeWorktree, writeReceipt and ' +
-      'requestPrReview; repairEnqueue, backfillHarvest and the coverage seam stay injected: ' +
-      'repairEnqueue needs injected git and a TS port of crq_repair.findings (the pure repair port exists in repairBackfill.ts); backfillHarvest is bound by backfillHarvestEffect (src/adapters/crq/backfillHarvestEffect.ts, differentially pinned, not routed) over the injected git, outbox, inbox, store, state_event, queue save and cleanup, but not the Python unverified-terminal retain strings or the quota-cause/no-cooldown outcomes, which throw; the coverage seam has no harvest-side implementation (start-one CoverageEffects)',
+      'requestPrReview; the coverage seam stays injected, repairEnqueue is bound ' +
+      'only when the repairBackfill input (git, config) is supplied, and backfillHarvest is bound by backfillHarvestEffect (src/adapters/crq/backfillHarvestEffect.ts, differentially pinned, not routed) over the injected git, outbox, inbox, store, state_event, queue save and cleanup, but not the Python unverified-terminal retain strings or the quota-cause/no-cooldown outcomes, which throw; ' +
+      'the coverage seam has no harvest-side implementation (start-one CoverageEffects)',
   },
   {
     id: 'repair-harvest-effects',
@@ -153,7 +158,7 @@ export const STAGED_GAPS: readonly TickGap[] = [
     phases: ['admit.startOne'],
     python: 'start_one, launch (crq.py:3198/:2004)',
     missing:
-      'fileLaunchEffects binds the launch effects, but its scans, receipt, author lease, on-demand clone and queue save are injected, and CoverageEffects select, buildSynthetic, rank4Gate and the tick clocks and queue helpers are still injected (makeCoverageEffects binds the merged half: mergeQueueSha, diffNameOnly, measureMerged, coverageCandidate, legacyOrigins, legacyRetryAllowed)',
+      'fileLaunchEffects binds the launch effects, but its scans, receipt, author lease, on-demand clone and queue save are injected, and CoverageEffects select, buildSynthetic and the tick clocks and queue helpers are still injected (makeCoverageEffects binds mergeQueueSha, diffNameOnly, measureMerged, coverageCandidate, legacyOrigins, legacyRetryAllowed, rank4Gate, bindRun and cancelBeforeVendor; the clock, ordinary eligibility, usage refresh, outbox and queue writer arrive as Rank4Collaborators)',
   },
   {
     id: 'shadow-d2',
@@ -369,6 +374,13 @@ export function composeFullTick(input: TickCompositionInput): TickComposition {
             worktreePrefix: input.harvest.worktree.worktreePrefix,
             primaryClone: input.clone,
           }),
+          // `repair_tick.enqueue` over the repair-backfill effects (git and config stay injected).
+          ...(repairEffects
+            ? {
+                repairEnqueue: (q: Queue, item: Item, meta: Item, runId: string) =>
+                  repairEnqueue(q, item, meta, repairEffects, runId),
+              }
+            : {}),
           ...input.harvest.review,
         } as HarvestReviewEffects,
         repairHarvest: input.harvest.repairHarvest,

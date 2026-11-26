@@ -14,7 +14,8 @@
  *   current_document(item, outcome, meta=, cls=, rdir=))` (:1288, :2744).
  * - `requestPrReview`: `_request_pr_review` (:2486), a pure item mutation.
  *
- * Left injected, on purpose: `repairEnqueue` (the repair-harvest slice),
+ * Left injected, on purpose: `repairEnqueue` (bound in `tickComposition.ts` over
+ * the repair-backfill effects, since it needs git and config),
  * `backfillHarvest` (bound separately, unrouted, by `backfillHarvestEffect.ts`), and the `coverage` seam
  * (start-one's `CoverageEffects`, a separate slice), plus the clock, event,
  * queue save and repo-registry effects.
