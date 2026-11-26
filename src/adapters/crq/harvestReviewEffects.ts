@@ -15,7 +15,7 @@
  * - `requestPrReview`: `_request_pr_review` (:2486), a pure item mutation.
  *
  * Left injected, on purpose: `repairEnqueue` (the repair-harvest slice),
- * `backfillHarvest` (the backfill runtime), and the `coverage` seam
+ * `backfillHarvest` (bound separately, unrouted, by `backfillHarvestEffect.ts`), and the `coverage` seam
  * (start-one's `CoverageEffects`, a separate slice), plus the clock, event,
  * queue save and repo-registry effects.
  */
