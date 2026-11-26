@@ -52,6 +52,15 @@ def fixed_cases() -> list[tuple[str, bytes]]:
     f = finding
     return [
         ("empty", b""),
+        ("second-bom-first-line-junk", b"\xef\xbb\xbf" + nd("not json", f(comment="after junk"))),
+        ("second-bom-only", b"\xef\xbb\xbf"),
+        ("second-unicode-digits", nd(f(comment="at line " + chr(0x664) + chr(0x665)), f(comment="around lines " + chr(0xFF11) + chr(0x1D7D9)), f(comment="at line " + chr(0xB2)))),
+        ("second-line-limit", nd(f(comment="around line " + "1" * 4300), f(comment="around line " + "1" * 4302), f(comment="after"))),
+        ("second-unicode-space", nd(f(comment="at line" + chr(0x2003) + "7"), f(comment="at line" + chr(0x3000) + "8"), f(comment="at line" + chr(0x1680) + "9"), f(comment="at line" + chr(0x180E) + "3"), f(comment="at line" + chr(0x200B) + "4"))),
+        ("second-oversized-int-bare", ("9" * 4301 + "\n" + finding(comment="after") + "\n").encode("utf-8")),
+        ("second-oversized-int-nested", ('{"type":"finding","severity":"major","comment":"x","n":' + "9" * 4301 + '}\n' + finding(comment="after") + "\n").encode("utf-8")),
+        ("second-oversized-int-array-neg", ('{"type":"finding","severity":"major","comment":"x","n":[1,-' + "9" * 4301 + ']}\n' + finding(comment="after") + "\n").encode("utf-8")),
+        ("second-int-at-limit-and-float", ('{"type":"finding","severity":"major","comment":"x","n":' + "9" * 4300 + ',"f":' + "9" * 4302 + '.0}\n').encode("utf-8")),
         ("only-blank-lines", b"\n\n \n"),
         ("not-json-skipped", nd("garbage", "{bad", f())),
         ("severity-filter", nd(*(f(severity=s) for s in ("critical", "major", "minor", "blocker", "fatal", "none", "Major", "")))),

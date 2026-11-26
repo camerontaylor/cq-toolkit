@@ -19,7 +19,9 @@ import type { JsonValue } from '../policy/crq/jsonValue.js';
 import { pythonJsonText } from '../policy/crq/pythonJson.js';
 import {
   decimalDigitValue,
+  hasOversizedInt,
   loadFindings,
+  MAX_INT_STR_DIGITS,
   normalisedFinding,
 } from '../policy/crq/prReviewFindings.js';
 import { pythonTruthy } from '../policy/crq/repairBinding.js';
@@ -30,7 +32,7 @@ import type { SourcedFinding } from './repairBackfill.js';
 const SOURCE_KEYS = ['id', 'source_id', 'review_id', 'thread_id', 'source_thread_id'] as const;
 
 /** `str.__len__` limit of `int(str)` in CPython 3.12+. */
-const MAX_INT_DIGITS = 4300;
+const MAX_INT_DIGITS = MAX_INT_STR_DIGITS;
 
 /**
  * `(?:around lines?|at line)\s+(\d+)` under `re.I` (which also folds U+0130 and U+0131 to `i`, as JS `iu` does not). `\s` and `\d` are the
@@ -59,6 +61,11 @@ function digitsToInt(digits: string): number | bigint {
 }
 
 function parseLine(line: string): JsonValue | undefined {
+  const parsed = parseLineRaw(line);
+  return parsed === undefined || hasOversizedInt(parsed) ? undefined : parsed;
+}
+
+function parseLineRaw(line: string): JsonValue | undefined {
   try {
     return parseJsonValue(line, {
       duplicates: 'last',

@@ -1860,6 +1860,19 @@ export function normalisedFinding(event: JsonObject): Record<string, JsonValue> 
   return finding;
 }
 
+/** CPython 3.12+ `int(str)` digit limit; `json.loads` refuses a longer integer token. */
+export const MAX_INT_STR_DIGITS = 4300;
+
+/** True when `json.loads` would raise ValueError: an integer token past the limit, anywhere. */
+export function hasOversizedInt(value: JsonValue): boolean {
+  if (value instanceof JsonNumber) {
+    return value.kind === 'int' && value.raw.replace(/^-/, '').length > MAX_INT_STR_DIGITS;
+  }
+  if (Array.isArray(value)) return value.some(hasOversizedInt);
+  if (value instanceof JsonObject) return value.entries.some(([, v]) => hasOversizedInt(v));
+  return false;
+}
+
 export function loadFindings(text: string, highestSeverity = false): Finding[] {
   const out: Finding[] = [];
   const seen = new Map<string, number>();
@@ -1877,6 +1890,7 @@ export function loadFindings(text: string, highestSeverity = false): Finding[] {
     } catch {
       continue;
     }
+    if (hasOversizedInt(event)) continue;
     if (!(event instanceof JsonObject) || event.get('type') !== 'finding') continue;
     const finding = normalisedFinding(event);
     const key = pythonJsonText(
