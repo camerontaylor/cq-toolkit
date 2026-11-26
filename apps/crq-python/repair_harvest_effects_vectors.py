@@ -47,6 +47,9 @@ ARCHIVES = ("staged.patch", "unstaged.patch", "committed.patch", "untracked.tar"
 GIT_ENV = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+# Repository-location variables a caller (a git hook) may export; popped so git acts on the clone.
+REPO_LOCAL_GIT_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+                      "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_PREFIX")
 
 
 def git(cwd, *args):
@@ -118,6 +121,8 @@ def cleanup_case(spec: dict) -> dict:
         clone.mkdir()
         root.mkdir()
         with mock.patch.dict(os.environ, GIT_ENV):
+            for name in REPO_LOCAL_GIT_ENV:
+                os.environ.pop(name, None)
             git(clone, "init", "-q", "-b", "main")
             (clone / "f.txt").write_text("one\n")
             git(clone, "add", "f.txt")
@@ -227,25 +232,30 @@ def _outcome_run(case: dict) -> dict:
         job = copy.deepcopy(case["job"])
         result = copy.deepcopy(case.get("result"))
 
-        def settings(_state, **_kwargs):
-            if case.get("no_rollout"):
-                raise ValueError("backfill repair write-back requires existing ledger configuration")
-            return {"durable_artifact_root": str(root / "artifacts")}
+        rollout = {"operational_ruling": "r", "no_live_run_verification": "v",
+                   "owner_branch_ruleset_evidence": "e", "durable_artifact_root": str(root / "artifacts"),
+                   "runner_identity": "crq-runner-app",
+                   "publisher_spool": {"ssh_alias": "p@h", "ssh_key": "k"}}
+        if case.get("incomplete_rollout"):
+            rollout = {"durable_artifact_root": rollout["durable_artifact_root"]}
+        if not case.get("no_rollout"):
+            (state / "backfill-rollout.json").write_text(json.dumps(rollout))
 
         error = None
         before = base._row_bytes(row_path)
-        with mock.patch("backfill_runtime.settings", settings):
-            try:
-                if case["op"] == "mark":
-                    repair_tick.mark_finding_outcome(c, job, result)
-                else:
-                    sibling = job["job"]
-                    base._write(state / "repair/inbox" / (sibling + ".json"), job)
-                    (state / "repair" / sibling).mkdir(parents=True, exist_ok=True)
-                    base._write(state / "repair" / sibling / "result.json", result)
-                    repair_tick.record_unpublished_siblings(c, {"jobs": [sibling]}, set())
-            except BaseException as exc:  # noqa: BLE001 - the class is the datum
-                error = type(exc).__name__
+        try:
+            if case["op"] == "mark":
+                repair_tick.mark_finding_outcome(c, job, result)
+            else:
+                sibling = job["job"]
+                base._write(state / "repair/inbox" / (sibling + ".json"), job)
+                (state / "repair" / sibling).mkdir(parents=True, exist_ok=True)
+                base._write(state / "repair" / sibling / "result.json", result)
+                repair_tick.record_unpublished_siblings(c, {"jobs": [sibling]}, set())
+        except BaseException as exc:  # noqa: BLE001 - the class is the datum
+            # Harvest catches by class: every ValueError subclass (IntegrityError,
+            # JSONDecodeError) is a `ValueError` to it.
+            error = "ValueError" if isinstance(exc, ValueError) else type(exc).__name__
         return {"error": error, "row_before": json.loads(before),
                 "row_after": json.loads(base._row_bytes(row_path)),
                 "events": [v for v in outbox.retained() if v["source_key"].startswith("repair-outcome:")
@@ -296,6 +306,10 @@ def outcome_cases() -> list[dict]:
              job={k: v for k, v in base._job_doc().items() if k != "repair_base"}),
         mark("missing-job-id-without-rollout-value-error", {"verdict": "FAILED"},
              job={k: v for k, v in base._job_doc().items() if k != "job"}, no_rollout=True),
+        mark("incomplete-rollout-refused-before-any-write", {"verdict": "FAILED", "reason": "x"},
+             incomplete_rollout=True),
+        mark("missing-triage-row-file-not-found", {"verdict": "FAILED", "reason": "x"},
+             job=_job(canonical_finding_id="d" * 64)),
         mark("row-bound-to-newer-job-preserved", {"verdict": "FAILED", "reason": "late"}, repair_task="crq-newer"),
     ]
     sibling_result = {"job": "sib-1", "item": base.ITEM, "verdict": "FIXED"}

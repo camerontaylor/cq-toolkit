@@ -141,8 +141,9 @@ export const STAGED_GAPS: readonly TickGap[] = [
     phases: ['harvestItems'],
     python: 'repair_tick.harvest (repair_tick.py:422)',
     missing:
-      'file-backed: the job/result reads, markFindingOutcome and recordUnpublishedFixedSibling ' +
-      '(fileRepairOutcomeEffects) and cleanupHarvested (fileRepairCleanup), none composed into the tick; ' +
+      'file-backed: markFindingOutcome and recordUnpublishedFixedSibling (fileRepairOutcomeEffects) ' +
+      'and cleanupHarvested (fileRepairCleanup), none composed into the tick; the job/result reads ' +
+      'are bound in repairHarvestReads.ts; ' +
       'still unbound: makeWorktree/removeWorktree, verify, mechanical, requireCanonicalDelivery, saveQueue, ' +
       'publish (push, PR create, hack detector) and replayBudget, which need TS ports of the repair ' +
       'worktree, verify and detector runners and the publish path',

@@ -26,6 +26,10 @@ import {
 } from '../../../src/policy/crq/ledger.js';
 import { JsonObject, type JsonValue } from '../../../src/policy/crq/jsonValue.js';
 import { PyError } from '../../../src/queue-runner/pyErrors.js';
+import {
+  recordUnpublishedSiblings,
+  type RepairHarvestEffects,
+} from '../../../src/queue-runner/repairHarvest.js';
 
 const FIXTURE = new URL(
   '../../../apps/crq-python/fixtures/crq-repair-harvest-effects/cases.json',
@@ -60,6 +64,7 @@ const plain = JSON.parse(readFileSync(FIXTURE, 'utf8')) as {
     job: Record<string, unknown>;
     result: Record<string, unknown>;
     no_rollout?: boolean;
+    incomplete_rollout?: boolean;
   }[];
 };
 const cases = array(document.get('outcome_cases'), 'outcome_cases').map((value) =>
@@ -70,11 +75,28 @@ const FINDING = text(document.get('finding_id'), 'finding_id');
 const SEEDS = array(document.get('seed_events'), 'seed_events');
 const MAX = (plain as unknown as { max_finding_retries: number }).max_finding_retries;
 
+/** The rollout the emitter writes: every `settings` prerequisite, or only the artifact root. */
+function rolloutDocument(root: string, incomplete: boolean): Record<string, unknown> {
+  const durable_artifact_root = join(root, 'artifacts');
+  return incomplete
+    ? { durable_artifact_root }
+    : {
+        operational_ruling: 'r',
+        no_live_run_verification: 'v',
+        owner_branch_ruleset_evidence: 'e',
+        durable_artifact_root,
+        runner_identity: 'crq-runner-app',
+        publisher_spool: { ssh_alias: 'p@h', ssh_key: 'k' },
+      };
+}
+
 describe('repair outcome effects against the Python oracle', () => {
   test('the fixture is not vacuous', () => {
     expect(cases.length).toBeGreaterThan(25);
     const errors = new Set(cases.map((c) => object(c.get('expected'), 'e').get('error')));
-    expect(errors).toEqual(new Set([null, 'KeyError', 'TypeError', 'ValueError']));
+    expect(errors).toEqual(
+      new Set([null, 'FileNotFoundError', 'KeyError', 'TypeError', 'ValueError']),
+    );
   });
 
   test.each(cases.map((value, index) => [text(value.get('name'), 'name'), index] as const))(
@@ -89,7 +111,7 @@ describe('repair outcome effects against the Python oracle', () => {
       if (!raw.no_rollout)
         await writeFile(
           join(root, 'backfill-rollout.json'),
-          JSON.stringify({ durable_artifact_root: join(root, 'artifacts') }),
+          JSON.stringify(rolloutDocument(root, raw.incomplete_rollout === true)),
         );
       const files = fileFindingInbox(join(root, 'backfill', 'findings'));
       const publication = fileFindingPublication({
@@ -141,4 +163,49 @@ describe('repair outcome effects against the Python oracle', () => {
       ).toBe(true);
     },
   );
+
+  test('a missing first row does not stop the writable second sibling', async () => {
+    const sibling = plain.outcome_cases.find((c) => c.op === 'sibling')!;
+    const expected = object(
+      object(cases[plain.outcome_cases.indexOf(sibling)]!, 'c').get('expected'),
+      'e',
+    );
+    const root = await mkdtemp(join(tmpdir(), 'crq-outcome-effects-'));
+    temporary.push(root);
+    await writeFile(
+      join(root, 'backfill-rollout.json'),
+      JSON.stringify(rolloutDocument(root, false)),
+    );
+    const files = fileFindingInbox(join(root, 'backfill', 'findings'));
+    const publication = fileFindingPublication({
+      root: join(root, 'backfill', 'publication'),
+      artifacts: fileArtifactStore(join(root, 'artifacts')),
+    });
+    await files.writeTriage(
+      FINDING,
+      ledgerCanonicalBytes(object(expected.get('row_before'), 'row_before')),
+    );
+    for (const seed of SEEDS) await publication.spool(seed);
+    const jobs: Record<string, Record<string, unknown>> = {
+      'sib-missing': { ...sibling.job, job: 'sib-missing', canonical_finding_id: 'd'.repeat(64) },
+      'sib-1': sibling.job,
+    };
+    const effects = fileRepairOutcomeEffects({
+      stateRoot: root,
+      iso: () => AT,
+      maxFindingRetries: MAX,
+    });
+    const harvest = {
+      ...effects,
+      readJob: (id: string) => Promise.resolve(jobs[id]),
+      readResult: (id: string) => Promise.resolve({ ...sibling.result, job: id }),
+    } as unknown as RepairHarvestEffects;
+    const record: Record<string, unknown> = { jobs: ['sib-missing', 'sib-1'] };
+    await expect(recordUnpublishedSiblings(harvest, record, new Set())).rejects.toMatchObject({
+      kind: 'FileNotFoundError',
+    });
+    expect(record['siblings_recorded']).toEqual(['sib-1']);
+    const row = ledgerLoads((await files.readTriage(FINDING)) as Uint8Array);
+    expect(ledgerValueEqual(row, expected.get('row_after') as JsonValue)).toBe(true);
+  });
 });

@@ -36,13 +36,25 @@ describe('fileRepairHarvestEffects', () => {
     const valueError = new PyError('ValueError', message);
     await expect(publication.retained()).rejects.toEqual(valueError);
     await writeFile(join(root, 'backfill-rollout.json'), '{nope');
-    await expect(publication.spool({} as never)).rejects.toEqual(valueError);
+    await expect(publication.spool({} as never)).rejects.toMatchObject({ kind: 'ValueError' });
+    await writeFile(
+      join(root, 'backfill-rollout.json'),
+      JSON.stringify({ durable_artifact_root: join(root, 'artifacts') }),
+    );
+    await expect(publication.retained()).rejects.toMatchObject({ kind: 'ValueError' });
   });
 
   it('binds the publication outbox once the rollout names an artifact root', async () => {
     await writeFile(
       join(root, 'backfill-rollout.json'),
-      JSON.stringify({ durable_artifact_root: join(root, 'artifacts') }),
+      JSON.stringify({
+        operational_ruling: 'r',
+        no_live_run_verification: 'v',
+        owner_branch_ruleset_evidence: 'e',
+        durable_artifact_root: join(root, 'artifacts'),
+        runner_identity: 'crq-runner-app',
+        publisher_spool: { ssh_alias: 'p@h', ssh_key: 'k' },
+      }),
     );
     expect(await fileRepairHarvestEffects(root).publication.retained()).toEqual([]);
   });

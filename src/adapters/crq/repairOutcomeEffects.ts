@@ -11,6 +11,9 @@
  * without `merge`/`fix_pr`, so a FIXED verdict maps to no action and is a no-op
  * here; the merge path (repair_tick.py:1715) is not part of this effect.
  *
+ * A ledger or filesystem failure is thrown as the {@link PyError} of its Python
+ * class, so the sibling loop isolates it as Python's `except` does.
+ *
  * Deviations: the job id must be a string and `max_finding_retries` a number.
  * Plain JSON from `readJob`/`readResult` cannot tell `1` from `1.0`, so a float
  * `reason` or `repair_base` that is integral is written as an integer.
@@ -67,6 +70,40 @@ function concatError(value: unknown): PyError {
   );
 }
 
+/**
+ * The Python class `record_unpublished_siblings` and harvest catch by
+ * (`OSError`, `ValueError`, `KeyError`, `TypeError`, `RuntimeError`) for a
+ * ledger or filesystem failure, so the sibling loop isolates it instead of
+ * aborting. `IntegrityError` and the JSON/Unicode decode errors are
+ * `ValueError`s. Anything else (`CalledProcessError`, a defect) stays as it is.
+ */
+function pyClassOf(error: unknown): PyError['kind'] | null {
+  const named = (error as { pythonError?: unknown }).pythonError;
+  switch (named) {
+    case 'IntegrityError':
+    case 'JSONDecodeError':
+    case 'UnicodeDecodeError':
+    case 'ValueError':
+      return 'ValueError';
+    case 'KeyError':
+    case 'TypeError':
+    case 'OSError':
+    case 'FileNotFoundError':
+    case 'RuntimeError':
+      return named;
+    default:
+      break;
+  }
+  const code = (error as NodeJS.ErrnoException).code;
+  return typeof code === 'string' && /^E[A-Z0-9]+$/.test(code) ? 'OSError' : null;
+}
+
+function toPyError(error: unknown): unknown {
+  if (!(error instanceof Error) || error instanceof PyError) return error;
+  const kind = pyClassOf(error);
+  return kind === null ? error : new PyError(kind, error.message);
+}
+
 function jobIdOf(job: Rec): string {
   const id = job['job'];
   if (typeof id !== 'string') {
@@ -100,24 +137,30 @@ export function fileRepairOutcomeEffects(input: FileRepairOutcomeInput): FileRep
       maxFindingRetries: number;
     },
   ): Promise<void> {
-    if (typeof findingId !== 'string') {
-      await new FindingInbox(harvest.files).recover(await harvest.publication.retained());
-      throw concatError(findingId);
+    try {
+      if (typeof findingId !== 'string') {
+        await new FindingInbox(harvest.files).recover(await harvest.publication.retained());
+        throw concatError(findingId);
+      }
+      await dispositions.repairOutcome(
+        harvest.publication,
+        findingId,
+        job,
+        action,
+        reason,
+        input.iso(),
+        {
+          failureClass: options.failureClass,
+          repairBase: fromPlainJson(options.repairBase ?? null),
+          maxFindingRetries: options.maxFindingRetries,
+          ...(options.sourceEvidence === undefined
+            ? {}
+            : { sourceEvidence: options.sourceEvidence }),
+        },
+      );
+    } catch (error) {
+      throw toPyError(error);
     }
-    await dispositions.repairOutcome(
-      harvest.publication,
-      findingId,
-      job,
-      action,
-      reason,
-      input.iso(),
-      {
-        failureClass: options.failureClass,
-        repairBase: fromPlainJson(options.repairBase ?? null),
-        maxFindingRetries: options.maxFindingRetries,
-        ...(options.sourceEvidence === undefined ? {} : { sourceEvidence: options.sourceEvidence }),
-      },
-    );
   }
 
   return {

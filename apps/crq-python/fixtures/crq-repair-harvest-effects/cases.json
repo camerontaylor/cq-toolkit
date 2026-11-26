@@ -2104,6 +2104,101 @@
    }
   },
   {
+   "name": "incomplete-rollout-refused-before-any-write",
+   "op": "mark",
+   "job": {
+    "job": "crq-repair-F1",
+    "item": "pr1-merged",
+    "canonical_finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+    "finding": {
+     "id": "thread-1",
+     "path": "src/a.ts"
+    }
+   },
+   "result": {
+    "verdict": "FAILED",
+    "reason": "x"
+   },
+   "incomplete_rollout": true,
+   "expected": {
+    "error": "ValueError",
+    "row_before": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "row_after": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "events": []
+   }
+  },
+  {
+   "name": "missing-triage-row-file-not-found",
+   "op": "mark",
+   "job": {
+    "job": "crq-repair-F1",
+    "item": "pr1-merged",
+    "canonical_finding_id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+    "finding": {
+     "id": "thread-1",
+     "path": "src/a.ts"
+    }
+   },
+   "result": {
+    "verdict": "FAILED",
+    "reason": "x"
+   },
+   "expected": {
+    "error": "FileNotFoundError",
+    "row_before": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "row_after": {
+     "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "finding": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+     "receipt": {
+      "repair_task": "crq-repair-F1"
+     },
+     "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "status": "delivered"
+    },
+    "events": []
+   }
+  },
+  {
    "name": "row-bound-to-newer-job-preserved",
    "op": "mark",
    "job": {

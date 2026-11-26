@@ -66,8 +66,12 @@ const ARCHIVES = [
   'untracked.tar',
   'commits.bundle',
 ];
+/** Repository-location variables a git hook or shell may export; git would act on that repository. */
+const REPOSITORY_LOCATION_VARS = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE'];
 const GIT_ENV = {
-  ...process.env,
+  ...Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !REPOSITORY_LOCATION_VARS.includes(key)),
+  ),
   GIT_CONFIG_GLOBAL: '/dev/null',
   GIT_CONFIG_NOSYSTEM: '1',
   GIT_AUTHOR_NAME: 't',
