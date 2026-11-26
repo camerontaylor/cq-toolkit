@@ -398,26 +398,30 @@ describe('fileRepairUnit drain bindings against crq_repair.py (Python 3.14)', ()
     const state = join(tmp, 'state');
     await mkdir(state);
     const { drain } = fileRepairUnit({ stateRoot: state, clone: tmp, narrate: () => undefined });
-    let ran = false;
+    // Handshake, no timing: the admission records whether the other contender still holds
+    // tick.lock when it runs. The holder clears its flag only just before releasing, and a
+    // pass-through admission runs inside the call below, before release() is reached.
+    let holding = false;
+    let heldWhenAdmitted: boolean | null = null;
     let release: () => void = () => undefined;
     const held = new Promise<void>((resolve) => (release = resolve));
     let acquired: () => void = () => undefined;
-    const holding = new Promise<void>((resolve) => (acquired = resolve));
+    const isHolding = new Promise<void>((resolve) => (acquired = resolve));
     const holder = withLock(join(state, 'tick.lock'), { wait: false }, async () => {
+      holding = true;
       acquired();
       await held;
     });
-    await holding;
+    await isHolding;
     const admitted = drain.withAdmissionLock(async () => {
-      ran = true;
+      heldWhenAdmitted = holding;
       return 'admitted';
     });
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(ran).toBe(false);
+    holding = false;
     release();
     await holder;
     expect(await admitted).toBe('admitted');
-    expect(ran).toBe(true);
+    expect(heldWhenAdmitted).toBe(false);
   });
 
   it('inboxOrder: oldest file first, odd names and non-files ignored', async () => {
