@@ -36,11 +36,11 @@
  *    `makeRepairScan` splits on LF only. Content lines never differ (they are
  *    already `splitlines()` output), so only the path can. With a Python
  *    line-break character in the path, Python loses the path from the
- *    synthetic `diff --git` header and never flags the hunk. The TS scanner
- *    agrees for LF, CR, CRLF, U+2028, U+2029 and a forged `+++ b/node_modules/...`
- *    header line, and is stricter (it flags the hunk) for VT, FF, FS, GS, RS and
- *    NEL. Both are pinned by the `real` vectors; the stricter set is
- *    `TS_STRICTER` in the test. A schema-valid context path comes from the
+ *    synthetic `diff --git` header and never flags the hunk. On the pinned
+ *    `real` vectors the TS scanner agrees for LF, CR, CRLF, U+2028, U+2029 and a
+ *    forged `+++ b/node_modules/...` header line, and is stricter (it flags the
+ *    hunk) for VT, FF, FS, GS, RS and NEL; this is not a general claim for
+ *    other paths. The stricter set is `TS_STRICTER` in the test. A schema-valid context path comes from the
  *    repository tree, never from the judge.
  */
 import { JsonObject, type JsonValue } from './jsonValue.js';
