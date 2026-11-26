@@ -24,6 +24,7 @@ import { receiptJsonDigest } from '../policy/crq/pythonJson.js';
 import { pyTruthy } from '../policy/crq/queueDoc.js';
 import { pyStrip } from '../ops/crq/deploy/gitGuards.js';
 import { PyError } from './pyErrors.js';
+import { pyTypeName } from './repairProgressSelection.js';
 
 /** `runtime_target.DEFAULT_REF` (`origin/` + `DEFAULT_BRANCH`). */
 export const DEFAULT_REF = 'origin/main';
@@ -99,7 +100,10 @@ export function judgeRequired(input: JudgeRequiredInput): boolean {
   const rate = configured === undefined ? 0 : configured;
   const order = comparePythonNumbers(JsonNumber.float(draw), rate);
   if (order === null) {
-    throw new PyError('TypeError', `'<' not supported between 'float' and the sample rate`);
+    throw new PyError(
+      'TypeError',
+      `'<' not supported between instances of 'float' and '${pyTypeName(rate)}'`,
+    );
   }
   // `comparePythonNumbers` returns 0 for NaN as well as for equality; both
   // make `<` false.

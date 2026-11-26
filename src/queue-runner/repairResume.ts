@@ -79,7 +79,7 @@ function pyTypeName(value: unknown): string {
 }
 
 /** `Path(value)`: a truthy non-string recorded value is a `TypeError`. */
-function pathArg(value: unknown): string {
+export function pathArg(value: unknown): string {
   if (typeof value === 'string') return normalizePosixPath(value);
   throw new PyError(
     'TypeError',
