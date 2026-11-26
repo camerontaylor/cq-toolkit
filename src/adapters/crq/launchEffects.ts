@@ -33,6 +33,7 @@ export type LaunchInjectedEffects = Pick<
   LaunchEffects,
   | 'scan'
   | 'scanBackfillContext'
+  | 'revParse'
   | 'writeBlockedReceipt'
   | 'checkAuthor'
   | 'grantAuthor'
@@ -125,6 +126,7 @@ export function fileLaunchEffects(options: FileLaunchOptions): LaunchEffects {
     },
     scan: options.scan,
     scanBackfillContext: options.scanBackfillContext,
+    revParse: options.revParse,
     writeBlockedReceipt: options.writeBlockedReceipt,
     checkout: ({ runId, head, clone }) =>
       checkoutReviewWorktree({

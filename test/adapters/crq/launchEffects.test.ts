@@ -63,6 +63,7 @@ async function build(
     now: () => at,
     scan: never,
     scanBackfillContext: never,
+    revParse: never,
     writeBlockedReceipt: never,
     checkAuthor: () => undefined,
     grantAuthor: () => undefined,

@@ -75,6 +75,10 @@ function harness(
       scans.push(request);
       return Promise.resolve(CLEAN);
     },
+    revParse: (spec) => {
+      calls.push(`revParse:${spec}`);
+      return Promise.resolve(spec === 'pre-push' ? 'c'.repeat(40) : spec);
+    },
     scanBackfillContext: () => {
       calls.push('scanBackfillContext');
       return Promise.resolve(CLEAN);
@@ -332,6 +336,47 @@ describe('launch: receipts, backfill, merged, author', () => {
     expect(h.scans[0]?.mode).toBe('projection');
     expect(h.metas[0]).toMatchObject({ capture: { c: 1 }, source: { base: BASE } });
     expect(h.metas[0]?.cmd).toContain('--committed');
+  });
+
+  it('projection scans read exemptions from the subject base or merge first parent, never the projection base (5891f7a48)', async () => {
+    const push = harness({}, { 'o/other': { clone: '/clones/other', scanExtraClasses: [] } });
+    await launch(
+      push.queue,
+      item({ kind: 'push-current', repo: 'o/other', subject: { base: 'pre-push', head: HEAD } }),
+      plan(),
+      push.fx,
+    );
+    expect(push.calls).toContain('revParse:pre-push');
+    expect(push.scans[0]?.exemptionBase).toBe('c'.repeat(40));
+    expect(push.scans[0]?.exemptionBase).not.toBe(BASE);
+
+    const merged = harness();
+    await launch(
+      merged.queue,
+      item({ kind: 'merged-current', capture: {}, subject: { merge_sha: 'd'.repeat(40) } }),
+      plan(),
+      merged.fx,
+    );
+    expect(merged.calls).toContain(`revParse:${'d'.repeat(40)}^1`);
+    // rev-parse echoed the spec: not a full object id, so no exemptions.
+    expect(merged.scans[0]?.exemptionBase).toBeNull();
+
+    const bare = harness();
+    await launch(
+      bare.queue,
+      item({ kind: 'merged-current', capture: {}, subject: { base: BASE } }),
+      plan(),
+      bare.fx,
+    );
+    expect(bare.calls.some((call) => call.startsWith('revParse:'))).toBe(false);
+    expect(bare.scans[0]?.exemptionBase).toBeNull();
+  });
+
+  it('a range scan reads exemptions from the range base', async () => {
+    const h = harness();
+    await launch(h.queue, item(), plan(), h.fx);
+    expect(h.scans[0]).toMatchObject({ mode: 'range', exemptionBase: BASE });
+    expect(h.calls.some((call) => call.startsWith('revParse:'))).toBe(false);
   });
 
   it('backfill scans the synthetic context only after a clean main scan', async () => {

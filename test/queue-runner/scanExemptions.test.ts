@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  acceptExemptionBase,
+  exemptionBaseSpec,
   exemptReason,
   globMatcher,
   loadScanExemptions,
@@ -298,5 +300,34 @@ describe('scanReviewDiff exemptions', () => {
     expect(decision).toMatchObject({ denylistHits: 2, gitleaksHits: 1 });
     expect(report.exemption_error).toBe('x: bad');
     expect(report.gitleaks_hits).toEqual([{ rule: 'generic-api-key', diff_line: 6, file: SWARM }]);
+  });
+});
+
+describe('exemption base for projected scans (crq.exemption_base)', () => {
+  it('push reads the subject base, merged-current the merge first parent, else none', () => {
+    expect(exemptionBaseSpec({ kind: 'push-current', subject: { base: 'abc', head: 'def' } })).toBe(
+      'abc',
+    );
+    expect(exemptionBaseSpec({ kind: 'merged-current', subject: { merge_sha: 'm1' } })).toBe(
+      'm1^1',
+    );
+    expect(exemptionBaseSpec({ kind: 'merged-current', subject: { base: 'x' } })).toBeNull();
+    expect(exemptionBaseSpec({ kind: 'merged-current', subject: { merge_sha: '' } })).toBeNull();
+    expect(exemptionBaseSpec({ kind: 'push-current', subject: {} })).toBeNull();
+    expect(exemptionBaseSpec({ kind: 'push-current', subject: { base: 7 } })).toBeNull();
+    expect(exemptionBaseSpec({ kind: 'push-current' })).toBeNull();
+    expect(exemptionBaseSpec({ kind: 'open', subject: { base: 'abc' } })).toBeNull();
+    expect(() => exemptionBaseSpec({ kind: 'merged-current', subject: { merge_sha: 5 } })).toThrow(
+      TypeError,
+    );
+  });
+
+  it('accepts only a full object id, not the spec rev-parse echoes on failure', () => {
+    expect(acceptExemptionBase('a'.repeat(40))).toBe('a'.repeat(40));
+    expect(acceptExemptionBase('b'.repeat(64))).toBe('b'.repeat(64));
+    expect(acceptExemptionBase('a'.repeat(39))).toBeNull();
+    expect(acceptExemptionBase('abc^1')).toBeNull();
+    expect(acceptExemptionBase('A'.repeat(40))).toBeNull();
+    expect(acceptExemptionBase(`${'a'.repeat(40)}\n`)).toBeNull();
   });
 });

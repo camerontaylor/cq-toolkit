@@ -18,6 +18,7 @@ import {
   LOCAL_REVIEW_KIND,
   REVIEW_RECEIPT_KIND as RECEIPT_KIND,
 } from '../policy/crq/tickSchedule.js';
+import { acceptExemptionBase, exemptionBaseSpec } from './scanExemptions.js';
 import { ReviewSpawnError } from './reviewLaunch.js';
 import { ReviewCheckoutError } from './reviewPreparation.js';
 
@@ -81,6 +82,13 @@ export interface LaunchEffects {
     item: StartRecord;
     base: string;
     head: string;
+    /**
+     * The commit whose `.crq/scan-exemptions.toml` governs this scan, or null
+     * for none. A range scan reads the range base; a projection scan reads the
+     * push's subject base or the merge's first parent (`exemption_base`), never
+     * the projection base.
+     */
+    exemptionBase: string | null;
     clone: string | null;
     classes: readonly string[] | null;
     rdir: string;
@@ -101,6 +109,8 @@ export interface LaunchEffects {
     clone: string | null;
   }): Promise<{ path: string; branch: string }>;
   removeWorktree(path: string, branch: string, clone: string | null): Promise<void>;
+  /** `git rev-parse <spec>` in `clone`; echoes the spec itself when it cannot resolve. */
+  revParse(spec: string, clone: string | null): Promise<string>;
   /** `author_lease.check_queue(item, at)`; throws {@link StartAuthorRefused}. */
   checkAuthor(item: StartRecord, at: string): void;
   /** `author_lease.grant_queue(item, at)`; mutates the item, throws {@link StartAuthorRefused}. */
@@ -195,11 +205,19 @@ export async function launch(
       classes = [...UNIVERSAL_SCAN_CLASSES, ...cfg.scanExtraClasses];
     }
   }
+  const projection = kind === RECEIPT_KIND || kind === PUSH_KIND;
+  const spec = projection ? exemptionBaseSpec(item) : null;
+  const exemptionBase = projection
+    ? spec === null
+      ? null
+      : acceptExemptionBase(await fx.revParse(spec, clone))
+    : base;
   let scan = await fx.scan({
-    mode: kind === RECEIPT_KIND || kind === PUSH_KIND ? 'projection' : 'range',
+    mode: projection ? 'projection' : 'range',
     item,
     base,
     head,
+    exemptionBase,
     clone,
     classes,
     rdir,
