@@ -243,5 +243,127 @@ class CrashRecoveryTest(ReplayBase):
         self.assertTrue(repair_tick.replay_settled(record))
 
 
+class DefaultBackoffTest(ReplayBase):
+    def pass_over(self, f):
+        repair_tick.begin_tick(f.c)  # default limits, as crq.tick binds them
+        for item in f.items:
+            repair_tick.harvest(f.c, f.queue, item)
+
+    def test_default_backoff_does_not_retry_an_unsettled_run_within_the_window(self):
+        f = CrashRecoveryTest.two_job_fixture(self)
+        (f.root / 'state/repair/crq-job-0-1/result.json').unlink()
+        with mock.patch.object(repair_tick, 'record_unpublished_siblings',
+                               wraps=repair_tick.record_unpublished_siblings) as replay:
+            self.pass_over(f)
+            self.assertEqual(replay.call_count, 1)
+            self.pass_over(f)  # a fresh tick, seconds later: the run is still backed off
+            self.assertEqual(replay.call_count, 1)
+
+    def test_default_backoff_is_fifteen_minutes(self):
+        now = [1000.0]
+        record = {}
+        budget = repair_tick.ReplayBudget(wall=lambda: now[0])
+        self.assertTrue(budget.take(record))
+        now[0] += 899
+        self.assertFalse(budget.take(record))
+        now[0] += 2
+        self.assertTrue(budget.take(record))
+
+
+class TerminalFlagOrderTest(unittest.TestCase):
+    def test_job_is_not_flagged_when_its_outcome_write_fails(self):
+        c = SimpleNamespace(save_queue=mock.Mock())
+        item = {'id': 'item-0', 'kind': 'merged', 'state': 'repairing'}
+        record = {'jobs': ['crq-job-0-0'], 'state': 'ready'}
+        with mock.patch.object(repair_tick, 'mark_finding_outcome', side_effect=RuntimeError('ledger down')):
+            with self.assertRaises(RuntimeError):
+                repair_tick.record_terminal_failure(
+                    c, {'items': [item]}, item, record, [], {'finding': {'id': 'f'}}, 'crq-job-0-0', ValueError('bad'))
+        self.assertEqual(record['state'], 'failed')  # terminal identity is saved first
+        self.assertNotIn('crq-job-0-0', record.get('siblings_recorded') or ())
+        self.assertFalse(repair_tick.replay_settled(record))
+
+
+class OutboxMemoTest(unittest.TestCase):
+    def test_retained_reparses_only_changed_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            outbox = ledger.Outbox(Path(tmp), None)
+            events = [seed_event('memo:%d' % n, {'n': n}) for n in range(3)]
+            for event in events:
+                path = Path(tmp) / 'pending' / (event['id'] + '.json')
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(ledger.canonical(event))
+            ledger._VALIDATED_PENDING.clear()
+            with mock.patch.object(ledger, 'loads', wraps=ledger.loads) as strict:
+                first = outbox.retained()
+                self.assertEqual(strict.call_count, 3)
+                self.assertEqual(outbox.retained(), first)
+                self.assertEqual(strict.call_count, 3)  # unchanged files are not re-validated
+                (Path(tmp) / 'pending' / (events[0]['id'] + '.json')).write_bytes(
+                    b'{"id":"a","id":"b"}')  # a changed file: duplicate keys fail the strict check
+                with self.assertRaises(ledger.IntegrityError):
+                    outbox.retained()  # a changed file is strictly re-checked
+                self.assertEqual(strict.call_count, 4)
+
+
+class RecoverFixpointTest(unittest.TestCase):
+    def test_events_applied_out_of_causal_order_all_land(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            inbox = finding_delivery.Inbox(Path(tmp), ledger.Outbox(Path(tmp) / 'pub', None))
+            fid = format(7, '064x')
+            row = {'review_id': 'e' * 64, 'finding': {'id': fid}, 'canonical_id': fid, 'status': 'needs-triage',
+                   'previous_event_id': None}
+            ledger.atomic(Path(tmp) / 'triage' / (fid + '.json'), ledger.canonical(row))
+            chain, previous = [], None
+            for step in range(4):
+                event = seed_event('rec:%d' % step, {
+                    'finding_id': fid, 'review_id': 'e' * 64, 'previous_event_id': previous,
+                    'action': 'needs-retriage', 'evidence': {'failure_class': 'step%d' % step}, 'actor': 'judge'})
+                chain.append(event)
+                previous = event['id']
+            unrelated = seed_event('rec:other', {'finding_id': format(9, '064x'), 'review_id': 'e' * 64,
+                                                 'previous_event_id': None, 'action': 'needs-retriage',
+                                                 'evidence': {}, 'actor': 'judge'})
+            seen = []
+            real = inbox._recover_event
+            inbox._recover_event = lambda value: seen.append(value['id']) or real(value)
+            inbox.recover(list(reversed(chain)) + [unrelated])  # worst order: every pass advances one event
+            landed = json.loads((Path(tmp) / 'triage' / (fid + '.json')).read_text())
+            self.assertEqual(landed['previous_event_id'], chain[-1]['id'])
+            self.assertEqual(landed['failure_class'], 'step3')
+            # One event lands per pass; the unrelated one is retried each pass and once more
+            # in the pass that makes no progress, while applied events are not revisited.
+            self.assertEqual(seen.count(unrelated['id']), len(chain) + 1)
+            self.assertEqual(seen.count(chain[0]['id']), 1)
+            self.assertEqual(seen.count(chain[-1]['id']), len(chain))
+
+
+class TickEntryPointTest(unittest.TestCase):
+    def test_crq_tick_binds_a_fresh_budget_that_bounds_the_replays(self):
+        import crq
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        f = Fixture(tmp.name, 30, chain=1)  # 30 unsettled failed runs against the default budget of 25
+        q = {'items': f.items}
+        outcomes = mock.Mock(wraps=f.inbox.repair_outcome)
+        crq.REPLAY_BUDGET = None
+        self.addCleanup(lambda: setattr(crq, 'REPLAY_BUDGET', None))
+        with mock.patch.object(crq, 'load_queue', return_value=q), \
+             mock.patch.object(crq, 'fetch'), mock.patch.object(crq, 'STATE', f.root / 'state'), \
+             mock.patch.object(crq, 'save_queue'), mock.patch.object(crq, 'write_status'), \
+             mock.patch.object(crq.backfill_runtime, 'publish'), \
+             mock.patch.object(crq.backfill_runtime, 'settings', return_value=None), \
+             mock.patch.object(crq.deferred_refresh, 'refresh_deferred', return_value=[]), \
+             mock.patch.object(crq.push_current, 'discover', return_value=[]), \
+             mock.patch.object(crq, 'CONFIG', {'repair': {}}), \
+             mock.patch.object(repair_tick, 'finding_inbox', lambda c: f.inbox), \
+             mock.patch.object(f.inbox, 'repair_outcome', outcomes):
+            crq.tick(only='x')
+        self.assertIsInstance(crq.REPLAY_BUDGET, repair_tick.ReplayBudget)
+        settled = [repair_tick.replay_settled(next(iter(i['repair_runs'].values()))) for i in f.items]
+        self.assertEqual(sum(settled), 25)
+        self.assertEqual(outcomes.call_count, 25)
+
+
 if __name__ == '__main__':
     unittest.main()
