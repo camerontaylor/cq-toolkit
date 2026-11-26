@@ -25,7 +25,7 @@ import {
 import { pythonJsonText, sha256Hex } from '../../policy/crq/pythonJson.js';
 import { GitUnavailable, type GitFn } from '../../policy/crq/reviewHistory.js';
 import { ValueError } from '../../policy/crq/reviewAdmission.js';
-import { MAX_EVENT_BYTES } from '../../policy/crq/reviewRecord.js';
+import { MAX_EVENT_BYTES, PythonRetainedError } from '../../policy/crq/reviewRecord.js';
 import { MAX_RECEIPT_BYTES } from '../../policy/crq/queueReceipt.js';
 import type { ReviewCapabilityEffects } from '../../ops/crq/reviewCapability.js';
 import { atomicWrite } from './atomic.js';
@@ -79,16 +79,6 @@ function isoUtc(clock: Date): string {
 
 function isoNow(clock: () => Date): string {
   return isoUtc(clock());
-}
-
-/** A Python exception `_retained_records` lets escape (`AttributeError`, `KeyError`, `TypeError`). */
-export class PythonRetainedError extends Error {
-  constructor(
-    override readonly name: 'AttributeError' | 'KeyError' | 'TypeError',
-    message: string,
-  ) {
-    super(message);
-  }
 }
 
 /** Python `sorted()` over `str`: code point order, not UTF-16 unit order. */
@@ -390,7 +380,8 @@ export function createReviewEffects(options: ReviewEffectsOptions): ReviewEffect
       // read can skip a file (IntegrityError, OSError). There is no validate call, no
       // object check and no string check on `id`; whatever else Python lets escape
       // (`.get` on a non-dict, a missing or unhashable `id`) escapes here as the same
-      // named class. Downstream `importRecord` only probes records with `.get`.
+      // named class. Downstream, `importRecord` mirrors Python's own escapes on the
+      // loosely shaped records this now returns (see its duplicate predicate).
       const roots = [join(state, 'backfill/publication'), join(state, 'record-outbox')];
       const seen = new Set<string>();
       const records: JsonObject[] = [];
@@ -402,7 +393,9 @@ export function createReviewEffects(options: ReviewEffectsOptions): ReviewEffect
             .filter((name) => name.endsWith('.json'))
             .sort(compareCodePoints);
         } catch (error) {
-          if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+          // `directory.is_dir()` is false for a missing path or a regular file, and
+          // pathlib's glob swallows OSError: both yield no records.
+          if (typeof (error as NodeJS.ErrnoException).code === 'string') continue;
           throw error;
         }
         for (const name of names) {

@@ -12,6 +12,7 @@ import { toPlainJson } from '../../../src/policy/crq/jsonValue.js';
 
 interface Vector {
   readonly name: string;
+  readonly pending_as_file?: string[];
   readonly files: readonly { root: string; name: string; b64: string }[];
   readonly expect: { records?: string[]; error?: string };
 }
@@ -41,6 +42,10 @@ async function replay(vector: Vector) {
   const clone = join(root, 'clone');
   await mkdir(clone, { recursive: true });
   const state = join(root, 'state');
+  for (const rootName of vector.pending_as_file ?? []) {
+    await mkdir(join(state, rootName), { recursive: true });
+    await writeFile(join(state, rootName, 'pending'), 'not a directory');
+  }
   for (const file of vector.files) {
     const target = join(state, file.root, 'pending', file.name);
     await mkdir(dirname(target), { recursive: true });

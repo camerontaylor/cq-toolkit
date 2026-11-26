@@ -62,8 +62,11 @@ def cases() -> List[Dict[str, Any]]:
     int_id = {**valid, "id": 7}
     out: List[Dict[str, Any]] = []
 
-    def add(name: str, files: List[Dict[str, str]]) -> None:
-        out.append({"name": name, "files": files})
+    def add(name: str, files: List[Dict[str, str]], pending_as_file: List[str] | None = None) -> None:
+        case: Dict[str, Any] = {"name": name, "files": files}
+        if pending_as_file:
+            case["pending_as_file"] = pending_as_file
+        out.append(case)
 
     add("empty", [])
     add("six-probe-records", [
@@ -165,12 +168,19 @@ def cases() -> List[Dict[str, Any]]:
     add("directory-named-json-skipped-via-oserror", [
         _file(OUT, "z.json", _b({"event_type": "review", "id": "ok"})),
     ])
+    add("pending-regular-file-yields-nothing", [], [PUB, OUT])
+    add("pending-regular-file-does-not-hide-the-other-root", [
+        _file(OUT, "a.json", _b({"event_type": "review", "id": "kept"})),
+    ], [PUB])
     return out
 
 
 def run_case(case: Dict[str, Any]) -> Dict[str, Any]:
     with tempfile.TemporaryDirectory() as tmp:
         state = Path(tmp)
+        for root in case.get("pending_as_file", []):
+            (state / root).mkdir(parents=True, exist_ok=True)
+            (state / root / "pending").write_bytes(b"not a directory")
         for item in case["files"]:
             directory = state / item["root"] / "pending"
             directory.mkdir(parents=True, exist_ok=True)

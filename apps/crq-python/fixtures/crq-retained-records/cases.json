@@ -596,6 +596,35 @@
         }
       ],
       "name": "directory-named-json-skipped-via-oserror"
+    },
+    {
+      "expect": {
+        "records": []
+      },
+      "files": [],
+      "name": "pending-regular-file-yields-nothing",
+      "pending_as_file": [
+        "backfill/publication",
+        "record-outbox"
+      ]
+    },
+    {
+      "expect": {
+        "records": [
+          "{\"event_type\": \"review\", \"id\": \"kept\"}"
+        ]
+      },
+      "files": [
+        {
+          "b64": "eyJldmVudF90eXBlIjogInJldmlldyIsICJpZCI6ICJrZXB0In0=",
+          "name": "a.json",
+          "root": "record-outbox"
+        }
+      ],
+      "name": "pending-regular-file-does-not-hide-the-other-root",
+      "pending_as_file": [
+        "backfill/publication"
+      ]
     }
   ],
   "schema": "crq-retained-records-vectors-v1"

@@ -1,0 +1,655 @@
+{
+  "cases": [
+    {
+      "existing": [
+        {
+          "event_type": "review",
+          "id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "payload": {
+            "artifacts": [
+              {
+                "sha256": "00d0b00f859478418ccba7dbe594b5c7cb6423d144b31af04002db9ba306cd2d"
+              }
+            ]
+          },
+          "source_key": "camerontaylor/cq-toolkit:manual:report-1:00d0b00f85947841"
+        }
+      ],
+      "expect": {
+        "action": "duplicate:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "events": 0
+      },
+      "name": "duplicate-of-string-id"
+    },
+    {
+      "existing": [
+        {
+          "event_type": "review",
+          "id": 7,
+          "payload": {
+            "artifacts": [
+              {
+                "sha256": "00d0b00f859478418ccba7dbe594b5c7cb6423d144b31af04002db9ba306cd2d"
+              }
+            ]
+          },
+          "source_key": "camerontaylor/cq-toolkit:manual:report-1:00d0b00f85947841"
+        }
+      ],
+      "expect": {
+        "error": "TypeError"
+      },
+      "name": "integer-id-is-typeerror"
+    },
+    {
+      "existing": [
+        {
+          "event_type": "review",
+          "id": null,
+          "payload": {
+            "artifacts": [
+              {
+                "sha256": "00d0b00f859478418ccba7dbe594b5c7cb6423d144b31af04002db9ba306cd2d"
+              }
+            ]
+          },
+          "source_key": "camerontaylor/cq-toolkit:manual:report-1:00d0b00f85947841"
+        }
+      ],
+      "expect": {
+        "error": "TypeError"
+      },
+      "name": "null-id-is-typeerror"
+    },
+    {
+      "existing": [
+        {
+          "event_type": "review",
+          "id": true,
+          "payload": {
+            "artifacts": [
+              {
+                "sha256": "00d0b00f859478418ccba7dbe594b5c7cb6423d144b31af04002db9ba306cd2d"
+              }
+            ]
+          },
+          "source_key": "camerontaylor/cq-toolkit:manual:report-1:00d0b00f85947841"
+        }
+      ],
+      "expect": {
+        "error": "TypeError"
+      },
+      "name": "true-id-is-typeerror"
+    },
+    {
+      "existing": [
+        {
+          "event_type": "review",
+          "id": false,
+          "payload": {
+            "artifacts": [
+              {
+                "sha256": "00d0b00f859478418ccba7dbe594b5c7cb6423d144b31af04002db9ba306cd2d"
+              }
+            ]
+          },
+          "source_key": "camerontaylor/cq-toolkit:manual:report-1:00d0b00f85947841"
+        }
+      ],
+      "expect": {
+        "error": "TypeError"
+      },
+      "name": "false-id-is-typeerror"
+    },
+    {
+      "existing": [
+        {
+          "event_type": "review",
+          "payload": {
+            "artifacts": [
+              {
+                "sha256": "00d0b00f859478418ccba7dbe594b5c7cb6423d144b31af04002db9ba306cd2d"
+              }
+            ]
+          },
+          "source_key": "camerontaylor/cq-toolkit:manual:report-1:00d0b00f85947841"
+        }
+      ],
+      "expect": {
+        "error": "KeyError"
+      },
+      "name": "missing-id-is-keyerror"
+    },
+    {
+      "existing": [
+        {
+          "event_type": "review",
+          "id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "source_key": "camerontaylor/cq-toolkit:manual:report-1:00d0b00f85947841"
+        }
+      ],
+      "expect": {
+        "error": "KeyError"
+      },
+      "name": "missing-payload-is-keyerror"
+    },
+    {
+      "existing": [
+        {
+          "event_type": "review",
+          "id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "payload": [],
+          "source_key": "camerontaylor/cq-toolkit:manual:report-1:00d0b00f85947841"
+        }
+      ],
+      "expect": {
+        "error": "TypeError"
+      },
+      "name": "empty-list-payload-is-typeerror"
+    },
+    {
+      "existing": [
+        {
+          "event_type": "review",
+          "id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "payload": "x",
+          "source_key": "camerontaylor/cq-toolkit:manual:report-1:00d0b00f85947841"
+        }
+      ],
+      "expect": {
+        "error": "TypeError"
+      },
+      "name": "string-payload-is-typeerror"
+    },
+    {
+      "existing": [
+        {
+          "event_type": "review",
+          "id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "payload": null,
+          "source_key": "camerontaylor/cq-toolkit:manual:report-1:00d0b00f85947841"
+        }
+      ],
+      "expect": {
+        "error": "TypeError"
+      },
+      "name": "null-payload-is-typeerror"
+    },
+    {
+      "existing": [
+        {
+          "event_type": "review",
+          "id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "payload": 5,
+          "source_key": "camerontaylor/cq-toolkit:manual:report-1:00d0b00f85947841"
+        }
+      ],
+      "expect": {
+        "error": "TypeError"
+      },
+      "name": "int-payload-is-typeerror"
+    },
+    {
+      "existing": [
+        {
+          "event_type": "review",
+          "id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "payload": {},
+          "source_key": "camerontaylor/cq-toolkit:manual:report-1:00d0b00f85947841"
+        }
+      ],
+      "expect": {
+        "error": "KeyError"
+      },
+      "name": "payload-without-artifacts-is-keyerror"
+    },
+    {
+      "existing": [
+        {
+          "event_type": "review",
+          "id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "payload": {
+            "artifacts": "abc"
+          },
+          "source_key": "camerontaylor/cq-toolkit:manual:report-1:00d0b00f85947841"
+        }
+      ],
+      "expect": {
+        "error": "TypeError"
+      },
+      "name": "string-artifacts-iterate-characters-typeerror"
+    },
+    {
+      "existing": [
+        {
+          "event_type": "review",
+          "id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "payload": {
+            "artifacts": ""
+          },
+          "source_key": "camerontaylor/cq-toolkit:manual:report-1:00d0b00f85947841"
+        }
+      ],
+      "expect": {
+        "action": "record:c9035cbfcd994e68ee05cbf4e5df1377a6d51fb26bc323a79c810097422590e9",
+        "events": 1
+      },
+      "name": "empty-string-artifacts-match-nothing"
+    },
+    {
+      "existing": [
+        {
+          "event_type": "review",
+          "id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "payload": {
+            "artifacts": null
+          },
+          "source_key": "camerontaylor/cq-toolkit:manual:report-1:00d0b00f85947841"
+        }
+      ],
+      "expect": {
+        "error": "TypeError"
+      },
+      "name": "null-artifacts-not-iterable"
+    },
+    {
+      "existing": [
+        {
+          "event_type": "review",
+          "id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "payload": {
+            "artifacts": 5
+          },
+          "source_key": "camerontaylor/cq-toolkit:manual:report-1:00d0b00f85947841"
+        }
+      ],
+      "expect": {
+        "error": "TypeError"
+      },
+      "name": "int-artifacts-not-iterable"
+    },
+    {
+      "existing": [
+        {
+          "event_type": "review",
+          "id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "payload": {
+            "artifacts": true
+          },
+          "source_key": "camerontaylor/cq-toolkit:manual:report-1:00d0b00f85947841"
+        }
+      ],
+      "expect": {
+        "error": "TypeError"
+      },
+      "name": "true-artifacts-not-iterable"
+    },
+    {
+      "existing": [
+        {
+          "event_type": "review",
+          "id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "payload": {
+            "artifacts": {}
+          },
+          "source_key": "camerontaylor/cq-toolkit:manual:report-1:00d0b00f85947841"
+        }
+      ],
+      "expect": {
+        "action": "record:c9035cbfcd994e68ee05cbf4e5df1377a6d51fb26bc323a79c810097422590e9",
+        "events": 1
+      },
+      "name": "empty-object-artifacts-match-nothing"
+    },
+    {
+      "existing": [
+        {
+          "event_type": "review",
+          "id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "payload": {
+            "artifacts": {
+              "k": 1
+            }
+          },
+          "source_key": "camerontaylor/cq-toolkit:manual:report-1:00d0b00f85947841"
+        }
+      ],
+      "expect": {
+        "error": "TypeError"
+      },
+      "name": "object-artifacts-iterate-keys-typeerror"
+    },
+    {
+      "existing": [
+        {
+          "event_type": "review",
+          "id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "payload": {
+            "artifacts": [
+              {}
+            ]
+          },
+          "source_key": "camerontaylor/cq-toolkit:manual:report-1:00d0b00f85947841"
+        }
+      ],
+      "expect": {
+        "error": "KeyError"
+      },
+      "name": "entry-without-sha256-is-keyerror"
+    },
+    {
+      "existing": [
+        {
+          "event_type": "review",
+          "id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "payload": {
+            "artifacts": [
+              1
+            ]
+          },
+          "source_key": "camerontaylor/cq-toolkit:manual:report-1:00d0b00f85947841"
+        }
+      ],
+      "expect": {
+        "error": "TypeError"
+      },
+      "name": "integer-entry-is-typeerror"
+    },
+    {
+      "existing": [
+        {
+          "event_type": "review",
+          "id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "payload": {
+            "artifacts": [
+              "x"
+            ]
+          },
+          "source_key": "camerontaylor/cq-toolkit:manual:report-1:00d0b00f85947841"
+        }
+      ],
+      "expect": {
+        "error": "TypeError"
+      },
+      "name": "string-entry-is-typeerror"
+    },
+    {
+      "existing": [
+        {
+          "event_type": "review",
+          "id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "payload": {
+            "artifacts": [
+              null
+            ]
+          },
+          "source_key": "camerontaylor/cq-toolkit:manual:report-1:00d0b00f85947841"
+        }
+      ],
+      "expect": {
+        "error": "TypeError"
+      },
+      "name": "null-entry-is-typeerror"
+    },
+    {
+      "existing": [
+        {
+          "event_type": "review",
+          "id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "payload": {
+            "artifacts": [
+              []
+            ]
+          },
+          "source_key": "camerontaylor/cq-toolkit:manual:report-1:00d0b00f85947841"
+        }
+      ],
+      "expect": {
+        "error": "TypeError"
+      },
+      "name": "list-entry-is-typeerror"
+    },
+    {
+      "existing": [
+        {
+          "event_type": "review",
+          "id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "payload": {
+            "artifacts": [
+              {
+                "sha256": 1
+              }
+            ]
+          },
+          "source_key": "camerontaylor/cq-toolkit:manual:report-1:00d0b00f85947841"
+        }
+      ],
+      "expect": {
+        "action": "record:c9035cbfcd994e68ee05cbf4e5df1377a6d51fb26bc323a79c810097422590e9",
+        "events": 1
+      },
+      "name": "non-string-sha256-matches-nothing"
+    },
+    {
+      "existing": [
+        {
+          "event_type": "review",
+          "id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "payload": {
+            "artifacts": [
+              {
+                "sha256": "00d0b00f859478418ccba7dbe594b5c7cb6423d144b31af04002db9ba306cd2d"
+              },
+              1
+            ]
+          },
+          "source_key": "camerontaylor/cq-toolkit:manual:report-1:00d0b00f85947841"
+        }
+      ],
+      "expect": {
+        "action": "duplicate:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "events": 0
+      },
+      "name": "matching-entry-before-bad-entry-short-circuits"
+    },
+    {
+      "existing": [
+        {
+          "event_type": "review",
+          "id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "payload": {
+            "artifacts": [
+              1,
+              {
+                "sha256": "00d0b00f859478418ccba7dbe594b5c7cb6423d144b31af04002db9ba306cd2d"
+              }
+            ]
+          },
+          "source_key": "camerontaylor/cq-toolkit:manual:report-1:00d0b00f85947841"
+        }
+      ],
+      "expect": {
+        "error": "TypeError"
+      },
+      "name": "bad-entry-before-matching-entry-raises"
+    },
+    {
+      "existing": [
+        {
+          "event_type": "review",
+          "id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "payload": {
+            "artifacts": [
+              {
+                "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+              }
+            ]
+          },
+          "source_key": "camerontaylor/cq-toolkit:manual:report-1:00d0b00f85947841"
+        }
+      ],
+      "expect": {
+        "action": "record:c9035cbfcd994e68ee05cbf4e5df1377a6d51fb26bc323a79c810097422590e9",
+        "events": 1
+      },
+      "name": "non-matching-digest-records-new"
+    },
+    {
+      "existing": [
+        {
+          "event_type": "review",
+          "id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "payload": [],
+          "source_key": "x"
+        }
+      ],
+      "expect": {
+        "action": "record:c9035cbfcd994e68ee05cbf4e5df1377a6d51fb26bc323a79c810097422590e9",
+        "events": 1
+      },
+      "name": "other-source-key-with-bad-payload-skipped"
+    },
+    {
+      "existing": [
+        {
+          "event_type": "import-result",
+          "id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "payload": [],
+          "source_key": "camerontaylor/cq-toolkit:manual:report-1:00d0b00f85947841"
+        }
+      ],
+      "expect": {
+        "action": "record:c9035cbfcd994e68ee05cbf4e5df1377a6d51fb26bc323a79c810097422590e9",
+        "events": 1
+      },
+      "name": "non-review-with-bad-payload-skipped"
+    },
+    {
+      "existing": [
+        {
+          "event_type": "review",
+          "id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "payload": {
+            "artifacts": [
+              {
+                "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+              }
+            ]
+          },
+          "source_key": "camerontaylor/cq-toolkit:manual:report-1:00d0b00f85947841"
+        },
+        {
+          "event_type": "review",
+          "id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "payload": {
+            "artifacts": [
+              {
+                "sha256": "00d0b00f859478418ccba7dbe594b5c7cb6423d144b31af04002db9ba306cd2d"
+              }
+            ]
+          },
+          "source_key": "camerontaylor/cq-toolkit:manual:report-1:00d0b00f85947841"
+        }
+      ],
+      "expect": {
+        "action": "duplicate:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "events": 0
+      },
+      "name": "non-matching-then-duplicate"
+    },
+    {
+      "existing": [
+        {
+          "event_type": "review",
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "payload": {
+            "artifacts": [
+              {
+                "sha256": "00d0b00f859478418ccba7dbe594b5c7cb6423d144b31af04002db9ba306cd2d"
+              }
+            ]
+          },
+          "source_key": "camerontaylor/cq-toolkit:manual:report-1:00d0b00f85947841"
+        },
+        {
+          "event_type": "review",
+          "id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "payload": {
+            "artifacts": [
+              {
+                "sha256": "00d0b00f859478418ccba7dbe594b5c7cb6423d144b31af04002db9ba306cd2d"
+              }
+            ]
+          },
+          "source_key": "camerontaylor/cq-toolkit:manual:report-1:00d0b00f85947841"
+        }
+      ],
+      "expect": {
+        "action": "duplicate:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "events": 0
+      },
+      "name": "first-duplicate-wins"
+    },
+    {
+      "existing": [
+        {
+          "event_type": "review",
+          "id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "payload": {
+            "artifacts": [
+              {
+                "sha256": "00d0b00f859478418ccba7dbe594b5c7cb6423d144b31af04002db9ba306cd2d"
+              }
+            ]
+          },
+          "source_key": "camerontaylor/cq-toolkit:manual:report-1:00d0b00f85947841"
+        },
+        {
+          "event_type": "review",
+          "id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "payload": [],
+          "source_key": "camerontaylor/cq-toolkit:manual:report-1:00d0b00f85947841"
+        }
+      ],
+      "expect": {
+        "action": "duplicate:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "events": 0
+      },
+      "name": "duplicate-then-bad-record-never-reached"
+    },
+    {
+      "existing": [
+        {
+          "event_type": "review",
+          "id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "payload": [],
+          "source_key": "camerontaylor/cq-toolkit:manual:report-1:00d0b00f85947841"
+        },
+        {
+          "event_type": "review",
+          "id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "payload": {
+            "artifacts": [
+              {
+                "sha256": "00d0b00f859478418ccba7dbe594b5c7cb6423d144b31af04002db9ba306cd2d"
+              }
+            ]
+          },
+          "source_key": "camerontaylor/cq-toolkit:manual:report-1:00d0b00f85947841"
+        }
+      ],
+      "expect": {
+        "error": "TypeError"
+      },
+      "name": "bad-record-then-duplicate-raises"
+    }
+  ],
+  "schema": "crq-import-record-duplicate-vectors-v1",
+  "submitted": {
+    "at": "2026-01-02T03:04:05Z",
+    "id": "report-1",
+    "producer": "manual",
+    "report": "## Review\nLooks fine.\n",
+    "submitter": "reviewer-login"
+  }
+}
