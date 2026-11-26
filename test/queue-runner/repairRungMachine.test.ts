@@ -268,7 +268,7 @@ async function replay(scenario: Scenario, nowStamp: string): Promise<Run> {
   } catch (e) {
     if (!(e instanceof PyError)) throw e;
     outcome = { raises: e.kind };
-    if (MESSAGE_KINDS.has(e.kind)) outcome.message = e.message;
+    outcome.message = e.message;
     outcome.is_value_error = isPyError(e, 'ValueError');
   }
   return { trace, writes, outcome };
@@ -324,5 +324,26 @@ describe('repair rung machine vs the production process()', () => {
     expect(run.trace).toEqual(snapshot(entry!.expected.trace));
     expect(run.writes).toEqual(entry!.expected.writes);
     expect(run.outcome.returned).toEqual(snapshot(entry!.expected.returned));
+  });
+
+  // `rungOf` refuses what the port cannot model: Python compares a float or bool
+  // `next_rung` as a number, but the loop counter here is an integer.
+  it.each([
+    ['float', JsonNumber.float(1.5)],
+    ['integral float', JsonNumber.float(1)],
+    ['bool', true],
+  ])('a %s next_rung is refused as unsupported', async (_label, value) => {
+    const entry = cases.find(
+      (candidate) => candidate.name === 'pending_mechanical at A1 resumes in the recorded A1 tree',
+    );
+    expect(entry).toBeDefined();
+    const progress = clone(entry!.scenario.files.progress) as Dict;
+    progress.next_rung = value;
+    const run = await replay(
+      { ...entry!.scenario, files: { ...entry!.scenario.files, progress } },
+      NOW,
+    );
+    expect(run.outcome.raises).toBe('TypeError');
+    expect(run.outcome.message).toBe('port: a float or bool next_rung is not supported');
   });
 });

@@ -39,7 +39,8 @@
  * ASCII digits only; `str()` of a container rung inside the `pending_mechanical`
  * comparison never equals a rung string.
  */
-import { JsonNumber } from '../policy/crq/jsonValue.js';
+import { JsonNumber, type JsonValue } from '../policy/crq/jsonValue.js';
+import { pythonRepr } from '../policy/crq/prReviewFindings.js';
 import { pyTruthy } from '../policy/crq/queueDoc.js';
 import { formatUtcMicros } from '../policy/crq/utc.js';
 import { pyStrip, splitlines } from '../ops/crq/deploy/gitGuards.js';
@@ -93,7 +94,13 @@ export interface RepairRungEffects {
     cwd: string,
     ref: string,
   ): Promise<{ readonly returncode: number; readonly stdout: string }>;
-  /** `dispatch(config, role, current, wt, directory[, judge=True])`. */
+  /**
+   * `dispatch(config, role, current, wt, directory[, judge=True])`.
+   *
+   * The returned report must carry numbers as `JsonNumber`: a plain JS number cannot say
+   * `1.0` from `1`, so a native number is read as an int when integral (a citation `line`
+   * of `1.0` would then be accepted, where Python refuses it) and as a float otherwise.
+   */
   dispatch(
     role: unknown,
     current: Dict,
@@ -101,7 +108,7 @@ export interface RepairRungEffects {
     directory: string,
     judge: boolean,
   ): Promise<unknown>;
-  /** `mechanical(config, wt, base, commits, job_id, directory)`. */
+  /** `mechanical(config, wt, base, commits, job_id, directory)`; numbers as for `dispatch`. */
   mechanical(
     worktree: string,
     base: unknown,
@@ -169,13 +176,26 @@ function clipPoints(text: string, limit: number): string {
 /** `'A' + str(rung)` for the rung kinds the machine accepts. */
 const rungName = (rung: bigint): string => `A${rung.toString()}`;
 
-/** `str(value)` for the scalar rung kinds; a container never equals a rung name. */
-function pyStrOfRung(value: unknown): string {
-  if (typeof value === 'string') return value;
-  if (value === null || value === undefined) return 'None';
-  if (typeof value === 'boolean') return value ? 'True' : 'False';
-  if (value instanceof JsonNumber) return value.raw;
-  return `\u0000${pyTypeName(value)}`;
+/**
+ * `str(value)` over parsed JSON: containers render as Python reprs (`['x']`), floats keep
+ * their Python spelling. Native integers are ints, so they render as such.
+ */
+function pyStrOfValue(value: unknown): string {
+  return typeof value === 'string' ? value : pyReprOfValue(value);
+}
+
+/** `repr(value)` over parsed JSON with plain objects as dicts. */
+function pyReprOfValue(value: unknown): string {
+  if (value === undefined) return 'None';
+  if (typeof value === 'number' && Number.isInteger(value)) return String(value);
+  if (typeof value === 'bigint') return value.toString();
+  if (Array.isArray(value)) return `[${value.map(pyReprOfValue).join(', ')}]`;
+  if (isDict(value)) {
+    return `{${Object.entries(value)
+      .map(([key, entry]) => `${pyReprOfValue(key)}: ${pyReprOfValue(entry)}`)
+      .join(', ')}}`;
+  }
+  return pythonRepr(value as JsonValue);
 }
 
 /** `int(text)` for a `str`: surrounding whitespace, a sign and underscores between digits. */
@@ -425,7 +445,7 @@ export async function runRepairProcess(
         const last: unknown = Array.isArray(attempts) ? attempts[attempts.length - 1] : undefined;
         if (
           !pyTruthy(attempts) ||
-          pyGet(last, 'rung') !== `A${pyStrOfRung(pySubscript(pendingMechanical, 'rung'))}`
+          pyGet(last, 'rung') !== `A${pyStrOfValue(pySubscript(pendingMechanical, 'rung'))}`
         ) {
           // FIXED must never be reachable without a verification attempt.
           throw new PyError(
@@ -535,9 +555,9 @@ export async function runRepairProcess(
         if (stop !== 'ok') {
           throw new PyError(
             'ValueError',
-            `driver stop ${pyStrOfRung(stop)}: ${clipPoints(
+            `driver stop ${pyStrOfValue(stop)}: ${clipPoints(
               pyTruthy(pyGet(report, 'summary'))
-                ? pyStrOfRung(pyGet(report, 'summary'))
+                ? pyStrOfValue(pyGet(report, 'summary'))
                 : 'no detail',
               600,
             )}`,

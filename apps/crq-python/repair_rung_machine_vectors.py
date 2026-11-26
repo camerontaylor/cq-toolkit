@@ -217,6 +217,21 @@ def build_scenarios() -> None:
     scenario("truncated zero is falsy", dispatch=[ok(truncated=0)], mechanical=[{"verdict": "pass"}])
     scenario("driver summary longer than 600 code points is clipped by code point",
              dispatch=[{"stop": "error", "summary": "\U0001F600" * 700}, ok()], mechanical=[{"verdict": "pass"}])
+    scenario("container stop renders as a Python list in the reason",
+             dispatch=[{"stop": ["x"], "summary": "q"}, ok()], mechanical=[{"verdict": "pass"}])
+    scenario("numeric summary renders as a Python int",
+             dispatch=[{"stop": "timeout", "summary": 5}, ok()], mechanical=[{"verdict": "pass"}])
+    scenario("float summary renders as a Python float",
+             dispatch=[{"stop": "timeout", "summary": 1.5}, ok()], mechanical=[{"verdict": "pass"}])
+    scenario("mapping summary renders as a Python dict repr",
+             dispatch=[{"stop": "error", "summary": {"k": ["v", 1, None, True, 2.0]}}, ok()],
+             mechanical=[{"verdict": "pass"}])
+    scenario("float stop renders as a Python float",
+             dispatch=[{"stop": 2.5, "summary": "q"}, ok()], mechanical=[{"verdict": "pass"}])
+    scenario("pending_mechanical container rung matches the same container in the last attempt",
+             progress=prior(next_rung=0, attempts=[attempt("A['x']", "ok")],
+                            pending_mechanical={"rung": ["x"], "commits": [], "fixer_reason": "r"}),
+             mechanical=[{"verdict": "pass"}], trees=["/T/wt"])
     scenario("mechanical failure message longer than 1000 code points is clipped",
              dispatch=[ok(), ok()],
              mechanical=[raising("ValueError", "é" * 1100), {"verdict": "pass"}])
