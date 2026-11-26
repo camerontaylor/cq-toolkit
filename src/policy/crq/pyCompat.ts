@@ -116,7 +116,7 @@ export function pySplitlines(text: string): string[] {
 }
 
 /** `repr(str)`. */
-export function pyReprString(text: string): string {
+function pyReprString(text: string): string {
   const quote = text.includes("'") && !text.includes('"') ? '"' : "'";
   let out = quote;
   for (const char of text) {
@@ -143,13 +143,23 @@ export function pyIntFromString(text: string): number {
   return Number(stripped.replaceAll('_', ''));
 }
 
-/** `str(value)` for the scalar shapes an id or PR number takes. */
-export function pyStr(value: unknown): string {
-  if (typeof value === 'string') return value;
+/** `repr(value)` over JSON values (a whole number is an int; see the module note). */
+function pyRepr(value: unknown): string {
+  if (typeof value === 'string') return pyReprString(value);
+  if (Array.isArray(value)) return `[${(value as unknown[]).map(pyRepr).join(', ')}]`;
+  if (isDict(value)) {
+    return `{${Object.entries(value)
+      .map(([key, entry]) => `${pyReprString(key)}: ${pyRepr(entry)}`)
+      .join(', ')}}`;
+  }
   if (value === null || value === undefined) return 'None';
   if (typeof value === 'boolean') return value ? 'True' : 'False';
-  if (typeof value === 'number' || typeof value === 'bigint') return String(value);
-  throw new PyError('TypeError', `cannot render ${pyTypeName(value)} as str`);
+  return String(value);
+}
+
+/** `str(value)`: a str is itself; every other JSON value renders as its repr. */
+export function pyStr(value: unknown): string {
+  return typeof value === 'string' ? value : pyRepr(value);
 }
 
 const isNumeric = (v: unknown): v is number | boolean | bigint =>

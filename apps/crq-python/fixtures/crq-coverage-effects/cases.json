@@ -6753,6 +6753,701 @@
    }
   },
   {
+   "name": "retry: a second release proving other runs at an earlier instant is out of order",
+   "result": {
+    "ok": {
+     "allowed": false,
+     "deadline": "2026-11-19T02:00:00Z",
+     "failures": 1,
+     "reasons": [
+      "invalid release chronology",
+      "released counter floor missing or reduced",
+      "failure predates or coincides with release but lacks release proof",
+      "unreconciled family aggregate"
+     ],
+     "run_proofs": {
+      "r2": [
+       "coverage-x",
+       "error",
+       "2026-11-19T01:00:00Z"
+      ]
+     },
+     "runs": [
+      "r2"
+     ]
+    }
+   },
+   "spec": {
+    "at": "2026-11-20T12:00:00Z",
+    "fn": "retry",
+    "path": "src/a.py",
+    "pr": 1,
+    "queue": {
+     "items": [
+      {
+       "id": "pr-1",
+       "kind": "merged",
+       "measure": {
+        "files": [
+         {
+          "added": 10,
+          "now": "src/a.py",
+          "path": "src/a.py",
+          "surviving": 5,
+          "synthetic_added": 12
+         }
+        ],
+        "merge_queue": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "synthetic_paths": []
+       },
+       "merge_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+       "pr": 1,
+       "state": "done"
+      },
+      {
+       "attempts": [
+        {
+         "at": "2026-11-19T00:00:00Z",
+         "base": "1111111111111111111111111111111111111111",
+         "counted": false,
+         "head": "2222222222222222222222222222222222222222",
+         "outcome": "error",
+         "run_id": "r1"
+        },
+        {
+         "at": "2026-11-19T01:00:00Z",
+         "base": "1111111111111111111111111111111111111111",
+         "counted": false,
+         "head": "2222222222222222222222222222222222222222",
+         "outcome": "error",
+         "run_id": "r2"
+        }
+       ],
+       "coverage_paths": [
+        "src/a.py"
+       ],
+       "coverage_source": "pr-1",
+       "cycles": [],
+       "failures": 2,
+       "id": "coverage-x",
+       "kind": "coverage",
+       "notes": [],
+       "pr": 1,
+       "state": "blocked",
+       "tier": 4
+      }
+     ],
+     "legacy_coverage_releases": [
+      {
+       "at": "2026-11-19T06:00:00Z",
+       "family": "legacy-coverage:1:src/a.py",
+       "floors": [
+        1,
+        0
+       ],
+       "runs": {
+        "r1": [
+         "coverage-x",
+         "error",
+         "2026-11-19T00:00:00Z"
+        ]
+       }
+      },
+      {
+       "at": "2026-11-19T05:00:00Z",
+       "family": "legacy-coverage:1:src/a.py",
+       "floors": [
+        2,
+        0
+       ],
+       "runs": {
+        "r2": [
+         "coverage-x",
+         "error",
+         "2026-11-19T01:00:00Z"
+        ]
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "retry: a second release proving other runs at an equal instant is out of order",
+   "result": {
+    "ok": {
+     "allowed": false,
+     "deadline": "2026-11-19T02:00:00Z",
+     "failures": 1,
+     "reasons": [
+      "invalid release chronology",
+      "released counter floor missing or reduced",
+      "failure predates or coincides with release but lacks release proof",
+      "unreconciled family aggregate"
+     ],
+     "run_proofs": {
+      "r2": [
+       "coverage-x",
+       "error",
+       "2026-11-19T01:00:00Z"
+      ]
+     },
+     "runs": [
+      "r2"
+     ]
+    }
+   },
+   "spec": {
+    "at": "2026-11-20T12:00:00Z",
+    "fn": "retry",
+    "path": "src/a.py",
+    "pr": 1,
+    "queue": {
+     "items": [
+      {
+       "id": "pr-1",
+       "kind": "merged",
+       "measure": {
+        "files": [
+         {
+          "added": 10,
+          "now": "src/a.py",
+          "path": "src/a.py",
+          "surviving": 5,
+          "synthetic_added": 12
+         }
+        ],
+        "merge_queue": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "synthetic_paths": []
+       },
+       "merge_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+       "pr": 1,
+       "state": "done"
+      },
+      {
+       "attempts": [
+        {
+         "at": "2026-11-19T00:00:00Z",
+         "base": "1111111111111111111111111111111111111111",
+         "counted": false,
+         "head": "2222222222222222222222222222222222222222",
+         "outcome": "error",
+         "run_id": "r1"
+        },
+        {
+         "at": "2026-11-19T01:00:00Z",
+         "base": "1111111111111111111111111111111111111111",
+         "counted": false,
+         "head": "2222222222222222222222222222222222222222",
+         "outcome": "error",
+         "run_id": "r2"
+        }
+       ],
+       "coverage_paths": [
+        "src/a.py"
+       ],
+       "coverage_source": "pr-1",
+       "cycles": [],
+       "failures": 2,
+       "id": "coverage-x",
+       "kind": "coverage",
+       "notes": [],
+       "pr": 1,
+       "state": "blocked",
+       "tier": 4
+      }
+     ],
+     "legacy_coverage_releases": [
+      {
+       "at": "2026-11-19T06:00:00Z",
+       "family": "legacy-coverage:1:src/a.py",
+       "floors": [
+        1,
+        0
+       ],
+       "runs": {
+        "r1": [
+         "coverage-x",
+         "error",
+         "2026-11-19T00:00:00Z"
+        ]
+       }
+      },
+      {
+       "at": "2026-11-19T06:00:00Z",
+       "family": "legacy-coverage:1:src/a.py",
+       "floors": [
+        2,
+        0
+       ],
+       "runs": {
+        "r2": [
+         "coverage-x",
+         "error",
+         "2026-11-19T01:00:00Z"
+        ]
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "retry: a later second release proving other runs is accepted",
+   "result": {
+    "ok": {
+     "allowed": false,
+     "deadline": null,
+     "failures": 0,
+     "reasons": [
+      "released counter floor missing or reduced",
+      "unreconciled family aggregate"
+     ],
+     "run_proofs": {},
+     "runs": []
+    }
+   },
+   "spec": {
+    "at": "2026-11-20T12:00:00Z",
+    "fn": "retry",
+    "path": "src/a.py",
+    "pr": 1,
+    "queue": {
+     "items": [
+      {
+       "id": "pr-1",
+       "kind": "merged",
+       "measure": {
+        "files": [
+         {
+          "added": 10,
+          "now": "src/a.py",
+          "path": "src/a.py",
+          "surviving": 5,
+          "synthetic_added": 12
+         }
+        ],
+        "merge_queue": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "synthetic_paths": []
+       },
+       "merge_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+       "pr": 1,
+       "state": "done"
+      },
+      {
+       "attempts": [
+        {
+         "at": "2026-11-19T00:00:00Z",
+         "base": "1111111111111111111111111111111111111111",
+         "counted": false,
+         "head": "2222222222222222222222222222222222222222",
+         "outcome": "error",
+         "run_id": "r1"
+        },
+        {
+         "at": "2026-11-19T01:00:00Z",
+         "base": "1111111111111111111111111111111111111111",
+         "counted": false,
+         "head": "2222222222222222222222222222222222222222",
+         "outcome": "error",
+         "run_id": "r2"
+        }
+       ],
+       "coverage_paths": [
+        "src/a.py"
+       ],
+       "coverage_source": "pr-1",
+       "cycles": [],
+       "failures": 2,
+       "id": "coverage-x",
+       "kind": "coverage",
+       "notes": [],
+       "pr": 1,
+       "state": "blocked",
+       "tier": 4
+      }
+     ],
+     "legacy_coverage_releases": [
+      {
+       "at": "2026-11-19T06:00:00Z",
+       "family": "legacy-coverage:1:src/a.py",
+       "floors": [
+        1,
+        0
+       ],
+       "runs": {
+        "r1": [
+         "coverage-x",
+         "error",
+         "2026-11-19T00:00:00Z"
+        ]
+       }
+      },
+      {
+       "at": "2026-11-19T07:00:00Z",
+       "family": "legacy-coverage:1:src/a.py",
+       "floors": [
+        2,
+        0
+       ],
+       "runs": {
+        "r2": [
+         "coverage-x",
+         "error",
+         "2026-11-19T01:00:00Z"
+        ]
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "retry: explicit null family history raises",
+   "result": {
+    "message": "'NoneType' object has no attribute 'get'",
+    "raises": "AttributeError"
+   },
+   "spec": {
+    "at": "2026-11-20T12:00:00Z",
+    "fn": "retry",
+    "path": "src/a.py",
+    "pr": 1,
+    "queue": {
+     "backfill_families": {
+      "legacy-coverage:1:src/a.py": null
+     },
+     "items": [
+      {
+       "id": "pr-1",
+       "kind": "merged",
+       "measure": {
+        "files": [
+         {
+          "added": 10,
+          "now": "src/a.py",
+          "path": "src/a.py",
+          "surviving": 5,
+          "synthetic_added": 12
+         }
+        ],
+        "merge_queue": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "synthetic_paths": []
+       },
+       "merge_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+       "pr": 1,
+       "state": "done"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "retry: explicit null scope history raises",
+   "result": {
+    "message": "'NoneType' object has no attribute 'get'",
+    "raises": "AttributeError"
+   },
+   "spec": {
+    "at": "2026-11-20T12:00:00Z",
+    "fn": "retry",
+    "path": "src/a.py",
+    "pr": 1,
+    "queue": {
+     "backfill_scope_failures": {
+      "legacy-coverage:1:src/a.py": null
+     },
+     "items": [
+      {
+       "id": "pr-1",
+       "kind": "merged",
+       "measure": {
+        "files": [
+         {
+          "added": 10,
+          "now": "src/a.py",
+          "path": "src/a.py",
+          "surviving": 5,
+          "synthetic_added": 12
+         }
+        ],
+        "merge_queue": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "synthetic_paths": []
+       },
+       "merge_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+       "pr": 1,
+       "state": "done"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "retry: absent family history is empty",
+   "result": {
+    "ok": {
+     "allowed": true,
+     "deadline": null,
+     "failures": 0,
+     "reasons": [],
+     "run_proofs": {},
+     "runs": []
+    }
+   },
+   "spec": {
+    "at": "2026-11-20T12:00:00Z",
+    "fn": "retry",
+    "path": "src/a.py",
+    "pr": 1,
+    "queue": {
+     "backfill_families": {
+      "other": {
+       "failures": 1
+      }
+     },
+     "items": [
+      {
+       "id": "pr-1",
+       "kind": "merged",
+       "measure": {
+        "files": [
+         {
+          "added": 10,
+          "now": "src/a.py",
+          "path": "src/a.py",
+          "surviving": 5,
+          "synthetic_added": 12
+         }
+        ],
+        "merge_queue": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "synthetic_paths": []
+       },
+       "merge_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+       "pr": 1,
+       "state": "done"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "retry: a list pr renders as its repr in the family",
+   "result": {
+    "ok": {
+     "allowed": false,
+     "deadline": null,
+     "failures": 0,
+     "reasons": [
+      "unreconciled family aggregate",
+      "persisted quarantine"
+     ],
+     "run_proofs": {},
+     "runs": []
+    }
+   },
+   "spec": {
+    "at": "2026-11-20T12:00:00Z",
+    "fn": "retry",
+    "path": "src/a.py",
+    "pr": [
+     1
+    ],
+    "queue": {
+     "backfill_families": {
+      "legacy-coverage:[1]:src/a.py": {
+       "failures": 1,
+       "quarantined": true
+      }
+     },
+     "items": [
+      {
+       "id": "pr-1",
+       "kind": "merged",
+       "measure": {
+        "files": [
+         {
+          "added": 10,
+          "now": "src/a.py",
+          "path": "src/a.py",
+          "surviving": 5,
+          "synthetic_added": 12
+         }
+        ],
+        "merge_queue": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "synthetic_paths": []
+       },
+       "merge_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+       "pr": 1,
+       "state": "done"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "retry: a dict pr renders as its repr in the family",
+   "result": {
+    "ok": {
+     "allowed": false,
+     "deadline": null,
+     "failures": 0,
+     "reasons": [
+      "unreconciled family aggregate",
+      "persisted quarantine"
+     ],
+     "run_proofs": {},
+     "runs": []
+    }
+   },
+   "spec": {
+    "at": "2026-11-20T12:00:00Z",
+    "fn": "retry",
+    "path": "src/a.py",
+    "pr": {
+     "a": [
+      1,
+      null,
+      true,
+      "x'y"
+     ]
+    },
+    "queue": {
+     "backfill_families": {
+      "legacy-coverage:{'a': [1, None, True, \"x'y\"]}:src/a.py": {
+       "failures": 1,
+       "quarantined": true
+      }
+     },
+     "items": [
+      {
+       "id": "pr-1",
+       "kind": "merged",
+       "measure": {
+        "files": [
+         {
+          "added": 10,
+          "now": "src/a.py",
+          "path": "src/a.py",
+          "surviving": 5,
+          "synthetic_added": 12
+         }
+        ],
+        "merge_queue": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "synthetic_paths": []
+       },
+       "merge_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+       "pr": 1,
+       "state": "done"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "retry: a string pr is used as is",
+   "result": {
+    "ok": {
+     "allowed": false,
+     "deadline": null,
+     "failures": 0,
+     "reasons": [
+      "unreconciled family aggregate",
+      "persisted quarantine"
+     ],
+     "run_proofs": {},
+     "runs": []
+    }
+   },
+   "spec": {
+    "at": "2026-11-20T12:00:00Z",
+    "fn": "retry",
+    "path": "src/a.py",
+    "pr": "x'y",
+    "queue": {
+     "backfill_families": {
+      "legacy-coverage:x'y:src/a.py": {
+       "failures": 1,
+       "quarantined": true
+      }
+     },
+     "items": [
+      {
+       "id": "pr-1",
+       "kind": "merged",
+       "measure": {
+        "files": [
+         {
+          "added": 10,
+          "now": "src/a.py",
+          "path": "src/a.py",
+          "surviving": 5,
+          "synthetic_added": 12
+         }
+        ],
+        "merge_queue": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "synthetic_paths": []
+       },
+       "merge_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+       "pr": 1,
+       "state": "done"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "retry: a none pr renders as None",
+   "result": {
+    "ok": {
+     "allowed": false,
+     "deadline": null,
+     "failures": 0,
+     "reasons": [
+      "unreconciled family aggregate",
+      "persisted quarantine"
+     ],
+     "run_proofs": {},
+     "runs": []
+    }
+   },
+   "spec": {
+    "at": "2026-11-20T12:00:00Z",
+    "fn": "retry",
+    "path": "src/a.py",
+    "pr": null,
+    "queue": {
+     "backfill_families": {
+      "legacy-coverage:None:src/a.py": {
+       "failures": 1,
+       "quarantined": true
+      }
+     },
+     "items": [
+      {
+       "id": "pr-1",
+       "kind": "merged",
+       "measure": {
+        "files": [
+         {
+          "added": 10,
+          "now": "src/a.py",
+          "path": "src/a.py",
+          "surviving": 5,
+          "synthetic_added": 12
+         }
+        ],
+        "merge_queue": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "synthetic_paths": []
+       },
+       "merge_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+       "pr": 1,
+       "state": "done"
+      }
+     ]
+    }
+   }
+  },
+  {
    "name": "retry: releases of another family are ignored",
    "result": {
     "ok": {

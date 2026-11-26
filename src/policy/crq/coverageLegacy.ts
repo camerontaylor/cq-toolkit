@@ -210,8 +210,8 @@ export function legacyRetryView(
 ): LegacyRetryView {
   const family = legacyFamily(pr, originalPath);
   const histories = [
-    pyGet(pyGetOr(queue, 'backfill_families', {}), family) ?? {},
-    pyGet(pyGetOr(queue, 'backfill_scope_failures', {}), family) ?? {},
+    pyGetOr(pyGetOr(queue, 'backfill_families', {}), family, {}),
+    pyGetOr(pyGetOr(queue, 'backfill_scope_failures', {}), family, {}),
   ];
   const reasons: string[] = [];
   let runs = new RunMap();

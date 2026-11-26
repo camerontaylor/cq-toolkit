@@ -433,6 +433,32 @@ def retry_cases() -> list:
                           state="blocked", failures=2),
                  legacy_coverage_releases=[{"family": FAMILY, "at": "2026-11-19T06:00:00Z", "runs": release_runs,
                                             "floors": [1, 0]}]))
+    two = cov_item(attempts=[attempt("r1", "error", "2026-11-19T00:00:00Z"),
+                             attempt("r2", "error", "2026-11-19T01:00:00Z")],
+                   state="blocked", failures=2)
+    proof2 = {"r2": ["coverage-x", "error", "2026-11-19T01:00:00Z"]}
+    for label, second_at in (("earlier", "2026-11-19T05:00:00Z"), ("equal", "2026-11-19T06:00:00Z")):
+        add("a second release proving other runs at an " + label + " instant is out of order",
+            queue_of(src, two,
+                     legacy_coverage_releases=[
+                         {"family": FAMILY, "at": "2026-11-19T06:00:00Z", "runs": release_runs, "floors": [1, 0]},
+                         {"family": FAMILY, "at": second_at, "runs": proof2, "floors": [2, 0]}]))
+    add("a later second release proving other runs is accepted",
+        queue_of(src, two,
+                 legacy_coverage_releases=[
+                     {"family": FAMILY, "at": "2026-11-19T06:00:00Z", "runs": release_runs, "floors": [1, 0]},
+                     {"family": FAMILY, "at": "2026-11-19T07:00:00Z", "runs": proof2, "floors": [2, 0]}]))
+    add("explicit null family history raises", queue_of(src, backfill_families={FAMILY: None}))
+    add("explicit null scope history raises", queue_of(src, backfill_scope_failures={FAMILY: None}))
+    add("absent family history is empty", queue_of(src, backfill_families={"other": hist(1)}))
+    for label, pr_value, rendered in (
+            ("a list pr renders as its repr in the family", [1], "[1]"),
+            ("a dict pr renders as its repr in the family", {"a": [1, None, True, "x'y"]},
+             "{'a': [1, None, True, \"x'y\"]}"),
+            ("a string pr is used as is", "x'y", "x'y"),
+            ("a none pr renders as None", None, "None")):
+        add(label, queue_of(src, backfill_families={"legacy-coverage:" + rendered + ":src/a.py":
+                                                    hist(1, quarantined=True)}), pr=pr_value)
     add("releases of another family are ignored",
         queue_of(src, failing,
                  legacy_coverage_releases=[{"family": "legacy-coverage:1:other.py", "at": AT, "runs": {},

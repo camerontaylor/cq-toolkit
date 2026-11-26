@@ -4,6 +4,7 @@ import {
   type InjectedCoverageSeams,
 } from '../../../src/adapters/crq/coverageEffects.js';
 import { CoverageIdentityError, type Queue } from '../../../src/queue-runner/coverageUsage.js';
+import { PyError } from '../../../src/policy/crq/pyCompat.js';
 import type { MeasureGit } from '../../../src/queue-runner/measureMerged.js';
 
 const unbound = (name: string) => () => {
@@ -63,10 +64,94 @@ describe('makeCoverageEffects', () => {
     );
   });
 
-  it('maps a Python ValueError/KeyError/TypeError from legacyOrigins onto CoverageIdentityError', () => {
+  describe('identity mapping of the exceptions Python catches', () => {
     const { effects } = build();
     const queue = { items: [] } as unknown as Queue;
-    expect(() => effects.legacyOrigins(queue, {} as never)).toThrow(CoverageIdentityError);
+    const now = Date.parse('2026-11-20T12:00:00Z');
+
+    it('maps ValueError', () => {
+      // `_path("")` raises ValueError.
+      expect(() => effects.legacyRetryAllowed(queue, 1, '', now)).toThrow(CoverageIdentityError);
+    });
+
+    it('maps KeyError', () => {
+      // `release["deadlines"]` on a quota release row without it.
+      const keyed = {
+        items: [],
+        legacy_coverage_quota_releases: [{ family: 'legacy-coverage:1:src/a.py' }],
+      } as unknown as Queue;
+      expect(() => effects.legacyRetryAllowed(keyed, 1, 'src/a.py', now)).toThrow(
+        CoverageIdentityError,
+      );
+    });
+
+    it('maps TypeError', () => {
+      // an unhashable `coverage_paths` member.
+      expect(() => effects.legacyOrigins(queue, { coverage_paths: [[1]] } as never)).toThrow(
+        CoverageIdentityError,
+      );
+    });
+
+    it('lets every other class propagate', () => {
+      // an explicit null history makes `.get` an AttributeError, which stops the tick.
+      const nulled = { items: [], backfill_families: { 'legacy-coverage:1:src/a.py': null } };
+      let caught: unknown;
+      try {
+        effects.legacyRetryAllowed(nulled as unknown as Queue, 1, 'src/a.py', now);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(PyError);
+      expect((caught as PyError).pythonError).toBe('AttributeError');
+    });
+  });
+
+  describe('[coverage] config pass-through', () => {
+    const NOW = '2026-11-20T12:00:00Z';
+    const queue = {
+      items: [
+        {
+          id: 'pr-1',
+          kind: 'merged',
+          pr: 1,
+          state: 'done',
+          merge_commit: 'b'.repeat(40),
+          measure: {
+            merge_queue: 'a'.repeat(40),
+            synthetic_paths: [],
+            files: [
+              { path: 'src/a.py', now: 'src/a.py', added: 10, surviving: 5, synthetic_added: 12 },
+            ],
+          },
+        },
+      ],
+      coverage: {
+        schema_version: 1,
+        runs: {},
+        observations: {},
+        paths: { 'src/a.py': { last_reviewed_at: NOW, review_count: 1 } },
+      },
+    } as unknown as Queue;
+
+    it('defaults to a 24 hour minimum age', () => {
+      expect(build().effects.coverageCandidate(queue, 'a'.repeat(40))).toBeNull();
+    });
+
+    it('passes min_age_hours through', () => {
+      const found = build({ min_age_hours: 0 }).effects.coverageCandidate(queue, 'a'.repeat(40));
+      expect(found).toMatchObject({ coverage_paths: ['src/a.py'] });
+    });
+
+    it('passes max_paths through', () => {
+      expect(() =>
+        build({ max_paths: 0 }).effects.coverageCandidate(queue, 'a'.repeat(40)),
+      ).toThrow('invalid coverage bounds');
+    });
+
+    it('passes excluded_paths through', () => {
+      const config = { min_age_hours: 0, excluded_paths: ['src/a.py'] };
+      expect(build(config).effects.coverageCandidate(queue, 'a'.repeat(40))).toBeNull();
+    });
   });
 
   it('rejects an unknown [coverage] key like Python **kwargs, as a TypeError', () => {
