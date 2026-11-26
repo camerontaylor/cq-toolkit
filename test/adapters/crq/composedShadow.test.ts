@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import {
   appendFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -204,6 +205,36 @@ describe('composed tick shadow: Python crq.tick vs the TS composed tick', () => 
       mkdirSync(join(root, 'runs'));
       mkdirSync(join(root, 'receipts'));
     }, 'receipts, runs'));
+
+  it('two runs over one scratch: run 2 starts both copies without run 1 leftovers', async () => {
+    const scratch = tmp();
+    const strays = (root: string): string[] =>
+      ['receipts', 'runs', 'ledger', 'reconcile'].filter((n) => existsSync(join(root, n)));
+    const seen: Record<string, string[]> = {};
+    const run = async (leave: boolean) => {
+      const s = spec();
+      const py = python(s);
+      return runComposedShadow({
+        liveRoot: live(SEEDS[0]![1]),
+        scratch,
+        pinnedAt: NOW,
+        sample: 'two-runs',
+        python: async (root) => {
+          seen.a = strays(root);
+          return py(root);
+        },
+        ts: async (root) => {
+          seen.b = strays(root);
+          const out = await runComposedTs(REPO, root, s);
+          if (leave) for (const n of ['receipts', 'runs']) mkdirSync(join(root, n));
+          return out;
+        },
+      });
+    };
+    expect((await run(true)).report.class).toBe('identical');
+    expect((await run(false)).report.class).toBe('identical');
+    expect(seen).toEqual({ a: [], b: [] });
+  });
 
   it('accepts the outputs the tick overwrites without reading', async () => {
     const liveRoot = live(SEEDS[0]![1]);

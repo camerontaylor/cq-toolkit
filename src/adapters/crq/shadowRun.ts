@@ -14,6 +14,7 @@ import {
   lstatSync,
   mkdirSync,
   readdirSync,
+  rmSync,
   readFileSync,
   realpathSync,
   unlinkSync,
@@ -409,15 +410,29 @@ export async function runComposedShadow(
   options: ComposedShadowOptions,
 ): Promise<ComposedShadowReport> {
   const allowed = new Set<string>([...SHADOW_FILES, ...COMPOSED_HARMLESS_ENTRIES]);
-  const unfrozen = readdirSync(options.liveRoot)
-    .filter((name) => !allowed.has(name))
-    .sort();
+  const strays = (dir: string): string[] =>
+    existsSync(dir)
+      ? readdirSync(dir)
+          .filter((name) => !allowed.has(name))
+          .sort()
+      : [];
+  const unfrozen = strays(options.liveRoot);
   if (unfrozen.length > 0) {
     throw new Error(
       `composed shadow refuses a live root holding inputs it does not freeze: ${unfrozen.join(', ')}`,
     );
   }
+  // A reused scratch is cleared of everything outside the same set, before either runner starts:
+  // a copy keeping `receipts/`, `runs/` or `ledger/` from an earlier run (Python's tick creates
+  // some itself) would feed one side an input the other lacks. `rmSync` never follows a link.
+  for (const side of ['a', 'b'])
+    for (const name of strays(join(options.scratch, side)))
+      rmSync(join(options.scratch, side, name), { recursive: true, force: true });
   const frozen = freezeStateRoot(options.liveRoot, options.scratch);
+  // The overwritten outputs of an earlier run are cleared on both sides, so each run starts equal.
+  for (const dir of [frozen.a, frozen.b])
+    for (const name of COMPOSED_HARMLESS_ENTRIES)
+      rmSync(join(dir, name), { recursive: true, force: true });
   const python = await options.python(frozen.a);
   const ts = await options.ts(frozen.b);
   const diff = compareComposedArtefacts(
