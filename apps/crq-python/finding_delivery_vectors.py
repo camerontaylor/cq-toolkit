@@ -622,8 +622,13 @@ def retry_cases() -> List[Dict[str, Any]]:
     # listed, one that starts after the cut is not.
     capped = (b"diff --git a/early b/early\n" + b"z" * 200100 + b"\ndiff --git a/late b/late\n")
     add(_retry_case("retry-patch-header-after-200000-cap-not-listed", files=_retained(JOB, {"committed.patch": capped})))
-    add(_retry_case("retry-patch-header-in-last-cap-byte-listed", files=_retained(JOB, {
-        "committed.patch": b"y" * (200000 - 28) + b"\ndiff --git a/x b/x\n" + b"z" * 100})))
+    # The trailing space of `diff --git ` is byte 199999, the last one inside the
+    # cap. It matches with an empty path after the early header's path; one byte
+    # less and the line no longer starts with `diff --git `, so nothing is added.
+    early = b"diff --git a/e b/e\n"
+    edge = early + b"y" * (200000 - len(early) - 1 - 11) + b"\ndiff --git " + b"x b/x\n"
+    assert edge.index(b"\ndiff --git ") + 1 + 11 == 200000
+    add(_retry_case("retry-patch-header-in-last-cap-byte-listed", files=_retained(JOB, {"committed.patch": edge})))
     add(_retry_case("retry-patch-nul-bytes-in-path-removed", files=_retained(JOB, {
         "committed.patch": b"diff --git a/x\x00y b/x\x00y\n"})))
     add(_retry_case("retry-patch-spans-three-files", files=_retained(JOB, {

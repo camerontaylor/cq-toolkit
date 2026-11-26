@@ -16980,22 +16980,22 @@
        [
         "transport",
         "5c52e1b3919ff7530301e733209d03c08ab5ed2f11e00523e1812130518d1140",
-        "{\"canonical_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"body\":\"Body\",\"id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"intervals\":[[1,2]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"Title\"},\"finding_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"intervals\":[[1,2]],\"path\":\"src/a.ts\",\"prior_repair_task\":\"crq-backfill-7777777777777777777777777777777777777777777777777777777777777777\",\"retry_instructions\":\"Prior attempt reason: needs work\\nRetained diff summary: retained diff bytes committed/staged/unstaged: 200092/0/0; 1 untracked paths; changed paths: a/x b/x\",\"review_id\":\"9999999999999999999999999999999999999999999999999999999999999999\",\"target\":\"1111111111111111111111111111111111111111\"}"
+        "{\"canonical_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"body\":\"Body\",\"id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"intervals\":[[1,2]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"Title\"},\"finding_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"intervals\":[[1,2]],\"path\":\"src/a.ts\",\"prior_repair_task\":\"crq-backfill-7777777777777777777777777777777777777777777777777777777777777777\",\"retry_instructions\":\"Prior attempt reason: needs work\\nRetained diff summary: retained diff bytes committed/staged/unstaged: 200006/0/0; 1 untracked paths; changed paths: a/e b/e, \",\"review_id\":\"9999999999999999999999999999999999999999999999999999999999999999\",\"target\":\"1111111111111111111111111111111111111111\"}"
        ]
       ],
       "delivery": {
-       "5c52e1b3919ff7530301e733209d03c08ab5ed2f11e00523e1812130518d1140": "{\"canonical_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"body\":\"Body\",\"id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"intervals\":[[1,2]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"Title\"},\"finding_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"intervals\":[[1,2]],\"path\":\"src/a.ts\",\"prior_repair_task\":\"crq-backfill-7777777777777777777777777777777777777777777777777777777777777777\",\"retry_instructions\":\"Prior attempt reason: needs work\\nRetained diff summary: retained diff bytes committed/staged/unstaged: 200092/0/0; 1 untracked paths; changed paths: a/x b/x\",\"review_id\":\"9999999999999999999999999999999999999999999999999999999999999999\",\"target\":\"1111111111111111111111111111111111111111\"}"
+       "5c52e1b3919ff7530301e733209d03c08ab5ed2f11e00523e1812130518d1140": "{\"canonical_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"finding\":{\"anchor_status\":\"verified\",\"blob\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"body\":\"Body\",\"id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"intervals\":[[1,2]],\"path\":\"src/a.ts\",\"severity\":\"major\",\"source_id\":null,\"status\":\"untriaged\",\"title\":\"Title\"},\"finding_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"intervals\":[[1,2]],\"path\":\"src/a.ts\",\"prior_repair_task\":\"crq-backfill-7777777777777777777777777777777777777777777777777777777777777777\",\"retry_instructions\":\"Prior attempt reason: needs work\\nRetained diff summary: retained diff bytes committed/staged/unstaged: 200006/0/0; 1 untracked paths; changed paths: a/e b/e, \",\"review_id\":\"9999999999999999999999999999999999999999999999999999999999999999\",\"target\":\"1111111111111111111111111111111111111111\"}"
       },
       "digests": {
-       "state/backfill/findings/delivery/5c52e1b3919ff7530301e733209d03c08ab5ed2f11e00523e1812130518d1140.json": "3ad1646ef8a3d35f56d722766975a2ac845ef0c24510a8a878c2ce10d5dd499a",
+       "state/backfill/findings/delivery/5c52e1b3919ff7530301e733209d03c08ab5ed2f11e00523e1812130518d1140.json": "08601f22383747ecb581191985d00cef56d7fc5eb3b0de58801f9e08ed23b4d4",
        "state/backfill/findings/receipts/5c52e1b3919ff7530301e733209d03c08ab5ed2f11e00523e1812130518d1140.json": "d26de399ba33c654c71f46c025febe847566f59c90d3af75133224decf870492",
        "state/backfill/findings/triage/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.json": "6803413568efb7f59750f56613eb61124f02f9efcee01bcf17a7e749247d6c9b",
        "state/backfill/publication/pending/6f4bdfc2f1e2df12188f4cbb3828fcb4d023a0f98af7dbbba9a3b3f94b71450f.json": "2097b8de91ed509fb6d30d00b58c35d4778a5b6f8de33fe0eb534569f21ef445",
        "state/backfill/publication/pending/7a0c33d57204c62a229aa571e09c4b9785cc3d5ddef8a2591578c4b8d1ab5b6f.json": "5ba75f779eee2d91a85640766f98531a34e6b0461e045883e05af7ef5683ed26",
-       "state/repair/crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-0ae9a5ee543f1b7375f466790aeeb9d756cb60ec4513aac2557237a1508b99bf/committed.patch": "a0e8cef01a07724335d3fe80b19dcc7c8be45bf1322c06ebcd0e316cde47ce13",
-       "state/repair/crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-0ae9a5ee543f1b7375f466790aeeb9d756cb60ec4513aac2557237a1508b99bf/manifest.json": "0ae9a5ee543f1b7375f466790aeeb9d756cb60ec4513aac2557237a1508b99bf",
-       "state/repair/crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-0ae9a5ee543f1b7375f466790aeeb9d756cb60ec4513aac2557237a1508b99bf/staged.patch": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-       "state/repair/crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-0ae9a5ee543f1b7375f466790aeeb9d756cb60ec4513aac2557237a1508b99bf/unstaged.patch": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+       "state/repair/crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-83b42f22c5252eaaba851b05e22c7904b960127cb56ffb0e52d38fc90e23322a/committed.patch": "be69a1395482c2da31915c3f69e55821fa7e8039ec7a7a72b3b4742e6e641517",
+       "state/repair/crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-83b42f22c5252eaaba851b05e22c7904b960127cb56ffb0e52d38fc90e23322a/manifest.json": "83b42f22c5252eaaba851b05e22c7904b960127cb56ffb0e52d38fc90e23322a",
+       "state/repair/crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-83b42f22c5252eaaba851b05e22c7904b960127cb56ffb0e52d38fc90e23322a/staged.patch": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+       "state/repair/crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-83b42f22c5252eaaba851b05e22c7904b960127cb56ffb0e52d38fc90e23322a/unstaged.patch": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
       },
       "outside_untouched": true,
       "pending": {
@@ -17033,10 +17033,10 @@
        "state/backfill/findings/triage/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.json",
        "state/backfill/publication/pending/6f4bdfc2f1e2df12188f4cbb3828fcb4d023a0f98af7dbbba9a3b3f94b71450f.json",
        "state/backfill/publication/pending/7a0c33d57204c62a229aa571e09c4b9785cc3d5ddef8a2591578c4b8d1ab5b6f.json",
-       "state/repair/crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-0ae9a5ee543f1b7375f466790aeeb9d756cb60ec4513aac2557237a1508b99bf/committed.patch",
-       "state/repair/crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-0ae9a5ee543f1b7375f466790aeeb9d756cb60ec4513aac2557237a1508b99bf/manifest.json",
-       "state/repair/crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-0ae9a5ee543f1b7375f466790aeeb9d756cb60ec4513aac2557237a1508b99bf/staged.patch",
-       "state/repair/crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-0ae9a5ee543f1b7375f466790aeeb9d756cb60ec4513aac2557237a1508b99bf/unstaged.patch"
+       "state/repair/crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-83b42f22c5252eaaba851b05e22c7904b960127cb56ffb0e52d38fc90e23322a/committed.patch",
+       "state/repair/crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-83b42f22c5252eaaba851b05e22c7904b960127cb56ffb0e52d38fc90e23322a/manifest.json",
+       "state/repair/crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-83b42f22c5252eaaba851b05e22c7904b960127cb56ffb0e52d38fc90e23322a/staged.patch",
+       "state/repair/crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-83b42f22c5252eaaba851b05e22c7904b960127cb56ffb0e52d38fc90e23322a/unstaged.patch"
       ]
      }
     ]
@@ -17044,16 +17044,8 @@
    "spec": {
     "inbox": {},
     "repair_files": {
-     "crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-0ae9a5ee543f1b7375f466790aeeb9d756cb60ec4513aac2557237a1508b99bf/committed.patch": {
+     "crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-83b42f22c5252eaaba851b05e22c7904b960127cb56ffb0e52d38fc90e23322a/committed.patch": {
       "rle": [
-       [
-        121,
-        199972
-       ],
-       [
-        10,
-        1
-       ],
        [
         100,
         1
@@ -17099,6 +17091,74 @@
         1
        ],
        [
+        101,
+        1
+       ],
+       [
+        32,
+        1
+       ],
+       [
+        98,
+        1
+       ],
+       [
+        47,
+        1
+       ],
+       [
+        101,
+        1
+       ],
+       [
+        10,
+        1
+       ],
+       [
+        121,
+        199969
+       ],
+       [
+        10,
+        1
+       ],
+       [
+        100,
+        1
+       ],
+       [
+        105,
+        1
+       ],
+       [
+        102,
+        2
+       ],
+       [
+        32,
+        1
+       ],
+       [
+        45,
+        2
+       ],
+       [
+        103,
+        1
+       ],
+       [
+        105,
+        1
+       ],
+       [
+        116,
+        1
+       ],
+       [
+        32,
+        1
+       ],
+       [
         120,
         1
        ],
@@ -17121,17 +17181,13 @@
        [
         10,
         1
-       ],
-       [
-        122,
-        100
        ]
       ]
      },
-     "crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-0ae9a5ee543f1b7375f466790aeeb9d756cb60ec4513aac2557237a1508b99bf/manifest.json": {
+     "crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-83b42f22c5252eaaba851b05e22c7904b960127cb56ffb0e52d38fc90e23322a/manifest.json": {
       "base": "1111111111111111111111111111111111111111",
       "sha256": {
-       "committed.patch": "a0e8cef01a07724335d3fe80b19dcc7c8be45bf1322c06ebcd0e316cde47ce13",
+       "committed.patch": "be69a1395482c2da31915c3f69e55821fa7e8039ec7a7a72b3b4742e6e641517",
        "staged.patch": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
        "unstaged.patch": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
       },
@@ -17139,10 +17195,10 @@
        "new.txt"
       ]
      },
-     "crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-0ae9a5ee543f1b7375f466790aeeb9d756cb60ec4513aac2557237a1508b99bf/staged.patch": {
+     "crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-83b42f22c5252eaaba851b05e22c7904b960127cb56ffb0e52d38fc90e23322a/staged.patch": {
       "raw_hex": ""
      },
-     "crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-0ae9a5ee543f1b7375f466790aeeb9d756cb60ec4513aac2557237a1508b99bf/unstaged.patch": {
+     "crq-backfill-7777777777777777777777777777777777777777777777777777777777777777/retained-83b42f22c5252eaaba851b05e22c7904b960127cb56ffb0e52d38fc90e23322a/unstaged.patch": {
       "raw_hex": ""
      }
     },
