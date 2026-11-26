@@ -103,7 +103,9 @@ class FakeGit {
         return { code: 0, stdout: text(oid) };
       }
       case 'cat-file': {
-        // --batch: "<oid> blob <size>\n<bytes>\n" per requested oid.
+        // --batch: "<oid> blob <size>\n<bytes>\n" per requested oid;
+        // --batch-check answers the same header line only (no body).
+        const headerOnly = args.includes('--batch-check');
         const requested = new TextDecoder()
           .decode(input ?? new Uint8Array(0))
           .split('\n')
@@ -113,7 +115,8 @@ class FakeGit {
           const data = this.objects.get(oid);
           if (data === undefined) return { code: 128, stdout: new Uint8Array(0) };
           const header = new TextEncoder().encode(`${oid} blob ${data.length}\n`);
-          chunks.push(...header, ...data, 0x0a);
+          if (headerOnly) chunks.push(...header);
+          else chunks.push(...header, ...data, 0x0a);
         }
         return { code: 0, stdout: new Uint8Array(chunks) };
       }
