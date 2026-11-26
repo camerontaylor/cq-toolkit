@@ -182,6 +182,73 @@ def build_scenarios() -> None:
         patterns=custom("    path: '\\.md$'\n"))
     add("scan: a quoted and a plain regex", "scan", base={}, head={"a.txt": hexs("needle\n")},
         patterns=custom(second=True))
+    # --- odd path shapes in the patch headers (#2385) -----------------------------------
+    # Python keeps every label byte after "+++ "/"--- " (the trailing tab git writes for a
+    # spaced name, the C-quoting of an odd name) and only drops the a/ or b/ prefix; the
+    # tabbed or quoted text is the path every exemption glob and rule path sees.
+    def exempt_path(glob, base, head, **over):
+        toml = '[[exempt]]\npath = "%s"\nrule = "class:inline-secret-assignments"\nreason = "fixture"\n' % glob
+        files = {".crq/scan-exemptions.toml": hexs(toml)}
+        return {"base": {**files, **base}, "head": {**files, **head}, **over}
+
+    body = hexs(SECRET + "\n")
+    spaced = {"a b.txt": body}
+    add("path: a new spaced file is a hit", "scan", base={}, head=spaced)
+    add("path: an exact exemption does not cover the tabbed spaced path", "scan",
+        **exempt_path("a b.txt", {}, spaced))
+    add("path: a wildcard exemption covers the tabbed spaced path", "scan",
+        **exempt_path("a b.txt*", {}, spaced))
+    add("path: a spaced file in a directory is a hit", "scan", base={}, head={"d/a b.txt": body})
+    add("path: a directory exemption covers a spaced file", "scan",
+        **exempt_path("d/**", {}, {"d/a b.txt": body}))
+    add("path: a rule path anchored at the end misses the tabbed spaced path", "scan", base={},
+        head={"a b.md": hexs("needle\n"), "c.md": hexs("needle\n")}, patterns=custom("    path: '\\.md$'\n"))
+    add("path: a modified spaced file", "scan", base={"a b.txt": hexs("old\n")}, head=spaced)
+    add("path: a modified spaced file exemption", "scan",
+        **exempt_path("a b.txt", {"a b.txt": hexs("old\n")}, spaced))
+    add("path: a deleted spaced file", "scan", base=spaced, head={})
+    add("path: a deleted spaced file exemption", "scan", **exempt_path("a b.txt", spaced, {}))
+    add("path: a spaced file with no trailing newline", "scan", base={}, head={"a b.txt": hexs(SECRET)})
+    add("path: an empty new spaced file", "scan", base={}, head={"a b.txt": ""})
+    add("path: a binary spaced file", "scan", base={}, head={"a b.bin": "00ff00fe" + hexs(SECRET)})
+    add("path: a tab in the name is quoted", "scan", base={}, head={"a\tb.txt": body})
+    add("path: a tab in the name exemption", "scan", **exempt_path("a\\tb.txt", {}, {"a\tb.txt": body}))
+    add("path: a double quote in the name", "scan", base={}, head={'a"b.txt': body})
+    add("path: a double quote in the name exemption", "scan", **exempt_path('a\\"b.txt', {}, {'a"b.txt': body}))
+    add("path: a backslash in the name", "scan", base={}, head={"a\\b.txt": body})
+    add("path: a backslash in the name exemption", "scan", **exempt_path("a\\\\b.txt", {}, {"a\\b.txt": body}))
+    add("path: a quoted spaced and tabbed name", "scan", base={}, head={"a b\tc.txt": body})
+    add("path: a unicode name", "scan", base={}, head={"caf\u00e9.txt": body})
+    add("path: a unicode name exemption", "scan", **exempt_path("caf\u00e9.txt", {}, {"caf\u00e9.txt": body}))
+    add("path: an emoji name", "scan", base={}, head={"\U0001f600.txt": body})
+    add("path: a rule path against a unicode name", "scan", base={}, head={"caf\u00e9.md": hexs("needle\n")},
+        patterns=custom("    path: 'caf\\\\303\\\\251\\.md\"$'\n"))
+    rename = {"r old.txt": hexs("l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\n")}
+    add("path: a pure rename of a spaced file", "scan", base=rename,
+        head={"r new.txt": rename["r old.txt"]})
+    add("path: a rename with a secret added", "scan", base=rename,
+        head={"r new.txt": hexs("l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\n" + SECRET + "\n")})
+    add("path: a rename with a secret added exemption", "scan",
+        **exempt_path("r new.txt", rename, {"r new.txt": hexs("l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\n" + SECRET + "\n")}))
+    add("path: a plain rename with a secret added", "scan", base={"o.txt": rename["r old.txt"]},
+        head={"n.txt": hexs("l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\n" + SECRET + "\n")})
+    add("path: a rename into a directory", "scan", base={"o.txt": rename["r old.txt"]},
+        head={"d/n.txt": hexs("l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\n" + SECRET + "\n")})
+    add("path: a rename into node_modules is allowlisted", "scan", base={"o.txt": rename["r old.txt"]},
+        head={"node_modules/n.txt": hexs("l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\n" + SECRET + "\n")})
+    add("path: a name that looks like a header", "scan", base={}, head={"b/x b/y.txt": body})
+    add("path: a name starting with a/", "scan", base={}, head={"a/x.txt": body, "b/y.txt": body})
+    add("path: a name with a trailing space", "scan", base={}, head={"a.txt ": body})
+    add("path: a name with a literal newline is quoted", "scan", base={}, head={"a\nb.txt": body})
+    add("path: a name with a form feed", "scan", base={}, head={"a\x0cb.txt": body})
+    add("path: a name with a vertical tab", "scan", base={}, head={"a\x0bb.txt": body})
+    add("path: a name with a line separator", "scan", base={}, head={"a\u2028b.txt": body})
+    add("path: a name with a next-line char", "scan", base={}, head={"a\u0085b.txt": body})
+    add("path: a name with a carriage return", "scan", base={}, head={"a\rb.txt": body})
+    add("path: a pure rename to a quoted name", "scan", base={"o.txt": rename["r old.txt"]},
+        head={"n\tq.txt": rename["r old.txt"]})
+    add("path: a spaced name with a secret in a removed line", "scan",
+        base={"a b.txt": hexs(SECRET + "\nkeep\n")}, head={"a b.txt": hexs("keep\n")})
     # --- backfill context scan ----------------------------------------------------------
     add("context: a clean context", "context", item={"context": {"a": 1}})
     add("context: an absent context is empty", "context", item={})
