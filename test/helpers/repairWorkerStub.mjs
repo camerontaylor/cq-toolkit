@@ -2,7 +2,8 @@
 // the payload as argv[2]; its `configText` is a JSON map of item -> scenario.
 // The stub does only what the scenario says on fd 3, then exits. It imports no
 // repair code. Scenario: {publish?: string[], exit?: n, signal?: 'SIGKILL',
-// fdsTo?: path, holdUntil?: path, afterRelease?: string[], reportTo?: path}
+// fdsTo?: path, holdUntil?: path, afterRelease?: string[], reportTo?: path, grandchild?: true}
+import { spawn } from 'node:child_process';
 import { existsSync, readdirSync, readlinkSync, writeFileSync, writeSync } from 'node:fs';
 
 const payload = JSON.parse(process.argv[2]);
@@ -40,6 +41,10 @@ if (scenario.reportTo) {
     scenario.reportTo,
     JSON.stringify({ cwd: process.cwd(), stateRoot: payload.stateRoot, clone: payload.clone }),
   );
+}
+if (scenario.grandchild) {
+  // A bounded grandchild that inherits fd 3 and outlives this worker.
+  spawn('sleep', ['3'], { stdio: ['ignore', 'ignore', 'ignore', 3] }).unref();
 }
 if (scenario.signal) process.kill(process.pid, scenario.signal);
 process.exit(scenario.exit ?? 0);
