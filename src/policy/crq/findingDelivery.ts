@@ -35,7 +35,7 @@ export class FindingDeliveryAttributeError extends Error {
 }
 
 /** Python `dict.get` on the exact JSON model. */
-function pythonGet(object: JsonValue, key: string): JsonValue | undefined {
+export function pythonGet(object: JsonValue, key: string): JsonValue | undefined {
   if (!(object instanceof JsonObject)) {
     throw new FindingDeliveryAttributeError(
       `'${ledgerPythonTypeName(object)}' object has no attribute 'get'`,
