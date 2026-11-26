@@ -35,7 +35,11 @@ import {
   FixPrBacklog,
   refreshFixPrBacklog,
 } from '../../queue-runner/fixPrBacklog.js';
-import { repairArchiveLegacy, repairBackfill } from '../../queue-runner/repairBackfill.js';
+import {
+  repairArchiveLegacy,
+  repairBackfill,
+  repairEnqueue,
+} from '../../queue-runner/repairBackfill.js';
 import type { Item, Queue } from '../../queue-runner/repairBackfill.js';
 import type { HarvestReviewEffects } from '../../queue-runner/harvestReview.js';
 import { runReconcilePhase } from '../../queue-runner/tickDiscoveryPhase.js';
@@ -133,8 +137,9 @@ export const STAGED_GAPS: readonly TickGap[] = [
     python: 'harvest_review (crq.py:2619)',
     missing:
       'fileHarvestReviewEffects binds findings.md for non-local kinds, removeWorktree, writeReceipt and ' +
-      'requestPrReview; repairEnqueue, backfillHarvest and the coverage seam stay injected: ' +
-      'repairEnqueue needs injected git and a TS port of crq_repair.findings (the pure repair port exists in repairBackfill.ts); backfillHarvest has no TS port of backfill_runtime.harvest; the coverage seam has no harvest-side implementation (start-one CoverageEffects)',
+      'requestPrReview; backfillHarvest and the coverage seam stay injected, and repairEnqueue is bound ' +
+      'only when the repairBackfill input (git, config) is supplied: ' +
+      'backfillHarvest has no TS port of backfill_runtime.harvest; the coverage seam has no harvest-side implementation (start-one CoverageEffects)',
   },
   {
     id: 'repair-harvest-effects',
@@ -369,6 +374,13 @@ export function composeFullTick(input: TickCompositionInput): TickComposition {
             worktreePrefix: input.harvest.worktree.worktreePrefix,
             primaryClone: input.clone,
           }),
+          // `repair_tick.enqueue` over the repair-backfill effects (git and config stay injected).
+          ...(repairEffects
+            ? {
+                repairEnqueue: (q: Queue, item: Item, meta: Item, runId: string) =>
+                  repairEnqueue(q, item, meta, repairEffects, runId),
+              }
+            : {}),
           ...input.harvest.review,
         } as HarvestReviewEffects,
         repairHarvest: input.harvest.repairHarvest,
