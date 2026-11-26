@@ -146,8 +146,10 @@ class LargeOutboxReplayTest(ReplayBase):
 
     def test_wall_clock_budget_stops_replay_but_tick_continues(self):
         f = self.build(5, chain=3)
-        clock = iter([0.0, 0.0, 0.0, 999.0] + [999.0] * 50)
-        repair_tick.begin_tick(f.c, count=100, seconds=10, clock=lambda: next(clock), retry_seconds=0)
+        def clock():  # the deadline passes once two runs have been replayed
+            done = sum(repair_tick.replay_settled(next(iter(i['repair_runs'].values()))) for i in f.items)
+            return 999.0 if done >= 2 else 0.0
+        repair_tick.begin_tick(f.c, count=100, seconds=10, clock=clock, retry_seconds=0)
         for item in f.items:
             repair_tick.harvest(f.c, f.queue, item)  # must not raise
         settled = [repair_tick.replay_settled(next(iter(i['repair_runs'].values()))) for i in f.items]
@@ -358,11 +360,45 @@ class TickEntryPointTest(unittest.TestCase):
              mock.patch.object(crq, 'CONFIG', {'repair': {}}), \
              mock.patch.object(repair_tick, 'finding_inbox', lambda c: f.inbox), \
              mock.patch.object(f.inbox, 'repair_outcome', outcomes):
-            crq.tick(only='x')
+            log = crq.tick(only='x')
         self.assertIsInstance(crq.REPLAY_BUDGET, repair_tick.ReplayBudget)
         settled = [repair_tick.replay_settled(next(iter(i['repair_runs'].values()))) for i in f.items]
         self.assertEqual(sum(settled), 25)
         self.assertEqual(outcomes.call_count, 25)
+        spent = [line for line in log if line.startswith('repair replay budget spent')]
+        self.assertEqual(spent, ['repair replay budget spent (25 runs / 240s): remaining failed runs resume next tick'])
+
+
+class BudgetLogTest(ReplayBase):
+    def harvest_all(self, f):
+        messages = []
+        for item in f.items:
+            messages += repair_tick.harvest(f.c, f.queue, item)
+        return messages
+
+    def test_a_tripped_count_budget_logs_once_per_tick(self):
+        f = self.build(5, chain=1)
+        repair_tick.begin_tick(f.c, count=2, retry_seconds=0)
+        spent = [m for m in self.harvest_all(f) if m.startswith('repair replay budget spent')]
+        self.assertEqual(spent, ['repair replay budget spent (2 runs / 240s): remaining failed runs resume next tick'])
+        repair_tick.begin_tick(f.c, count=2, retry_seconds=0)
+        self.assertEqual(len([m for m in self.harvest_all(f) if 'budget spent' in m]), 1)  # fresh tick, fresh line
+        repair_tick.begin_tick(f.c, count=2, retry_seconds=0)
+        self.assertEqual([m for m in self.harvest_all(f) if 'budget spent' in m], [])  # 5th run settled: not tripped
+
+    def test_a_tripped_deadline_logs(self):
+        f = self.build(3, chain=1)
+        now = [0.0]
+        repair_tick.begin_tick(f.c, count=99, seconds=10, retry_seconds=0, clock=lambda: now[0])
+        now[0] = 11.0
+        self.assertEqual(len([m for m in self.harvest_all(f) if 'budget spent' in m]), 1)
+
+    def test_backoff_and_settled_runs_do_not_log(self):
+        f = self.build(2, chain=1, unsettled=1)
+        repair_tick.begin_tick(f.c, count=1)
+        self.harvest_all(f)  # the unsettled run is replayed; the settled one is skipped
+        repair_tick.begin_tick(f.c, count=1)
+        self.assertEqual([m for m in self.harvest_all(f) if 'budget spent' in m], [])
 
 
 if __name__ == '__main__':

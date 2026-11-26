@@ -91,8 +91,8 @@ const queueOf = (item: Item): Queue => ({ items: [item] }) as unknown as Queue;
 const runOf = (item: Item, run: string): Rec => (item.repair_runs as Record<string, Rec>)[run]!;
 const marks = (log: string[]): string[] => log.filter((l) => l.startsWith('mark:'));
 
-async function tick(item: Item, fx: RepairHarvestEffects): Promise<void> {
-  await repairHarvest(queueOf(item), item, fx);
+async function tick(item: Item, fx: RepairHarvestEffects): Promise<string[]> {
+  return repairHarvest(queueOf(item), item, fx);
 }
 
 describe('repairHarvest terminal replay is O(new): the settled flag', () => {
@@ -164,7 +164,55 @@ describe('repairHarvest terminal replay is O(new): the settled flag', () => {
   });
 });
 
+describe('repairHarvest terminalization flags a job only after its outcome write', () => {
+  it('leaves the terminalized job unflagged when its own outcome write fails', async () => {
+    const j1 = jobId('R', 1);
+    const item = itemOf({ R: { state: 'queued', base: 'b0', jobs: [j1], verdicts: [] } });
+    const w = world({ failMark: new Set([j1]) });
+    // The result names a different job: a deterministic defect that terminalizes the run.
+    const fx = {
+      ...w.fx,
+      requireCanonicalDelivery: async () => undefined,
+      readResult: async () => {
+        throw new PyError('ValueError', 'result is not valid JSON');
+      },
+    } as RepairHarvestEffects;
+    await expect(tick(item, fx)).rejects.toThrow('ledger down');
+    expect(runOf(item, 'R').state).toBe('failed'); // terminal identity is saved first
+    expect(w.log).toContain(`mark:${j1}`);
+    expect(runOf(item, 'R').siblings_recorded).toBeUndefined();
+    expect(replaySettled(runOf(item, 'R'))).toBe(false);
+  });
+});
+
 describe('repairHarvest terminal replay is bounded per tick: ReplayBudget', () => {
+  const spent = (messages: string[]): string[] =>
+    messages.filter((m) => m.startsWith('repair replay budget spent'));
+  const manyRuns = (n: number): Item =>
+    itemOf(
+      Object.fromEntries(
+        Array.from({ length: n }, (_, i) => [`R${i}`, failedRun(`R${i}`, [jobId(`R${i}`, 1)])]),
+      ),
+    );
+
+  it('logs once per tick when the count budget trips, and not when nothing is deferred', async () => {
+    const item = manyRuns(3);
+    const first = await tick(item, world({ budget: new ReplayBudget({ count: 2 }) }).fx);
+    expect(spent(first)).toEqual([
+      'repair replay budget spent (2 runs / 240s): remaining failed runs resume next tick',
+    ]);
+    const second = await tick(item, world({ budget: new ReplayBudget({ count: 2 }) }).fx);
+    expect(spent(second)).toEqual([]); // the last run fit the budget
+    expect(spent(await tick(item, world().fx))).toEqual([]); // unbound: never trips
+  });
+
+  it('logs when the wall-clock deadline trips', async () => {
+    let now = 0;
+    const budget = new ReplayBudget({ seconds: 10, clock: () => now });
+    now = 11;
+    expect(spent(await tick(manyRuns(2), world({ budget }).fx))).toHaveLength(1);
+  });
+
   const runs = (n: number): Record<string, Rec> =>
     Object.fromEntries(
       Array.from({ length: n }, (_, i) => [`R${i}`, failedRun(`R${i}`, [jobId(`R${i}`, 1)])]),

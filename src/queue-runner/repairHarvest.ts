@@ -125,6 +125,8 @@ export class ReplayBudget {
   private readonly clock: () => number;
   private readonly wall: () => number;
   private readonly retry: number;
+  private readonly limits: readonly [number, number];
+  private announced = false;
 
   constructor(
     limits: {
@@ -140,10 +142,22 @@ export class ReplayBudget {
     this.wall = limits.wall ?? (() => Date.now() / 1000);
     this.retry = limits.retrySeconds ?? 900;
     this.deadline = this.clock() + (limits.seconds ?? 240);
+    this.limits = [limits.count ?? 25, limits.seconds ?? 240];
+  }
+
+  exhausted(): boolean {
+    return this.count <= 0 || this.clock() >= this.deadline;
+  }
+
+  /** The log line for a tripped budget, once per tick (`undefined` afterwards). */
+  announce(): string | undefined {
+    if (this.announced) return undefined;
+    this.announced = true;
+    return `repair replay budget spent (${this.limits[0]} runs / ${this.limits[1]}s): remaining failed runs resume next tick`;
   }
 
   take(record: Rec): boolean {
-    if (this.count <= 0 || this.clock() >= this.deadline) return false;
+    if (this.exhausted()) return false;
     const now = this.wall();
     const last = record.replay_attempted;
     if (typeof last === 'number' && now - last >= 0 && now - last < this.retry) return false;
@@ -334,12 +348,12 @@ async function reconcileTerminal(
   messages: string[],
 ): Promise<void> {
   const budget = fx.replayBudget;
-  if (
-    !dry &&
-    record.state === 'failed' &&
-    !replaySettled(record) &&
-    (budget === undefined || budget.take(record))
-  ) {
+  const pending = !dry && record.state === 'failed' && !replaySettled(record);
+  if (pending && budget?.exhausted()) {
+    const line = budget.announce();
+    if (line !== undefined) messages.push(line);
+  }
+  if (pending && (budget === undefined || budget.take(record))) {
     // A terminal local failure can outlive a failed ledger write: replay the
     // retained FAILED outcomes through the ledger's idempotent event chain.
     const handled = new Set<string>();

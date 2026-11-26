@@ -439,9 +439,21 @@ class ReplayBudget:
     def __init__(self, count=25, seconds=240.0, clock=time.monotonic, retry_seconds=900.0, wall=time.time):
         self.count, self.clock, self.wall, self.retry = count, clock, wall, retry_seconds
         self.deadline = clock() + seconds
+        self.limits, self.announced = (count, seconds), False
+
+    def exhausted(self):
+        return self.count <= 0 or self.clock() >= self.deadline
+
+    def announce(self):
+        """The log line for a tripped budget, once per tick (None afterwards)."""
+        if self.announced:
+            return None
+        self.announced = True
+        return ('repair replay budget spent (%d runs / %gs): remaining failed runs resume next tick'
+                % self.limits)
 
     def take(self, record=None):
-        if self.count <= 0 or self.clock() >= self.deadline:
+        if self.exhausted():
             return False
         if record is not None:
             now = self.wall()
@@ -470,8 +482,12 @@ def harvest(c, q, item, dry=False):
             # A terminal local failure can outlive a failed ledger write. Replay
             # retained FAILED outcomes through the ledger's idempotent event chain.
             budget = getattr(c, 'REPLAY_BUDGET', None)
-            if (not dry and record['state'] == 'failed' and not replay_settled(record)
-                    and (budget is None or budget.take(record))):
+            pending = not dry and record['state'] == 'failed' and not replay_settled(record)
+            if pending and budget is not None and budget.exhausted():
+                line = budget.announce()
+                if line:
+                    messages.append(line)
+            if pending and (budget is None or budget.take(record)):
                 handled = set()
                 for result in record.get('verdicts', []):
                     if (result.get('verdict') != 'FAILED'
