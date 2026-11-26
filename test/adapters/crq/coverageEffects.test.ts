@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   makeCoverageEffects,
@@ -63,6 +66,82 @@ describe('makeCoverageEffects', () => {
       'buildSynthetic is not bound',
     );
     expect(() => effects.select({} as never, [], false, null)).toThrow('select is not bound');
+  });
+
+  it('binds the tick seams and the dispatch switch only when their input is supplied', () => {
+    const root = mkdtempSync(join(tmpdir(), 'cq-effects-bind-'));
+    try {
+      const effects = makeCoverageEffects({
+        git: { git: () => Promise.resolve(''), pathExists: () => Promise.resolve(true) },
+        measure: { defaultRef: 'origin/main', minFileFocus: 0.25, iso: () => 'x' },
+        coverageConfig: {},
+        rank4: {
+          iso: () => 'x',
+          ordinaryEligible: unbound('ordinaryEligible'),
+          stateEvent: unbound('stateEvent') as never,
+          saveQueue: unbound('saveQueue') as never,
+        },
+        tick: {
+          clock: () => 1_000,
+          schedule: { primaryRepo: 'owner/primary', repos: [], localReviewAgingMinutes: 60 },
+        },
+        dispatch: { stateRoot: root, loadLimits: unbound('loadLimits') as never },
+        injected: { select: unbound('select') } as unknown as InjectedCoverageSeams,
+      });
+      expect(effects.nowMs()).toBe(1_000);
+      expect(effects.parseIsoMs('2026-11-20T12:00:00Z')).toBe(Date.parse('2026-11-20T12:00:00Z'));
+      expect(effects.liveItems({ items: [{ id: 'a', kind: 'promotion' }, { id: 'b' }] })).toEqual([
+        { id: 'b' },
+      ]);
+      expect(effects.backfillDispatchConfigured()).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('calls an injected clock on its owner when no tick seam is bound', () => {
+    const owner = {
+      select: unbound('select'),
+      fixedMs: Date.parse('2026-11-20T12:00:00Z'),
+      nowMs(this: { fixedMs: number }) {
+        return this.fixedMs;
+      },
+    };
+    const effects = makeCoverageEffects({
+      git: { git: () => Promise.resolve(''), pathExists: () => Promise.resolve(true) },
+      measure: { defaultRef: 'origin/main', minFileFocus: 0.25, iso: () => 'x' },
+      coverageConfig: {},
+      rank4: {
+        iso: () => 'x',
+        ordinaryEligible: unbound('ordinaryEligible'),
+        stateEvent: unbound('stateEvent') as never,
+        saveQueue: unbound('saveQueue') as never,
+      },
+      injected: owner as unknown as InjectedCoverageSeams,
+    });
+    // `this` is the injected object, not a detached call.
+    expect(effects.nowMs()).toBe(owner.fixedMs);
+    expect(effects.coverageCandidate({ items: [] } as unknown as Queue, 'abc123')).toBeNull();
+  });
+
+  it('throws from a tick member that is neither bound nor injected', () => {
+    const effects = makeCoverageEffects({
+      git: { git: () => Promise.resolve(''), pathExists: () => Promise.resolve(true) },
+      measure: { defaultRef: 'origin/main', minFileFocus: 0.25, iso: () => 'x' },
+      coverageConfig: {},
+      rank4: {
+        iso: () => 'x',
+        ordinaryEligible: unbound('ordinaryEligible'),
+        stateEvent: unbound('stateEvent') as never,
+        saveQueue: unbound('saveQueue') as never,
+      },
+      injected: { select: unbound('select') } as unknown as InjectedCoverageSeams,
+    });
+    expect(() => effects.nowMs()).toThrow('nowMs is not bound');
+    expect(() => effects.liveItems({ items: [] })).toThrow('liveItems is not bound');
+    expect(() => effects.backfillDispatchConfigured()).toThrow(
+      'backfillDispatchConfigured is not bound',
+    );
   });
 
   it('binds buildSynthetic over the supplied synthetic deps', async () => {
