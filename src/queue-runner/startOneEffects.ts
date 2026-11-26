@@ -60,15 +60,8 @@ export function makeStartOneEffects(
         ignoreQuiet: run.ignoreQuiet,
       }),
     launch: runLaunch,
-    coverageFallback: async (options) => {
-      const result = await coverageFallback(
-        queue as Queue,
-        run.log,
-        run.dry,
-        run.only,
-        options.ordinaryEligible,
-        coverage,
-      );
+    coverageFallback: async () => {
+      const result = await coverageFallback(queue as Queue, run.log, run.dry, run.only, coverage);
       return { started: result.started, hasCoverage: result.available };
     },
     event: (kind, data) => bundle.event(kind, data),

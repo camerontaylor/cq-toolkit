@@ -11,6 +11,7 @@
  * more than Python's full `tomllib`, never less.
  */
 import { pythonUnicode16Space } from '../policy/crq/pythonUnicode16.js';
+import { REVIEW_RECEIPT_KIND } from '../policy/crq/tickSchedule.js';
 
 export const SCAN_EXEMPTIONS_PATH = '.crq/scan-exemptions.toml';
 export const EXEMPTIBLE_RULES: ReadonlySet<string> = new Set([
@@ -305,4 +306,47 @@ export function exemptReason(
   for (const entry of exemptions ?? [])
     if (entry.rule === rule && entry.rx.test(path)) return entry.reason;
   return null;
+}
+
+/**
+ * `crq.exemption_base` minus the git call: the revision whose exemption file
+ * governs a projected (push or merged-current) scan. Never the projection's
+ * own base: that is the reviewed tip minus only the selected paths, so any
+ * out-of-scope change would keep its reviewed copy of the exemption file as
+ * policy. Push: the range's pre-push base. Merged-current: the merge's first
+ * parent. Null (no exemptions) for every other item.
+ */
+export function exemptionBaseSpec(item: {
+  readonly kind?: unknown;
+  readonly subject?: unknown;
+}): string | null {
+  const subject =
+    typeof item.subject === 'object' && item.subject !== null && !Array.isArray(item.subject)
+      ? (item.subject as Record<string, unknown>)
+      : {};
+  let spec: unknown;
+  if (item.kind === 'push-current') spec = subject.base;
+  else if (item.kind === REVIEW_RECEIPT_KIND && truthy(subject.merge_sha)) {
+    // Python `subject["merge_sha"] + "^1"` raises TypeError on a non-string.
+    if (typeof subject.merge_sha !== 'string') throw new TypeError('merge_sha must be a string');
+    spec = `${subject.merge_sha}^1`;
+  } else return null;
+  return typeof spec === 'string' && spec !== '' ? spec : null;
+}
+
+/** Python truthiness for a JSON value (`subject.get("merge_sha")` in an `and`). */
+function truthy(value: unknown): boolean {
+  if (value === null || value === undefined || value === false || value === 0 || value === '')
+    return false;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === 'object') return Object.keys(value).length > 0;
+  return true;
+}
+
+/**
+ * `git rev-parse` echoes the spec itself when it cannot resolve it, so only a
+ * full object id counts as a resolved exemption base.
+ */
+export function acceptExemptionBase(echo: string): string | null {
+  return /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(echo) ? echo : null;
 }

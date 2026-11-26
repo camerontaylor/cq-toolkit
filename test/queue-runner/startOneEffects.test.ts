@@ -70,6 +70,7 @@ function bundle(
       itemRepo: () => 'o/primary',
       isPrimaryRepo: () => true,
       repoConfig: () => null,
+      revParse: (spec) => Promise.resolve(spec),
       onDemandClone: () => Promise.resolve('/c'),
       launchBand: () => 'background',
       allocateRun: (id) => Promise.resolve(`/runs/${id}`),
