@@ -309,6 +309,9 @@ class OutboxMemoTest(unittest.TestCase):
 
 
 class RecoverFixpointTest(unittest.TestCase):
+    """Pins recover's fixpoint (result and per-pass trace). The list.remove to
+    rebuild change is behaviour-preserving, so no test can distinguish it."""
+
     def test_events_applied_out_of_causal_order_all_land(self):
         with tempfile.TemporaryDirectory() as tmp:
             inbox = finding_delivery.Inbox(Path(tmp), ledger.Outbox(Path(tmp) / 'pub', None))
