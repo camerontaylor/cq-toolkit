@@ -25172,6 +25172,1883 @@
    }
   },
   {
+   "name": "accept-configured-scan-tuple-false-refused",
+   "result": {
+    "steps": [
+     {
+      "calls": [
+       [
+        "projection",
+        "repo",
+        "1111111111111111111111111111111111111111",
+        [
+         "src/a.ts"
+        ]
+       ],
+       [
+        "secret_scan",
+        "base-1111111111111111111111111111111111111111",
+        "head-1111111111111111111111111111111111111111",
+        "backfill/repair-scan.json"
+       ]
+      ],
+      "delivery": {},
+      "message": "repair source secret scan rejected",
+      "outside_untouched": true,
+      "pending": {},
+      "queue": "{\"items\":[]}",
+      "queue_saves": [],
+      "raises": "IntegrityError",
+      "receipts": {},
+      "repair_inbox": {},
+      "rows": {},
+      "trace": [],
+      "tree": []
+     }
+    ]
+   },
+   "spec": {
+    "scan_return": [
+     false,
+     null
+    ],
+    "steps": [
+     {
+      "args": [
+       "5555555555555555555555555555555555555555555555555555555555555555",
+       {
+        "canonical_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "finding": {
+         "anchor_status": "verified",
+         "blob": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+         "body": "Body",
+         "id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+         "intervals": [
+          [
+           1,
+           2
+          ]
+         ],
+         "path": "src/a.ts",
+         "severity": "major",
+         "source_id": null,
+         "status": "untriaged",
+         "title": "Title"
+        },
+        "finding_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.ts",
+        "review_id": "9999999999999999999999999999999999999999999999999999999999999999",
+        "target": "1111111111111111111111111111111111111111"
+       }
+      ],
+      "method": "accept",
+      "transport": {
+       "mode": "configured"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "accept-configured-scan-tuple-true-accepted",
+   "result": {
+    "steps": [
+     {
+      "calls": [
+       [
+        "projection",
+        "repo",
+        "1111111111111111111111111111111111111111",
+        [
+         "src/a.ts"
+        ]
+       ],
+       [
+        "secret_scan",
+        "base-1111111111111111111111111111111111111111",
+        "head-1111111111111111111111111111111111111111",
+        "backfill/repair-scan.json"
+       ],
+       [
+        "secret_scan_diff",
+        "diff --git a/crq-finding.txt b/crq-finding.txt\n--- /dev/null\n+++ b/crq-finding.txt\n@@ -0,0 +1,2 @@\n+Title\n+Body\n",
+        null,
+        "1111111111111111111111111111111111111111",
+        "backfill/repair-finding-scan.json"
+       ],
+       [
+        "secret_scan_diff",
+        "diff --git a/src/a.ts b/src/a.ts\n--- /dev/null\n+++ b/src/a.ts\n@@ -0,0 +1,2 @@\n+Title\n+Body\n",
+        null,
+        "1111111111111111111111111111111111111111",
+        "backfill/repair-finding-scan.json"
+       ],
+       [
+        "save_queue"
+       ]
+      ],
+      "delivery": {},
+      "outside_untouched": true,
+      "pending": {},
+      "queue": "{\"items\":[{\"cycles\":[],\"id\":\"backfill-finding-5555555555555555555555555555555555555555555555555555555555555555\",\"kind\":\"merged\",\"pr\":0,\"repair_runs\":{\"backfill-5555555555555555555555555555555555555555555555555555555555555555\":{\"base\":\"1111111111111111111111111111111111111111\",\"branch\":null,\"canonical_finding_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"jobs\":[\"crq-backfill-5555555555555555555555555555555555555555555555555555555555555555\"],\"open_pr\":false,\"pin\":\"1111111111111111111111111111111111111111\",\"round\":1,\"state\":\"queued\"}},\"state\":\"repairing\"}]}",
+      "queue_saves": [
+       "{\"items\":[{\"cycles\":[],\"id\":\"backfill-finding-5555555555555555555555555555555555555555555555555555555555555555\",\"kind\":\"merged\",\"pr\":0,\"repair_runs\":{\"backfill-5555555555555555555555555555555555555555555555555555555555555555\":{\"base\":\"1111111111111111111111111111111111111111\",\"branch\":null,\"canonical_finding_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"jobs\":[\"crq-backfill-5555555555555555555555555555555555555555555555555555555555555555\"],\"open_pr\":false,\"pin\":\"1111111111111111111111111111111111111111\",\"round\":1,\"state\":\"queued\"}},\"state\":\"repairing\"}]}"
+      ],
+      "receipts": {},
+      "repair_inbox": {
+       "crq-backfill-5555555555555555555555555555555555555555555555555555555555555555": "{\"branch\":null,\"canonical_finding_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"cycle\":null,\"finding\":{\"body\":\"Title\\nBody\",\"line\":1,\"path\":\"src/a.ts\",\"severity\":\"major\"},\"item\":\"backfill-finding-5555555555555555555555555555555555555555555555555555555555555555\",\"job\":\"crq-backfill-5555555555555555555555555555555555555555555555555555555555555555\",\"kind\":\"merged\",\"pr\":0,\"prior\":null,\"recurrence\":false,\"repair_base\":\"1111111111111111111111111111111111111111\",\"repair_round\":1,\"review_diff\":\"\",\"review_id\":\"9999999999999999999999999999999999999999999999999999999999999999\",\"run\":\"backfill-5555555555555555555555555555555555555555555555555555555555555555\"}"
+      },
+      "returns": "{\"acknowledgement\":\"69866300fd06a408e572207fc65270616bdc25595e099ebd80405e480ee816c6\",\"repair_task\":\"crq-backfill-5555555555555555555555555555555555555555555555555555555555555555\"}",
+      "rows": {},
+      "trace": [
+       "write:inbox/crq-backfill-5555555555555555555555555555555555555555555555555555555555555555.json"
+      ],
+      "tree": [
+       "state/repair/inbox/crq-backfill-5555555555555555555555555555555555555555555555555555555555555555.json"
+      ]
+     }
+    ]
+   },
+   "spec": {
+    "scan_return": [
+     true,
+     null
+    ],
+    "steps": [
+     {
+      "args": [
+       "5555555555555555555555555555555555555555555555555555555555555555",
+       {
+        "canonical_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "finding": {
+         "anchor_status": "verified",
+         "blob": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+         "body": "Body",
+         "id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+         "intervals": [
+          [
+           1,
+           2
+          ]
+         ],
+         "path": "src/a.ts",
+         "severity": "major",
+         "source_id": null,
+         "status": "untriaged",
+         "title": "Title"
+        },
+        "finding_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.ts",
+        "review_id": "9999999999999999999999999999999999999999999999999999999999999999",
+        "target": "1111111111111111111111111111111111111111"
+       }
+      ],
+      "method": "accept",
+      "transport": {
+       "mode": "configured"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "accept-configured-scan-tuple-true-extra-elements",
+   "result": {
+    "steps": [
+     {
+      "calls": [
+       [
+        "projection",
+        "repo",
+        "1111111111111111111111111111111111111111",
+        [
+         "src/a.ts"
+        ]
+       ],
+       [
+        "secret_scan",
+        "base-1111111111111111111111111111111111111111",
+        "head-1111111111111111111111111111111111111111",
+        "backfill/repair-scan.json"
+       ],
+       [
+        "secret_scan_diff",
+        "diff --git a/crq-finding.txt b/crq-finding.txt\n--- /dev/null\n+++ b/crq-finding.txt\n@@ -0,0 +1,2 @@\n+Title\n+Body\n",
+        null,
+        "1111111111111111111111111111111111111111",
+        "backfill/repair-finding-scan.json"
+       ],
+       [
+        "secret_scan_diff",
+        "diff --git a/src/a.ts b/src/a.ts\n--- /dev/null\n+++ b/src/a.ts\n@@ -0,0 +1,2 @@\n+Title\n+Body\n",
+        null,
+        "1111111111111111111111111111111111111111",
+        "backfill/repair-finding-scan.json"
+       ],
+       [
+        "save_queue"
+       ]
+      ],
+      "delivery": {},
+      "outside_untouched": true,
+      "pending": {},
+      "queue": "{\"items\":[{\"cycles\":[],\"id\":\"backfill-finding-5555555555555555555555555555555555555555555555555555555555555555\",\"kind\":\"merged\",\"pr\":0,\"repair_runs\":{\"backfill-5555555555555555555555555555555555555555555555555555555555555555\":{\"base\":\"1111111111111111111111111111111111111111\",\"branch\":null,\"canonical_finding_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"jobs\":[\"crq-backfill-5555555555555555555555555555555555555555555555555555555555555555\"],\"open_pr\":false,\"pin\":\"1111111111111111111111111111111111111111\",\"round\":1,\"state\":\"queued\"}},\"state\":\"repairing\"}]}",
+      "queue_saves": [
+       "{\"items\":[{\"cycles\":[],\"id\":\"backfill-finding-5555555555555555555555555555555555555555555555555555555555555555\",\"kind\":\"merged\",\"pr\":0,\"repair_runs\":{\"backfill-5555555555555555555555555555555555555555555555555555555555555555\":{\"base\":\"1111111111111111111111111111111111111111\",\"branch\":null,\"canonical_finding_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"jobs\":[\"crq-backfill-5555555555555555555555555555555555555555555555555555555555555555\"],\"open_pr\":false,\"pin\":\"1111111111111111111111111111111111111111\",\"round\":1,\"state\":\"queued\"}},\"state\":\"repairing\"}]}"
+      ],
+      "receipts": {},
+      "repair_inbox": {
+       "crq-backfill-5555555555555555555555555555555555555555555555555555555555555555": "{\"branch\":null,\"canonical_finding_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"cycle\":null,\"finding\":{\"body\":\"Title\\nBody\",\"line\":1,\"path\":\"src/a.ts\",\"severity\":\"major\"},\"item\":\"backfill-finding-5555555555555555555555555555555555555555555555555555555555555555\",\"job\":\"crq-backfill-5555555555555555555555555555555555555555555555555555555555555555\",\"kind\":\"merged\",\"pr\":0,\"prior\":null,\"recurrence\":false,\"repair_base\":\"1111111111111111111111111111111111111111\",\"repair_round\":1,\"review_diff\":\"\",\"review_id\":\"9999999999999999999999999999999999999999999999999999999999999999\",\"run\":\"backfill-5555555555555555555555555555555555555555555555555555555555555555\"}"
+      },
+      "returns": "{\"acknowledgement\":\"69866300fd06a408e572207fc65270616bdc25595e099ebd80405e480ee816c6\",\"repair_task\":\"crq-backfill-5555555555555555555555555555555555555555555555555555555555555555\"}",
+      "rows": {},
+      "trace": [
+       "write:inbox/crq-backfill-5555555555555555555555555555555555555555555555555555555555555555.json"
+      ],
+      "tree": [
+       "state/repair/inbox/crq-backfill-5555555555555555555555555555555555555555555555555555555555555555.json"
+      ]
+     }
+    ]
+   },
+   "spec": {
+    "scan_return": [
+     true,
+     null,
+     9
+    ],
+    "steps": [
+     {
+      "args": [
+       "5555555555555555555555555555555555555555555555555555555555555555",
+       {
+        "canonical_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "finding": {
+         "anchor_status": "verified",
+         "blob": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+         "body": "Body",
+         "id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+         "intervals": [
+          [
+           1,
+           2
+          ]
+         ],
+         "path": "src/a.ts",
+         "severity": "major",
+         "source_id": null,
+         "status": "untriaged",
+         "title": "Title"
+        },
+        "finding_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.ts",
+        "review_id": "9999999999999999999999999999999999999999999999999999999999999999",
+        "target": "1111111111111111111111111111111111111111"
+       }
+      ],
+      "method": "accept",
+      "transport": {
+       "mode": "configured"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "accept-configured-scan-bare-bool-typeerror",
+   "result": {
+    "steps": [
+     {
+      "calls": [
+       [
+        "projection",
+        "repo",
+        "1111111111111111111111111111111111111111",
+        [
+         "src/a.ts"
+        ]
+       ],
+       [
+        "secret_scan",
+        "base-1111111111111111111111111111111111111111",
+        "head-1111111111111111111111111111111111111111",
+        "backfill/repair-scan.json"
+       ]
+      ],
+      "delivery": {},
+      "message": "'bool' object is not subscriptable",
+      "outside_untouched": true,
+      "pending": {},
+      "queue": "{\"items\":[]}",
+      "queue_saves": [],
+      "raises": "TypeError",
+      "receipts": {},
+      "repair_inbox": {},
+      "rows": {},
+      "trace": [],
+      "tree": []
+     }
+    ]
+   },
+   "spec": {
+    "scan_return": true,
+    "steps": [
+     {
+      "args": [
+       "5555555555555555555555555555555555555555555555555555555555555555",
+       {
+        "canonical_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "finding": {
+         "anchor_status": "verified",
+         "blob": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+         "body": "Body",
+         "id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+         "intervals": [
+          [
+           1,
+           2
+          ]
+         ],
+         "path": "src/a.ts",
+         "severity": "major",
+         "source_id": null,
+         "status": "untriaged",
+         "title": "Title"
+        },
+        "finding_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.ts",
+        "review_id": "9999999999999999999999999999999999999999999999999999999999999999",
+        "target": "1111111111111111111111111111111111111111"
+       }
+      ],
+      "method": "accept",
+      "transport": {
+       "mode": "configured"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "accept-configured-scan-empty-list-indexerror",
+   "result": {
+    "steps": [
+     {
+      "calls": [
+       [
+        "projection",
+        "repo",
+        "1111111111111111111111111111111111111111",
+        [
+         "src/a.ts"
+        ]
+       ],
+       [
+        "secret_scan",
+        "base-1111111111111111111111111111111111111111",
+        "head-1111111111111111111111111111111111111111",
+        "backfill/repair-scan.json"
+       ]
+      ],
+      "delivery": {},
+      "message": "list index out of range",
+      "outside_untouched": true,
+      "pending": {},
+      "queue": "{\"items\":[]}",
+      "queue_saves": [],
+      "raises": "IndexError",
+      "receipts": {},
+      "repair_inbox": {},
+      "rows": {},
+      "trace": [],
+      "tree": []
+     }
+    ]
+   },
+   "spec": {
+    "scan_return": [],
+    "steps": [
+     {
+      "args": [
+       "5555555555555555555555555555555555555555555555555555555555555555",
+       {
+        "canonical_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "finding": {
+         "anchor_status": "verified",
+         "blob": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+         "body": "Body",
+         "id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+         "intervals": [
+          [
+           1,
+           2
+          ]
+         ],
+         "path": "src/a.ts",
+         "severity": "major",
+         "source_id": null,
+         "status": "untriaged",
+         "title": "Title"
+        },
+        "finding_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.ts",
+        "review_id": "9999999999999999999999999999999999999999999999999999999999999999",
+        "target": "1111111111111111111111111111111111111111"
+       }
+      ],
+      "method": "accept",
+      "transport": {
+       "mode": "configured"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "accept-configured-scan-empty-string-indexerror",
+   "result": {
+    "steps": [
+     {
+      "calls": [
+       [
+        "projection",
+        "repo",
+        "1111111111111111111111111111111111111111",
+        [
+         "src/a.ts"
+        ]
+       ],
+       [
+        "secret_scan",
+        "base-1111111111111111111111111111111111111111",
+        "head-1111111111111111111111111111111111111111",
+        "backfill/repair-scan.json"
+       ]
+      ],
+      "delivery": {},
+      "message": "string index out of range",
+      "outside_untouched": true,
+      "pending": {},
+      "queue": "{\"items\":[]}",
+      "queue_saves": [],
+      "raises": "IndexError",
+      "receipts": {},
+      "repair_inbox": {},
+      "rows": {},
+      "trace": [],
+      "tree": []
+     }
+    ]
+   },
+   "spec": {
+    "scan_return": "",
+    "steps": [
+     {
+      "args": [
+       "5555555555555555555555555555555555555555555555555555555555555555",
+       {
+        "canonical_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "finding": {
+         "anchor_status": "verified",
+         "blob": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+         "body": "Body",
+         "id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+         "intervals": [
+          [
+           1,
+           2
+          ]
+         ],
+         "path": "src/a.ts",
+         "severity": "major",
+         "source_id": null,
+         "status": "untriaged",
+         "title": "Title"
+        },
+        "finding_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.ts",
+        "review_id": "9999999999999999999999999999999999999999999999999999999999999999",
+        "target": "1111111111111111111111111111111111111111"
+       }
+      ],
+      "method": "accept",
+      "transport": {
+       "mode": "configured"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "accept-configured-scan-empty-dict-keyerror",
+   "result": {
+    "steps": [
+     {
+      "calls": [
+       [
+        "projection",
+        "repo",
+        "1111111111111111111111111111111111111111",
+        [
+         "src/a.ts"
+        ]
+       ],
+       [
+        "secret_scan",
+        "base-1111111111111111111111111111111111111111",
+        "head-1111111111111111111111111111111111111111",
+        "backfill/repair-scan.json"
+       ]
+      ],
+      "delivery": {},
+      "message": "0",
+      "outside_untouched": true,
+      "pending": {},
+      "queue": "{\"items\":[]}",
+      "queue_saves": [],
+      "raises": "KeyError",
+      "receipts": {},
+      "repair_inbox": {},
+      "rows": {},
+      "trace": [],
+      "tree": []
+     }
+    ]
+   },
+   "spec": {
+    "scan_return": {},
+    "steps": [
+     {
+      "args": [
+       "5555555555555555555555555555555555555555555555555555555555555555",
+       {
+        "canonical_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "finding": {
+         "anchor_status": "verified",
+         "blob": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+         "body": "Body",
+         "id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+         "intervals": [
+          [
+           1,
+           2
+          ]
+         ],
+         "path": "src/a.ts",
+         "severity": "major",
+         "source_id": null,
+         "status": "untriaged",
+         "title": "Title"
+        },
+        "finding_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.ts",
+        "review_id": "9999999999999999999999999999999999999999999999999999999999999999",
+        "target": "1111111111111111111111111111111111111111"
+       }
+      ],
+      "method": "accept",
+      "transport": {
+       "mode": "configured"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "accept-configured-scan-string-first-char-truthy",
+   "result": {
+    "steps": [
+     {
+      "calls": [
+       [
+        "projection",
+        "repo",
+        "1111111111111111111111111111111111111111",
+        [
+         "src/a.ts"
+        ]
+       ],
+       [
+        "secret_scan",
+        "base-1111111111111111111111111111111111111111",
+        "head-1111111111111111111111111111111111111111",
+        "backfill/repair-scan.json"
+       ],
+       [
+        "secret_scan_diff",
+        "diff --git a/crq-finding.txt b/crq-finding.txt\n--- /dev/null\n+++ b/crq-finding.txt\n@@ -0,0 +1,2 @@\n+Title\n+Body\n",
+        null,
+        "1111111111111111111111111111111111111111",
+        "backfill/repair-finding-scan.json"
+       ],
+       [
+        "secret_scan_diff",
+        "diff --git a/src/a.ts b/src/a.ts\n--- /dev/null\n+++ b/src/a.ts\n@@ -0,0 +1,2 @@\n+Title\n+Body\n",
+        null,
+        "1111111111111111111111111111111111111111",
+        "backfill/repair-finding-scan.json"
+       ],
+       [
+        "save_queue"
+       ]
+      ],
+      "delivery": {},
+      "outside_untouched": true,
+      "pending": {},
+      "queue": "{\"items\":[{\"cycles\":[],\"id\":\"backfill-finding-5555555555555555555555555555555555555555555555555555555555555555\",\"kind\":\"merged\",\"pr\":0,\"repair_runs\":{\"backfill-5555555555555555555555555555555555555555555555555555555555555555\":{\"base\":\"1111111111111111111111111111111111111111\",\"branch\":null,\"canonical_finding_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"jobs\":[\"crq-backfill-5555555555555555555555555555555555555555555555555555555555555555\"],\"open_pr\":false,\"pin\":\"1111111111111111111111111111111111111111\",\"round\":1,\"state\":\"queued\"}},\"state\":\"repairing\"}]}",
+      "queue_saves": [
+       "{\"items\":[{\"cycles\":[],\"id\":\"backfill-finding-5555555555555555555555555555555555555555555555555555555555555555\",\"kind\":\"merged\",\"pr\":0,\"repair_runs\":{\"backfill-5555555555555555555555555555555555555555555555555555555555555555\":{\"base\":\"1111111111111111111111111111111111111111\",\"branch\":null,\"canonical_finding_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"jobs\":[\"crq-backfill-5555555555555555555555555555555555555555555555555555555555555555\"],\"open_pr\":false,\"pin\":\"1111111111111111111111111111111111111111\",\"round\":1,\"state\":\"queued\"}},\"state\":\"repairing\"}]}"
+      ],
+      "receipts": {},
+      "repair_inbox": {
+       "crq-backfill-5555555555555555555555555555555555555555555555555555555555555555": "{\"branch\":null,\"canonical_finding_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"cycle\":null,\"finding\":{\"body\":\"Title\\nBody\",\"line\":1,\"path\":\"src/a.ts\",\"severity\":\"major\"},\"item\":\"backfill-finding-5555555555555555555555555555555555555555555555555555555555555555\",\"job\":\"crq-backfill-5555555555555555555555555555555555555555555555555555555555555555\",\"kind\":\"merged\",\"pr\":0,\"prior\":null,\"recurrence\":false,\"repair_base\":\"1111111111111111111111111111111111111111\",\"repair_round\":1,\"review_diff\":\"\",\"review_id\":\"9999999999999999999999999999999999999999999999999999999999999999\",\"run\":\"backfill-5555555555555555555555555555555555555555555555555555555555555555\"}"
+      },
+      "returns": "{\"acknowledgement\":\"69866300fd06a408e572207fc65270616bdc25595e099ebd80405e480ee816c6\",\"repair_task\":\"crq-backfill-5555555555555555555555555555555555555555555555555555555555555555\"}",
+      "rows": {},
+      "trace": [
+       "write:inbox/crq-backfill-5555555555555555555555555555555555555555555555555555555555555555.json"
+      ],
+      "tree": [
+       "state/repair/inbox/crq-backfill-5555555555555555555555555555555555555555555555555555555555555555.json"
+      ]
+     }
+    ]
+   },
+   "spec": {
+    "scan_return": "0x",
+    "steps": [
+     {
+      "args": [
+       "5555555555555555555555555555555555555555555555555555555555555555",
+       {
+        "canonical_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "finding": {
+         "anchor_status": "verified",
+         "blob": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+         "body": "Body",
+         "id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+         "intervals": [
+          [
+           1,
+           2
+          ]
+         ],
+         "path": "src/a.ts",
+         "severity": "major",
+         "source_id": null,
+         "status": "untriaged",
+         "title": "Title"
+        },
+        "finding_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.ts",
+        "review_id": "9999999999999999999999999999999999999999999999999999999999999999",
+        "target": "1111111111111111111111111111111111111111"
+       }
+      ],
+      "method": "accept",
+      "transport": {
+       "mode": "configured"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "accept-configured-finding-tuple-false-refused",
+   "result": {
+    "steps": [
+     {
+      "calls": [
+       [
+        "projection",
+        "repo",
+        "1111111111111111111111111111111111111111",
+        [
+         "src/a.ts"
+        ]
+       ],
+       [
+        "secret_scan",
+        "base-1111111111111111111111111111111111111111",
+        "head-1111111111111111111111111111111111111111",
+        "backfill/repair-scan.json"
+       ],
+       [
+        "secret_scan_diff",
+        "diff --git a/crq-finding.txt b/crq-finding.txt\n--- /dev/null\n+++ b/crq-finding.txt\n@@ -0,0 +1,2 @@\n+Title\n+Body\n",
+        null,
+        "1111111111111111111111111111111111111111",
+        "backfill/repair-finding-scan.json"
+       ]
+      ],
+      "delivery": {},
+      "message": "repair finding secret scan rejected",
+      "outside_untouched": true,
+      "pending": {},
+      "queue": "{\"items\":[]}",
+      "queue_saves": [],
+      "raises": "IntegrityError",
+      "receipts": {},
+      "repair_inbox": {},
+      "rows": {},
+      "trace": [],
+      "tree": []
+     }
+    ]
+   },
+   "spec": {
+    "diff_return": [
+     false,
+     null
+    ],
+    "steps": [
+     {
+      "args": [
+       "5555555555555555555555555555555555555555555555555555555555555555",
+       {
+        "canonical_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "finding": {
+         "anchor_status": "verified",
+         "blob": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+         "body": "Body",
+         "id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+         "intervals": [
+          [
+           1,
+           2
+          ]
+         ],
+         "path": "src/a.ts",
+         "severity": "major",
+         "source_id": null,
+         "status": "untriaged",
+         "title": "Title"
+        },
+        "finding_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.ts",
+        "review_id": "9999999999999999999999999999999999999999999999999999999999999999",
+        "target": "1111111111111111111111111111111111111111"
+       }
+      ],
+      "method": "accept",
+      "transport": {
+       "mode": "configured"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "accept-configured-finding-bare-true-typeerror",
+   "result": {
+    "steps": [
+     {
+      "calls": [
+       [
+        "projection",
+        "repo",
+        "1111111111111111111111111111111111111111",
+        [
+         "src/a.ts"
+        ]
+       ],
+       [
+        "secret_scan",
+        "base-1111111111111111111111111111111111111111",
+        "head-1111111111111111111111111111111111111111",
+        "backfill/repair-scan.json"
+       ],
+       [
+        "secret_scan_diff",
+        "diff --git a/crq-finding.txt b/crq-finding.txt\n--- /dev/null\n+++ b/crq-finding.txt\n@@ -0,0 +1,2 @@\n+Title\n+Body\n",
+        null,
+        "1111111111111111111111111111111111111111",
+        "backfill/repair-finding-scan.json"
+       ]
+      ],
+      "delivery": {},
+      "message": "'bool' object is not subscriptable",
+      "outside_untouched": true,
+      "pending": {},
+      "queue": "{\"items\":[]}",
+      "queue_saves": [],
+      "raises": "TypeError",
+      "receipts": {},
+      "repair_inbox": {},
+      "rows": {},
+      "trace": [],
+      "tree": []
+     }
+    ]
+   },
+   "spec": {
+    "diff_return": true,
+    "steps": [
+     {
+      "args": [
+       "5555555555555555555555555555555555555555555555555555555555555555",
+       {
+        "canonical_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "finding": {
+         "anchor_status": "verified",
+         "blob": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+         "body": "Body",
+         "id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+         "intervals": [
+          [
+           1,
+           2
+          ]
+         ],
+         "path": "src/a.ts",
+         "severity": "major",
+         "source_id": null,
+         "status": "untriaged",
+         "title": "Title"
+        },
+        "finding_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.ts",
+        "review_id": "9999999999999999999999999999999999999999999999999999999999999999",
+        "target": "1111111111111111111111111111111111111111"
+       }
+      ],
+      "method": "accept",
+      "transport": {
+       "mode": "configured"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "accept-configured-finding-empty-list-indexerror",
+   "result": {
+    "steps": [
+     {
+      "calls": [
+       [
+        "projection",
+        "repo",
+        "1111111111111111111111111111111111111111",
+        [
+         "src/a.ts"
+        ]
+       ],
+       [
+        "secret_scan",
+        "base-1111111111111111111111111111111111111111",
+        "head-1111111111111111111111111111111111111111",
+        "backfill/repair-scan.json"
+       ],
+       [
+        "secret_scan_diff",
+        "diff --git a/crq-finding.txt b/crq-finding.txt\n--- /dev/null\n+++ b/crq-finding.txt\n@@ -0,0 +1,2 @@\n+Title\n+Body\n",
+        null,
+        "1111111111111111111111111111111111111111",
+        "backfill/repair-finding-scan.json"
+       ]
+      ],
+      "delivery": {},
+      "message": "list index out of range",
+      "outside_untouched": true,
+      "pending": {},
+      "queue": "{\"items\":[]}",
+      "queue_saves": [],
+      "raises": "IndexError",
+      "receipts": {},
+      "repair_inbox": {},
+      "rows": {},
+      "trace": [],
+      "tree": []
+     }
+    ]
+   },
+   "spec": {
+    "diff_return": [],
+    "steps": [
+     {
+      "args": [
+       "5555555555555555555555555555555555555555555555555555555555555555",
+       {
+        "canonical_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "finding": {
+         "anchor_status": "verified",
+         "blob": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+         "body": "Body",
+         "id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+         "intervals": [
+          [
+           1,
+           2
+          ]
+         ],
+         "path": "src/a.ts",
+         "severity": "major",
+         "source_id": null,
+         "status": "untriaged",
+         "title": "Title"
+        },
+        "finding_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.ts",
+        "review_id": "9999999999999999999999999999999999999999999999999999999999999999",
+        "target": "1111111111111111111111111111111111111111"
+       }
+      ],
+      "method": "accept",
+      "transport": {
+       "mode": "configured"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "accept-configured-instructions-tuple-false-valueerror",
+   "result": {
+    "steps": [
+     {
+      "calls": [
+       [
+        "projection",
+        "repo",
+        "1111111111111111111111111111111111111111",
+        [
+         "src/a.ts"
+        ]
+       ],
+       [
+        "secret_scan",
+        "base-1111111111111111111111111111111111111111",
+        "head-1111111111111111111111111111111111111111",
+        "backfill/repair-scan.json"
+       ],
+       [
+        "secret_scan_diff",
+        "diff --git a/crq-finding.txt b/crq-finding.txt\n--- /dev/null\n+++ b/crq-finding.txt\n@@ -0,0 +1,2 @@\n+Title\n+Body\n",
+        null,
+        "1111111111111111111111111111111111111111",
+        "backfill/repair-finding-scan.json"
+       ],
+       [
+        "secret_scan_diff",
+        "diff --git a/src/a.ts b/src/a.ts\n--- /dev/null\n+++ b/src/a.ts\n@@ -0,0 +1,2 @@\n+Title\n+Body\n",
+        null,
+        "1111111111111111111111111111111111111111",
+        "backfill/repair-finding-scan.json"
+       ],
+       [
+        "secret_scan_diff",
+        "diff --git a/crq-fix-instructions.txt b/crq-fix-instructions.txt\n--- /dev/null\n+++ b/crq-fix-instructions.txt\n@@ -0,0 +1,1 @@\n+go on\n",
+        null,
+        "1111111111111111111111111111111111111111",
+        "backfill/repair-instructions-scan.json"
+       ]
+      ],
+      "delivery": {},
+      "message": "fix instructions secret scan failed",
+      "outside_untouched": true,
+      "pending": {},
+      "queue": "{\"items\":[]}",
+      "queue_saves": [],
+      "raises": "ValueError",
+      "receipts": {},
+      "repair_inbox": {},
+      "rows": {},
+      "trace": [],
+      "tree": []
+     }
+    ]
+   },
+   "spec": {
+    "instructions_return": [
+     false,
+     null
+    ],
+    "steps": [
+     {
+      "args": [
+       "5555555555555555555555555555555555555555555555555555555555555555",
+       {
+        "canonical_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "finding": {
+         "anchor_status": "verified",
+         "blob": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+         "body": "Body",
+         "id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+         "intervals": [
+          [
+           1,
+           2
+          ]
+         ],
+         "path": "src/a.ts",
+         "severity": "major",
+         "source_id": null,
+         "status": "untriaged",
+         "title": "Title"
+        },
+        "finding_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.ts",
+        "prior_repair_task": "crq-backfill-7777777777777777777777777777777777777777777777777777777777777777",
+        "retry_instructions": "go on",
+        "review_id": "9999999999999999999999999999999999999999999999999999999999999999",
+        "target": "1111111111111111111111111111111111111111"
+       }
+      ],
+      "method": "accept",
+      "transport": {
+       "mode": "configured"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "accept-configured-instructions-tuple-true-ok",
+   "result": {
+    "steps": [
+     {
+      "calls": [
+       [
+        "projection",
+        "repo",
+        "1111111111111111111111111111111111111111",
+        [
+         "src/a.ts"
+        ]
+       ],
+       [
+        "secret_scan",
+        "base-1111111111111111111111111111111111111111",
+        "head-1111111111111111111111111111111111111111",
+        "backfill/repair-scan.json"
+       ],
+       [
+        "secret_scan_diff",
+        "diff --git a/crq-finding.txt b/crq-finding.txt\n--- /dev/null\n+++ b/crq-finding.txt\n@@ -0,0 +1,2 @@\n+Title\n+Body\n",
+        null,
+        "1111111111111111111111111111111111111111",
+        "backfill/repair-finding-scan.json"
+       ],
+       [
+        "secret_scan_diff",
+        "diff --git a/src/a.ts b/src/a.ts\n--- /dev/null\n+++ b/src/a.ts\n@@ -0,0 +1,2 @@\n+Title\n+Body\n",
+        null,
+        "1111111111111111111111111111111111111111",
+        "backfill/repair-finding-scan.json"
+       ],
+       [
+        "secret_scan_diff",
+        "diff --git a/crq-fix-instructions.txt b/crq-fix-instructions.txt\n--- /dev/null\n+++ b/crq-fix-instructions.txt\n@@ -0,0 +1,1 @@\n+go on\n",
+        null,
+        "1111111111111111111111111111111111111111",
+        "backfill/repair-instructions-scan.json"
+       ],
+       [
+        "save_queue"
+       ]
+      ],
+      "delivery": {},
+      "outside_untouched": true,
+      "pending": {},
+      "queue": "{\"items\":[{\"cycles\":[],\"id\":\"backfill-finding-5555555555555555555555555555555555555555555555555555555555555555\",\"kind\":\"merged\",\"pr\":0,\"repair_runs\":{\"backfill-5555555555555555555555555555555555555555555555555555555555555555\":{\"base\":\"1111111111111111111111111111111111111111\",\"branch\":null,\"canonical_finding_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"jobs\":[\"crq-backfill-5555555555555555555555555555555555555555555555555555555555555555\"],\"open_pr\":false,\"pin\":\"1111111111111111111111111111111111111111\",\"round\":1,\"state\":\"queued\"}},\"state\":\"repairing\"}]}",
+      "queue_saves": [
+       "{\"items\":[{\"cycles\":[],\"id\":\"backfill-finding-5555555555555555555555555555555555555555555555555555555555555555\",\"kind\":\"merged\",\"pr\":0,\"repair_runs\":{\"backfill-5555555555555555555555555555555555555555555555555555555555555555\":{\"base\":\"1111111111111111111111111111111111111111\",\"branch\":null,\"canonical_finding_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"jobs\":[\"crq-backfill-5555555555555555555555555555555555555555555555555555555555555555\"],\"open_pr\":false,\"pin\":\"1111111111111111111111111111111111111111\",\"round\":1,\"state\":\"queued\"}},\"state\":\"repairing\"}]}"
+      ],
+      "receipts": {},
+      "repair_inbox": {
+       "crq-backfill-5555555555555555555555555555555555555555555555555555555555555555": "{\"branch\":null,\"canonical_finding_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"cycle\":null,\"finding\":{\"body\":\"Title\\nBody\",\"line\":1,\"path\":\"src/a.ts\",\"severity\":\"major\"},\"fix_instructions\":\"go on\",\"item\":\"backfill-finding-5555555555555555555555555555555555555555555555555555555555555555\",\"job\":\"crq-backfill-5555555555555555555555555555555555555555555555555555555555555555\",\"kind\":\"merged\",\"pr\":0,\"prior\":null,\"prior_repair_task\":\"crq-backfill-7777777777777777777777777777777777777777777777777777777777777777\",\"recurrence\":false,\"repair_base\":\"1111111111111111111111111111111111111111\",\"repair_round\":1,\"review_diff\":\"\",\"review_id\":\"9999999999999999999999999999999999999999999999999999999999999999\",\"run\":\"backfill-5555555555555555555555555555555555555555555555555555555555555555\"}"
+      },
+      "returns": "{\"acknowledgement\":\"6d8d2b7b1d32ec359f08930a594c1012d0282ea9981157022466cd8e531c2a30\",\"repair_task\":\"crq-backfill-5555555555555555555555555555555555555555555555555555555555555555\"}",
+      "rows": {},
+      "trace": [
+       "write:inbox/crq-backfill-5555555555555555555555555555555555555555555555555555555555555555.json"
+      ],
+      "tree": [
+       "state/repair/inbox/crq-backfill-5555555555555555555555555555555555555555555555555555555555555555.json"
+      ]
+     }
+    ]
+   },
+   "spec": {
+    "instructions_return": [
+     true,
+     null
+    ],
+    "steps": [
+     {
+      "args": [
+       "5555555555555555555555555555555555555555555555555555555555555555",
+       {
+        "canonical_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "finding": {
+         "anchor_status": "verified",
+         "blob": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+         "body": "Body",
+         "id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+         "intervals": [
+          [
+           1,
+           2
+          ]
+         ],
+         "path": "src/a.ts",
+         "severity": "major",
+         "source_id": null,
+         "status": "untriaged",
+         "title": "Title"
+        },
+        "finding_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.ts",
+        "prior_repair_task": "crq-backfill-7777777777777777777777777777777777777777777777777777777777777777",
+        "retry_instructions": "go on",
+        "review_id": "9999999999999999999999999999999999999999999999999999999999999999",
+        "target": "1111111111111111111111111111111111111111"
+       }
+      ],
+      "method": "accept",
+      "transport": {
+       "mode": "configured"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "accept-configured-instructions-bare-bool-typeerror",
+   "result": {
+    "steps": [
+     {
+      "calls": [
+       [
+        "projection",
+        "repo",
+        "1111111111111111111111111111111111111111",
+        [
+         "src/a.ts"
+        ]
+       ],
+       [
+        "secret_scan",
+        "base-1111111111111111111111111111111111111111",
+        "head-1111111111111111111111111111111111111111",
+        "backfill/repair-scan.json"
+       ],
+       [
+        "secret_scan_diff",
+        "diff --git a/crq-finding.txt b/crq-finding.txt\n--- /dev/null\n+++ b/crq-finding.txt\n@@ -0,0 +1,2 @@\n+Title\n+Body\n",
+        null,
+        "1111111111111111111111111111111111111111",
+        "backfill/repair-finding-scan.json"
+       ],
+       [
+        "secret_scan_diff",
+        "diff --git a/src/a.ts b/src/a.ts\n--- /dev/null\n+++ b/src/a.ts\n@@ -0,0 +1,2 @@\n+Title\n+Body\n",
+        null,
+        "1111111111111111111111111111111111111111",
+        "backfill/repair-finding-scan.json"
+       ],
+       [
+        "secret_scan_diff",
+        "diff --git a/crq-fix-instructions.txt b/crq-fix-instructions.txt\n--- /dev/null\n+++ b/crq-fix-instructions.txt\n@@ -0,0 +1,1 @@\n+go on\n",
+        null,
+        "1111111111111111111111111111111111111111",
+        "backfill/repair-instructions-scan.json"
+       ]
+      ],
+      "delivery": {},
+      "message": "cannot unpack non-iterable bool object",
+      "outside_untouched": true,
+      "pending": {},
+      "queue": "{\"items\":[]}",
+      "queue_saves": [],
+      "raises": "TypeError",
+      "receipts": {},
+      "repair_inbox": {},
+      "rows": {},
+      "trace": [],
+      "tree": []
+     }
+    ]
+   },
+   "spec": {
+    "instructions_return": true,
+    "steps": [
+     {
+      "args": [
+       "5555555555555555555555555555555555555555555555555555555555555555",
+       {
+        "canonical_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "finding": {
+         "anchor_status": "verified",
+         "blob": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+         "body": "Body",
+         "id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+         "intervals": [
+          [
+           1,
+           2
+          ]
+         ],
+         "path": "src/a.ts",
+         "severity": "major",
+         "source_id": null,
+         "status": "untriaged",
+         "title": "Title"
+        },
+        "finding_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.ts",
+        "prior_repair_task": "crq-backfill-7777777777777777777777777777777777777777777777777777777777777777",
+        "retry_instructions": "go on",
+        "review_id": "9999999999999999999999999999999999999999999999999999999999999999",
+        "target": "1111111111111111111111111111111111111111"
+       }
+      ],
+      "method": "accept",
+      "transport": {
+       "mode": "configured"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "accept-configured-instructions-one-element-valueerror",
+   "result": {
+    "steps": [
+     {
+      "calls": [
+       [
+        "projection",
+        "repo",
+        "1111111111111111111111111111111111111111",
+        [
+         "src/a.ts"
+        ]
+       ],
+       [
+        "secret_scan",
+        "base-1111111111111111111111111111111111111111",
+        "head-1111111111111111111111111111111111111111",
+        "backfill/repair-scan.json"
+       ],
+       [
+        "secret_scan_diff",
+        "diff --git a/crq-finding.txt b/crq-finding.txt\n--- /dev/null\n+++ b/crq-finding.txt\n@@ -0,0 +1,2 @@\n+Title\n+Body\n",
+        null,
+        "1111111111111111111111111111111111111111",
+        "backfill/repair-finding-scan.json"
+       ],
+       [
+        "secret_scan_diff",
+        "diff --git a/src/a.ts b/src/a.ts\n--- /dev/null\n+++ b/src/a.ts\n@@ -0,0 +1,2 @@\n+Title\n+Body\n",
+        null,
+        "1111111111111111111111111111111111111111",
+        "backfill/repair-finding-scan.json"
+       ],
+       [
+        "secret_scan_diff",
+        "diff --git a/crq-fix-instructions.txt b/crq-fix-instructions.txt\n--- /dev/null\n+++ b/crq-fix-instructions.txt\n@@ -0,0 +1,1 @@\n+go on\n",
+        null,
+        "1111111111111111111111111111111111111111",
+        "backfill/repair-instructions-scan.json"
+       ]
+      ],
+      "delivery": {},
+      "message": "not enough values to unpack (expected 2, got 1)",
+      "outside_untouched": true,
+      "pending": {},
+      "queue": "{\"items\":[]}",
+      "queue_saves": [],
+      "raises": "ValueError",
+      "receipts": {},
+      "repair_inbox": {},
+      "rows": {},
+      "trace": [],
+      "tree": []
+     }
+    ]
+   },
+   "spec": {
+    "instructions_return": [
+     true
+    ],
+    "steps": [
+     {
+      "args": [
+       "5555555555555555555555555555555555555555555555555555555555555555",
+       {
+        "canonical_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "finding": {
+         "anchor_status": "verified",
+         "blob": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+         "body": "Body",
+         "id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+         "intervals": [
+          [
+           1,
+           2
+          ]
+         ],
+         "path": "src/a.ts",
+         "severity": "major",
+         "source_id": null,
+         "status": "untriaged",
+         "title": "Title"
+        },
+        "finding_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.ts",
+        "prior_repair_task": "crq-backfill-7777777777777777777777777777777777777777777777777777777777777777",
+        "retry_instructions": "go on",
+        "review_id": "9999999999999999999999999999999999999999999999999999999999999999",
+        "target": "1111111111111111111111111111111111111111"
+       }
+      ],
+      "method": "accept",
+      "transport": {
+       "mode": "configured"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "accept-configured-instructions-three-elements-valueerror",
+   "result": {
+    "steps": [
+     {
+      "calls": [
+       [
+        "projection",
+        "repo",
+        "1111111111111111111111111111111111111111",
+        [
+         "src/a.ts"
+        ]
+       ],
+       [
+        "secret_scan",
+        "base-1111111111111111111111111111111111111111",
+        "head-1111111111111111111111111111111111111111",
+        "backfill/repair-scan.json"
+       ],
+       [
+        "secret_scan_diff",
+        "diff --git a/crq-finding.txt b/crq-finding.txt\n--- /dev/null\n+++ b/crq-finding.txt\n@@ -0,0 +1,2 @@\n+Title\n+Body\n",
+        null,
+        "1111111111111111111111111111111111111111",
+        "backfill/repair-finding-scan.json"
+       ],
+       [
+        "secret_scan_diff",
+        "diff --git a/src/a.ts b/src/a.ts\n--- /dev/null\n+++ b/src/a.ts\n@@ -0,0 +1,2 @@\n+Title\n+Body\n",
+        null,
+        "1111111111111111111111111111111111111111",
+        "backfill/repair-finding-scan.json"
+       ],
+       [
+        "secret_scan_diff",
+        "diff --git a/crq-fix-instructions.txt b/crq-fix-instructions.txt\n--- /dev/null\n+++ b/crq-fix-instructions.txt\n@@ -0,0 +1,1 @@\n+go on\n",
+        null,
+        "1111111111111111111111111111111111111111",
+        "backfill/repair-instructions-scan.json"
+       ]
+      ],
+      "delivery": {},
+      "message": "too many values to unpack (expected 2, got 3)",
+      "outside_untouched": true,
+      "pending": {},
+      "queue": "{\"items\":[]}",
+      "queue_saves": [],
+      "raises": "ValueError",
+      "receipts": {},
+      "repair_inbox": {},
+      "rows": {},
+      "trace": [],
+      "tree": []
+     }
+    ]
+   },
+   "spec": {
+    "instructions_return": [
+     true,
+     null,
+     1
+    ],
+    "steps": [
+     {
+      "args": [
+       "5555555555555555555555555555555555555555555555555555555555555555",
+       {
+        "canonical_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "finding": {
+         "anchor_status": "verified",
+         "blob": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+         "body": "Body",
+         "id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+         "intervals": [
+          [
+           1,
+           2
+          ]
+         ],
+         "path": "src/a.ts",
+         "severity": "major",
+         "source_id": null,
+         "status": "untriaged",
+         "title": "Title"
+        },
+        "finding_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.ts",
+        "prior_repair_task": "crq-backfill-7777777777777777777777777777777777777777777777777777777777777777",
+        "retry_instructions": "go on",
+        "review_id": "9999999999999999999999999999999999999999999999999999999999999999",
+        "target": "1111111111111111111111111111111111111111"
+       }
+      ],
+      "method": "accept",
+      "transport": {
+       "mode": "configured"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "accept-configured-instructions-two-char-string-unpacks",
+   "result": {
+    "steps": [
+     {
+      "calls": [
+       [
+        "projection",
+        "repo",
+        "1111111111111111111111111111111111111111",
+        [
+         "src/a.ts"
+        ]
+       ],
+       [
+        "secret_scan",
+        "base-1111111111111111111111111111111111111111",
+        "head-1111111111111111111111111111111111111111",
+        "backfill/repair-scan.json"
+       ],
+       [
+        "secret_scan_diff",
+        "diff --git a/crq-finding.txt b/crq-finding.txt\n--- /dev/null\n+++ b/crq-finding.txt\n@@ -0,0 +1,2 @@\n+Title\n+Body\n",
+        null,
+        "1111111111111111111111111111111111111111",
+        "backfill/repair-finding-scan.json"
+       ],
+       [
+        "secret_scan_diff",
+        "diff --git a/src/a.ts b/src/a.ts\n--- /dev/null\n+++ b/src/a.ts\n@@ -0,0 +1,2 @@\n+Title\n+Body\n",
+        null,
+        "1111111111111111111111111111111111111111",
+        "backfill/repair-finding-scan.json"
+       ],
+       [
+        "secret_scan_diff",
+        "diff --git a/crq-fix-instructions.txt b/crq-fix-instructions.txt\n--- /dev/null\n+++ b/crq-fix-instructions.txt\n@@ -0,0 +1,1 @@\n+go on\n",
+        null,
+        "1111111111111111111111111111111111111111",
+        "backfill/repair-instructions-scan.json"
+       ],
+       [
+        "save_queue"
+       ]
+      ],
+      "delivery": {},
+      "outside_untouched": true,
+      "pending": {},
+      "queue": "{\"items\":[{\"cycles\":[],\"id\":\"backfill-finding-5555555555555555555555555555555555555555555555555555555555555555\",\"kind\":\"merged\",\"pr\":0,\"repair_runs\":{\"backfill-5555555555555555555555555555555555555555555555555555555555555555\":{\"base\":\"1111111111111111111111111111111111111111\",\"branch\":null,\"canonical_finding_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"jobs\":[\"crq-backfill-5555555555555555555555555555555555555555555555555555555555555555\"],\"open_pr\":false,\"pin\":\"1111111111111111111111111111111111111111\",\"round\":1,\"state\":\"queued\"}},\"state\":\"repairing\"}]}",
+      "queue_saves": [
+       "{\"items\":[{\"cycles\":[],\"id\":\"backfill-finding-5555555555555555555555555555555555555555555555555555555555555555\",\"kind\":\"merged\",\"pr\":0,\"repair_runs\":{\"backfill-5555555555555555555555555555555555555555555555555555555555555555\":{\"base\":\"1111111111111111111111111111111111111111\",\"branch\":null,\"canonical_finding_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"jobs\":[\"crq-backfill-5555555555555555555555555555555555555555555555555555555555555555\"],\"open_pr\":false,\"pin\":\"1111111111111111111111111111111111111111\",\"round\":1,\"state\":\"queued\"}},\"state\":\"repairing\"}]}"
+      ],
+      "receipts": {},
+      "repair_inbox": {
+       "crq-backfill-5555555555555555555555555555555555555555555555555555555555555555": "{\"branch\":null,\"canonical_finding_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"cycle\":null,\"finding\":{\"body\":\"Title\\nBody\",\"line\":1,\"path\":\"src/a.ts\",\"severity\":\"major\"},\"fix_instructions\":\"go on\",\"item\":\"backfill-finding-5555555555555555555555555555555555555555555555555555555555555555\",\"job\":\"crq-backfill-5555555555555555555555555555555555555555555555555555555555555555\",\"kind\":\"merged\",\"pr\":0,\"prior\":null,\"prior_repair_task\":\"crq-backfill-7777777777777777777777777777777777777777777777777777777777777777\",\"recurrence\":false,\"repair_base\":\"1111111111111111111111111111111111111111\",\"repair_round\":1,\"review_diff\":\"\",\"review_id\":\"9999999999999999999999999999999999999999999999999999999999999999\",\"run\":\"backfill-5555555555555555555555555555555555555555555555555555555555555555\"}"
+      },
+      "returns": "{\"acknowledgement\":\"6d8d2b7b1d32ec359f08930a594c1012d0282ea9981157022466cd8e531c2a30\",\"repair_task\":\"crq-backfill-5555555555555555555555555555555555555555555555555555555555555555\"}",
+      "rows": {},
+      "trace": [
+       "write:inbox/crq-backfill-5555555555555555555555555555555555555555555555555555555555555555.json"
+      ],
+      "tree": [
+       "state/repair/inbox/crq-backfill-5555555555555555555555555555555555555555555555555555555555555555.json"
+      ]
+     }
+    ]
+   },
+   "spec": {
+    "instructions_return": "ab",
+    "steps": [
+     {
+      "args": [
+       "5555555555555555555555555555555555555555555555555555555555555555",
+       {
+        "canonical_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "finding": {
+         "anchor_status": "verified",
+         "blob": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+         "body": "Body",
+         "id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+         "intervals": [
+          [
+           1,
+           2
+          ]
+         ],
+         "path": "src/a.ts",
+         "severity": "major",
+         "source_id": null,
+         "status": "untriaged",
+         "title": "Title"
+        },
+        "finding_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.ts",
+        "prior_repair_task": "crq-backfill-7777777777777777777777777777777777777777777777777777777777777777",
+        "retry_instructions": "go on",
+        "review_id": "9999999999999999999999999999999999999999999999999999999999999999",
+        "target": "1111111111111111111111111111111111111111"
+       }
+      ],
+      "method": "accept",
+      "transport": {
+       "mode": "configured"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "accept-configured-instructions-two-key-dict-unpacks",
+   "result": {
+    "steps": [
+     {
+      "calls": [
+       [
+        "projection",
+        "repo",
+        "1111111111111111111111111111111111111111",
+        [
+         "src/a.ts"
+        ]
+       ],
+       [
+        "secret_scan",
+        "base-1111111111111111111111111111111111111111",
+        "head-1111111111111111111111111111111111111111",
+        "backfill/repair-scan.json"
+       ],
+       [
+        "secret_scan_diff",
+        "diff --git a/crq-finding.txt b/crq-finding.txt\n--- /dev/null\n+++ b/crq-finding.txt\n@@ -0,0 +1,2 @@\n+Title\n+Body\n",
+        null,
+        "1111111111111111111111111111111111111111",
+        "backfill/repair-finding-scan.json"
+       ],
+       [
+        "secret_scan_diff",
+        "diff --git a/src/a.ts b/src/a.ts\n--- /dev/null\n+++ b/src/a.ts\n@@ -0,0 +1,2 @@\n+Title\n+Body\n",
+        null,
+        "1111111111111111111111111111111111111111",
+        "backfill/repair-finding-scan.json"
+       ],
+       [
+        "secret_scan_diff",
+        "diff --git a/crq-fix-instructions.txt b/crq-fix-instructions.txt\n--- /dev/null\n+++ b/crq-fix-instructions.txt\n@@ -0,0 +1,1 @@\n+go on\n",
+        null,
+        "1111111111111111111111111111111111111111",
+        "backfill/repair-instructions-scan.json"
+       ],
+       [
+        "save_queue"
+       ]
+      ],
+      "delivery": {},
+      "outside_untouched": true,
+      "pending": {},
+      "queue": "{\"items\":[{\"cycles\":[],\"id\":\"backfill-finding-5555555555555555555555555555555555555555555555555555555555555555\",\"kind\":\"merged\",\"pr\":0,\"repair_runs\":{\"backfill-5555555555555555555555555555555555555555555555555555555555555555\":{\"base\":\"1111111111111111111111111111111111111111\",\"branch\":null,\"canonical_finding_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"jobs\":[\"crq-backfill-5555555555555555555555555555555555555555555555555555555555555555\"],\"open_pr\":false,\"pin\":\"1111111111111111111111111111111111111111\",\"round\":1,\"state\":\"queued\"}},\"state\":\"repairing\"}]}",
+      "queue_saves": [
+       "{\"items\":[{\"cycles\":[],\"id\":\"backfill-finding-5555555555555555555555555555555555555555555555555555555555555555\",\"kind\":\"merged\",\"pr\":0,\"repair_runs\":{\"backfill-5555555555555555555555555555555555555555555555555555555555555555\":{\"base\":\"1111111111111111111111111111111111111111\",\"branch\":null,\"canonical_finding_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"jobs\":[\"crq-backfill-5555555555555555555555555555555555555555555555555555555555555555\"],\"open_pr\":false,\"pin\":\"1111111111111111111111111111111111111111\",\"round\":1,\"state\":\"queued\"}},\"state\":\"repairing\"}]}"
+      ],
+      "receipts": {},
+      "repair_inbox": {
+       "crq-backfill-5555555555555555555555555555555555555555555555555555555555555555": "{\"branch\":null,\"canonical_finding_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"cycle\":null,\"finding\":{\"body\":\"Title\\nBody\",\"line\":1,\"path\":\"src/a.ts\",\"severity\":\"major\"},\"fix_instructions\":\"go on\",\"item\":\"backfill-finding-5555555555555555555555555555555555555555555555555555555555555555\",\"job\":\"crq-backfill-5555555555555555555555555555555555555555555555555555555555555555\",\"kind\":\"merged\",\"pr\":0,\"prior\":null,\"prior_repair_task\":\"crq-backfill-7777777777777777777777777777777777777777777777777777777777777777\",\"recurrence\":false,\"repair_base\":\"1111111111111111111111111111111111111111\",\"repair_round\":1,\"review_diff\":\"\",\"review_id\":\"9999999999999999999999999999999999999999999999999999999999999999\",\"run\":\"backfill-5555555555555555555555555555555555555555555555555555555555555555\"}"
+      },
+      "returns": "{\"acknowledgement\":\"6d8d2b7b1d32ec359f08930a594c1012d0282ea9981157022466cd8e531c2a30\",\"repair_task\":\"crq-backfill-5555555555555555555555555555555555555555555555555555555555555555\"}",
+      "rows": {},
+      "trace": [
+       "write:inbox/crq-backfill-5555555555555555555555555555555555555555555555555555555555555555.json"
+      ],
+      "tree": [
+       "state/repair/inbox/crq-backfill-5555555555555555555555555555555555555555555555555555555555555555.json"
+      ]
+     }
+    ]
+   },
+   "spec": {
+    "instructions_return": {
+     "a": 1,
+     "b": 2
+    },
+    "steps": [
+     {
+      "args": [
+       "5555555555555555555555555555555555555555555555555555555555555555",
+       {
+        "canonical_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "finding": {
+         "anchor_status": "verified",
+         "blob": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+         "body": "Body",
+         "id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+         "intervals": [
+          [
+           1,
+           2
+          ]
+         ],
+         "path": "src/a.ts",
+         "severity": "major",
+         "source_id": null,
+         "status": "untriaged",
+         "title": "Title"
+        },
+        "finding_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.ts",
+        "prior_repair_task": "crq-backfill-7777777777777777777777777777777777777777777777777777777777777777",
+        "retry_instructions": "go on",
+        "review_id": "9999999999999999999999999999999999999999999999999999999999999999",
+        "target": "1111111111111111111111111111111111111111"
+       }
+      ],
+      "method": "accept",
+      "transport": {
+       "mode": "configured"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "accept-configured-instructions-falsy-first-string",
+   "result": {
+    "steps": [
+     {
+      "calls": [
+       [
+        "projection",
+        "repo",
+        "1111111111111111111111111111111111111111",
+        [
+         "src/a.ts"
+        ]
+       ],
+       [
+        "secret_scan",
+        "base-1111111111111111111111111111111111111111",
+        "head-1111111111111111111111111111111111111111",
+        "backfill/repair-scan.json"
+       ],
+       [
+        "secret_scan_diff",
+        "diff --git a/crq-finding.txt b/crq-finding.txt\n--- /dev/null\n+++ b/crq-finding.txt\n@@ -0,0 +1,2 @@\n+Title\n+Body\n",
+        null,
+        "1111111111111111111111111111111111111111",
+        "backfill/repair-finding-scan.json"
+       ],
+       [
+        "secret_scan_diff",
+        "diff --git a/src/a.ts b/src/a.ts\n--- /dev/null\n+++ b/src/a.ts\n@@ -0,0 +1,2 @@\n+Title\n+Body\n",
+        null,
+        "1111111111111111111111111111111111111111",
+        "backfill/repair-finding-scan.json"
+       ],
+       [
+        "secret_scan_diff",
+        "diff --git a/crq-fix-instructions.txt b/crq-fix-instructions.txt\n--- /dev/null\n+++ b/crq-fix-instructions.txt\n@@ -0,0 +1,1 @@\n+go on\n",
+        null,
+        "1111111111111111111111111111111111111111",
+        "backfill/repair-instructions-scan.json"
+       ]
+      ],
+      "delivery": {},
+      "message": "fix instructions secret scan failed",
+      "outside_untouched": true,
+      "pending": {},
+      "queue": "{\"items\":[]}",
+      "queue_saves": [],
+      "raises": "ValueError",
+      "receipts": {},
+      "repair_inbox": {},
+      "rows": {},
+      "trace": [],
+      "tree": []
+     }
+    ]
+   },
+   "spec": {
+    "instructions_return": [
+     "",
+     null
+    ],
+    "steps": [
+     {
+      "args": [
+       "5555555555555555555555555555555555555555555555555555555555555555",
+       {
+        "canonical_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "finding": {
+         "anchor_status": "verified",
+         "blob": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+         "body": "Body",
+         "id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+         "intervals": [
+          [
+           1,
+           2
+          ]
+         ],
+         "path": "src/a.ts",
+         "severity": "major",
+         "source_id": null,
+         "status": "untriaged",
+         "title": "Title"
+        },
+        "finding_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.ts",
+        "prior_repair_task": "crq-backfill-7777777777777777777777777777777777777777777777777777777777777777",
+        "retry_instructions": "go on",
+        "review_id": "9999999999999999999999999999999999999999999999999999999999999999",
+        "target": "1111111111111111111111111111111111111111"
+       }
+      ],
+      "method": "accept",
+      "transport": {
+       "mode": "configured"
+      }
+     }
+    ]
+   }
+  },
+  {
    "name": "accept-configured-finding-path-newline-rejected",
    "result": {
     "steps": [

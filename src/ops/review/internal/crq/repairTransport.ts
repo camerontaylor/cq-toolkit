@@ -319,9 +319,9 @@ function runEntries(runs: JsonValue): ReadonlyArray<readonly [string, JsonValue]
 export interface ConfiguredTransportContext {
   readonly config: JsonValue;
   readonly saveQueue: (queue: JsonValue) => Promise<void>;
-  /** `secret_scan(base, head, relpath)`; the first tuple element is the verdict. */
+  /** `secret_scan(base, head, relpath)`: a `(clean, evidence)` tuple. */
   secretScan(base: JsonValue, head: JsonValue, relpath: string): Promise<JsonValue>;
-  /** `secret_scan_diff(patch, base, head, relpath)`; truthy when clean. */
+  /** `secret_scan_diff(patch, base, head, relpath)`: a `(clean, evidence)` tuple. */
   secretScanDiff(
     patch: string,
     base: JsonValue,
@@ -360,7 +360,7 @@ export function configuredRepairTransport(
     maxRoundsPerPin,
     async scan(target, name) {
       const [base, head] = await runtime.projection(repo, target, [name]);
-      return context.secretScan(base, head, 'backfill/repair-scan.json');
+      return pythonFirst(await context.secretScan(base, head, 'backfill/repair-scan.json'));
     },
     async scanInstructions(text, target) {
       if (
@@ -376,13 +376,18 @@ export function configuredRepairTransport(
         'diff --git a/crq-fix-instructions.txt b/crq-fix-instructions.txt\n' +
         '--- /dev/null\n+++ b/crq-fix-instructions.txt\n' +
         `@@ -0,0 +1,${lines.length} @@\n${additions(lines)}\n`;
-      const clean = await context.secretScanDiff(
-        patch,
-        null,
-        target,
-        'backfill/repair-instructions-scan.json',
+      const verdict = pythonIterable(
+        await context.secretScanDiff(patch, null, target, 'backfill/repair-instructions-scan.json'),
       );
-      if (!pythonTruthy(clean)) throw new PythonValueError('fix instructions secret scan failed');
+      if (verdict.length !== 2) {
+        throw new PythonValueError(
+          verdict.length > 2
+            ? `too many values to unpack (expected 2, got ${verdict.length})`
+            : `not enough values to unpack (expected 2, got ${verdict.length})`,
+        );
+      }
+      if (!pythonTruthy(verdict[0] as JsonValue))
+        throw new PythonValueError('fix instructions secret scan failed');
       return true;
     },
     async scanFinding(text, target, path) {
@@ -393,11 +398,8 @@ export function configuredRepairTransport(
         const patch =
           `diff --git a/${name} b/${name}\n--- /dev/null\n+++ b/${name}\n` +
           `@@ -0,0 +1,${lines.length} @@\n${additions(lines)}\n`;
-        const clean = await context.secretScanDiff(
-          patch,
-          null,
-          target,
-          'backfill/repair-finding-scan.json',
+        const clean = pythonFirst(
+          await context.secretScanDiff(patch, null, target, 'backfill/repair-finding-scan.json'),
         );
         if (!pythonTruthy(clean)) return false;
       }

@@ -419,11 +419,17 @@ function makeTransport(spec: JsonObject, rig: Rig, record: Recorder, mode: JsonO
       saveQueue,
       async secretScan(base, head, relpath) {
         record.calls.push(['secret_scan', base, head, relpath]);
-        return clean('source_clean', true);
+        return spec.has('scan_return')
+          ? plain(spec.get('scan_return'))
+          : [clean('source_clean', true), null];
       },
       async secretScanDiff(patch, base, head, relpath) {
         record.calls.push(['secret_scan_diff', patch, base, head, relpath]);
-        return !(typeof marker === 'string' && patch.includes(marker));
+        const key = relpath.endsWith('repair-instructions-scan.json')
+          ? 'instructions_return'
+          : 'diff_return';
+        if (spec.has(key)) return plain(spec.get(key));
+        return [!(typeof marker === 'string' && patch.includes(marker)), null];
       },
     };
     const runtime: ConfiguredRuntime = {

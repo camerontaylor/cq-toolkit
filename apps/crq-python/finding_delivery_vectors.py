@@ -157,10 +157,16 @@ class FakeContext:
 
     def secret_scan(self, base: Any, head: Any, path: Any) -> Any:
         self.calls.append(["secret_scan", base, head, self._rel(path)])
+        if "scan_return" in self.spec:
+            return self.spec["scan_return"]
         return self.spec.get("source_clean", True), None
 
     def secret_scan_diff(self, patch: str, path: Any, base: Any = None, head: Any = None) -> Any:
         self.calls.append(["secret_scan_diff", patch, base, head, self._rel(path)])
+        rel = self._rel(path)
+        key = "instructions_return" if rel.endswith("repair-instructions-scan.json") else "diff_return"
+        if key in self.spec:
+            return self.spec[key]
         marker = self.spec.get("deny_marker")
         return not (marker is not None and marker in patch), None
 
@@ -804,6 +810,29 @@ def accept_cases() -> List[Dict[str, Any]]:
         transport={"mode": "configured"}, deny_marker="SECRET")
     acc("accept-configured-finding-scan-checks-both-names", _request(path="src/SECRETPATH.ts"),
         transport={"mode": "configured"}, deny_marker="SECRETPATH")
+    # The context's scan seams return (verdict, evidence) tuples: the transport
+    # must take element 0 (scan, scan_finding) or unpack exactly two (instructions).
+    cfg = {"mode": "configured"}
+    ins = _request(retry_instructions="go on", prior_repair_task=JOB)
+    acc("accept-configured-scan-tuple-false-refused", transport=cfg, scan_return=[False, None])
+    acc("accept-configured-scan-tuple-true-accepted", transport=cfg, scan_return=[True, None])
+    acc("accept-configured-scan-tuple-true-extra-elements", transport=cfg, scan_return=[True, None, 9])
+    acc("accept-configured-scan-bare-bool-typeerror", transport=cfg, scan_return=True)
+    acc("accept-configured-scan-empty-list-indexerror", transport=cfg, scan_return=[])
+    acc("accept-configured-scan-empty-string-indexerror", transport=cfg, scan_return="")
+    acc("accept-configured-scan-empty-dict-keyerror", transport=cfg, scan_return={})
+    acc("accept-configured-scan-string-first-char-truthy", transport=cfg, scan_return="0x")
+    acc("accept-configured-finding-tuple-false-refused", transport=cfg, diff_return=[False, None])
+    acc("accept-configured-finding-bare-true-typeerror", transport=cfg, diff_return=True)
+    acc("accept-configured-finding-empty-list-indexerror", transport=cfg, diff_return=[])
+    acc("accept-configured-instructions-tuple-false-valueerror", ins, transport=cfg, instructions_return=[False, None])
+    acc("accept-configured-instructions-tuple-true-ok", ins, transport=cfg, instructions_return=[True, None])
+    acc("accept-configured-instructions-bare-bool-typeerror", ins, transport=cfg, instructions_return=True)
+    acc("accept-configured-instructions-one-element-valueerror", ins, transport=cfg, instructions_return=[True])
+    acc("accept-configured-instructions-three-elements-valueerror", ins, transport=cfg, instructions_return=[True, None, 1])
+    acc("accept-configured-instructions-two-char-string-unpacks", ins, transport=cfg, instructions_return="ab")
+    acc("accept-configured-instructions-two-key-dict-unpacks", ins, transport=cfg, instructions_return={"a": 1, "b": 2})
+    acc("accept-configured-instructions-falsy-first-string", ins, transport=cfg, instructions_return=["", None])
     acc("accept-configured-finding-path-newline-rejected", _request(path="a\nb.ts"), transport={"mode": "configured"})
     acc("accept-configured-finding-path-cr-rejected", _request(path="a\rb.ts"), transport={"mode": "configured"})
     acc("accept-configured-finding-path-non-string-rejected", _request(path=7), transport={"mode": "configured"})
