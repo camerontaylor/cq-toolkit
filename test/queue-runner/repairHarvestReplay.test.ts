@@ -206,6 +206,17 @@ describe('repairHarvest terminal replay is bounded per tick: ReplayBudget', () =
     expect(spent(await tick(item, world().fx))).toEqual([]); // unbound: never trips
   });
 
+  it('stays silent under an exhausted budget when nothing is pending: dry pass or settled runs', async () => {
+    const exhausted = (): World => world({ budget: new ReplayBudget({ count: 0 }) });
+    const dry = manyRuns(2);
+    expect(spent(await repairHarvest(queueOf(dry), dry, exhausted().fx, true))).toEqual([]);
+    expect(spent(await tick(dry, exhausted().fx))).toHaveLength(1); // the real pass does log
+    const settled = itemOf({
+      R0: failedRun('R0', [jobId('R0', 1)], { siblings_recorded: [jobId('R0', 1)] }),
+    });
+    expect(spent(await tick(settled, exhausted().fx))).toEqual([]);
+  });
+
   it('logs when the wall-clock deadline trips', async () => {
     let now = 0;
     const budget = new ReplayBudget({ seconds: 10, clock: () => now });

@@ -373,10 +373,10 @@ class TickEntryPointTest(unittest.TestCase):
 
 
 class BudgetLogTest(ReplayBase):
-    def harvest_all(self, f):
+    def harvest_all(self, f, dry=False):
         messages = []
         for item in f.items:
-            messages += repair_tick.harvest(f.c, f.queue, item)
+            messages += repair_tick.harvest(f.c, f.queue, item, dry=dry)
         return messages
 
     def test_a_tripped_count_budget_logs_once_per_tick(self):
@@ -402,6 +402,15 @@ class BudgetLogTest(ReplayBase):
         self.harvest_all(f)  # the unsettled run is replayed; the settled one is skipped
         repair_tick.begin_tick(f.c, count=1)
         self.assertEqual([m for m in self.harvest_all(f) if 'budget spent' in m], [])
+        # An exhausted budget stays silent when nothing is pending: every run is settled now.
+        repair_tick.begin_tick(f.c, count=0)
+        self.assertEqual([m for m in self.harvest_all(f) if 'budget spent' in m], [])
+
+    def test_a_dry_pass_does_not_log_under_an_exhausted_budget(self):
+        f = self.build(2, chain=1)  # both runs unsettled, but a dry pass replays nothing
+        repair_tick.begin_tick(f.c, count=0)
+        self.assertEqual([m for m in self.harvest_all(f, dry=True) if 'budget spent' in m], [])
+        self.assertEqual(len([m for m in self.harvest_all(f) if 'budget spent' in m]), 1)  # the real pass does
 
 
 if __name__ == '__main__':
