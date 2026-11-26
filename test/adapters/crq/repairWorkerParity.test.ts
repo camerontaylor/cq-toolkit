@@ -42,8 +42,10 @@ interface Case {
   name: string;
   /**
    * The fork lists either side may legitimately produce when a worker can end before the next
-   * admission (a scheduling race both sides may win). The stop bound is exact per scenario;
-   * the full input order is never in the set.
+   * admission (a scheduling race both sides may win). With a worker held at the cap, a clean
+   * exit of b can be reaped before a's failing exit lands, so c is then legitimately admitted
+   * (the stop latches only when a non-zero status is reaped); such cases list the full order.
+   * The child-gate refusal is the exception: its pipe verdict bounds the fork list exactly.
    */
   forkedAllowed?: string[][];
   order: string[];
@@ -74,8 +76,8 @@ const BASE_CASES: Case[] = [
   { name: 'clean pass, six items, limit 3', order: ['a', 'b', 'c', 'd', 'e', 'f'], limit: 3 },
   {
     name: 'rate limit stops new admission',
-    // b may be admitted before a's exit is reaped; c never is (the reap latches the stop).
-    forkedAllowed: [['a'], ['a', 'b']],
+    // b may be admitted before a's exit is reaped; c is too when b is reaped first (clean exit).
+    forkedAllowed: [['a'], ['a', 'b'], ['a', 'b', 'c']],
     order: ['a', 'b', 'c'],
     limit: 2,
     scenarios: { a: { outcome: 'rate-limit' } },
@@ -103,14 +105,14 @@ const BASE_CASES: Case[] = [
   },
   {
     name: 'death by signal is a failure',
-    forkedAllowed: [['a'], ['a', 'b']],
+    forkedAllowed: [['a'], ['a', 'b'], ['a', 'b', 'c']],
     order: ['a', 'b', 'c'],
     limit: 2,
     scenarios: { a: { crash: 'signal' } },
   },
   {
     name: 'a raised worker exits 1 and is a failure',
-    forkedAllowed: [['a'], ['a', 'b']],
+    forkedAllowed: [['a'], ['a', 'b'], ['a', 'b', 'c']],
     order: ['a', 'b', 'c'],
     limit: 2,
     scenarios: { a: { crash: 'raise' } },
@@ -217,10 +219,9 @@ describe('startWorker parity with the forking drain_items', () => {
     });
   });
 
-  test('no racy scenario allows the full input order', () => {
-    for (const spec of BASE_CASES.filter((c) => c.forkedAllowed)) {
-      expect(spec.forkedAllowed).not.toContainEqual(spec.order);
-    }
+  test('the child-gate refusal never allows a fork past the refusing item', () => {
+    const spec = BASE_CASES.find((c) => c.name === 'a child-gate refusal is not a failure');
+    expect(spec?.forkedAllowed).toEqual([['a']]);
   });
 
   test('anchors: the Python results are the ones the table claims', () => {
