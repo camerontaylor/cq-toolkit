@@ -158,23 +158,67 @@ describe('composed tick shadow: Python crq.tick vs the TS composed tick', () => 
       expect(result.report.class).toBe('identical');
     });
 
-  it('refuses a live root holding inputs the composed shadow does not freeze', async () => {
-    for (const name of ['backfill-rollout.json', 'ledger', 'runs']) {
-      const liveRoot = live(SEEDS[0]![1]);
-      if (name.includes('.')) writeFileSync(join(liveRoot, name), '{}');
-      else mkdirSync(join(liveRoot, name));
-      const s = spec();
-      await expect(
-        runComposedShadow({
-          liveRoot,
-          scratch: tmp(),
-          pinnedAt: NOW,
-          sample: 'unfrozen',
-          python: python(s),
-          ts: (root) => runComposedTs(REPO, root, s),
-        }),
-      ).rejects.toThrow(`does not freeze: ${name}`);
-    }
+  // Default-deny: every entry the freeze does not copy is refused, so a phase that would read it
+  // cannot run switched off on both sides and still read `identical`. One test per name.
+  const refuse = async (plant: (liveRoot: string) => void, shown: string) => {
+    const liveRoot = live(SEEDS[0]![1]);
+    plant(liveRoot);
+    const s = spec();
+    await expect(
+      runComposedShadow({
+        liveRoot,
+        scratch: tmp(),
+        pinnedAt: NOW,
+        sample: 'unfrozen',
+        python: python(s),
+        ts: (root) => runComposedTs(REPO, root, s),
+      }),
+    ).rejects.toThrow(`does not freeze: ${shown}`);
+  };
+  for (const name of [
+    'backfill-rollout.json',
+    'ledger',
+    'runs',
+    'receipts',
+    'reconcile',
+    'backfill',
+  ])
+    it(`refuses a live root holding ${name}`, () =>
+      refuse(
+        (root) =>
+          name.includes('.') ? writeFileSync(join(root, name), '{}') : mkdirSync(join(root, name)),
+        name,
+      ));
+
+  it('refuses backfill/findings planted below a backfill directory', () =>
+    refuse(
+      (root) => mkdirSync(join(root, 'backfill', 'findings'), { recursive: true }),
+      'backfill',
+    ));
+
+  it('refuses an entry no phase is known to read yet (default-deny)', () =>
+    refuse((root) => writeFileSync(join(root, 'something-new.json'), '{}'), 'something-new.json'));
+
+  it('names every refused entry, sorted', () =>
+    refuse((root) => {
+      mkdirSync(join(root, 'runs'));
+      mkdirSync(join(root, 'receipts'));
+    }, 'receipts, runs'));
+
+  it('accepts the outputs the tick overwrites without reading', async () => {
+    const liveRoot = live(SEEDS[0]![1]);
+    for (const name of ['status.json', 'status.md', 'next-review-at', 'tick.lock'])
+      writeFileSync(join(liveRoot, name), 'stale');
+    const s = spec();
+    const { report } = await runComposedShadow({
+      liveRoot,
+      scratch: tmp(),
+      pinnedAt: NOW,
+      sample: 'outputs',
+      python: python(s),
+      ts: (root) => runComposedTs(REPO, root, s),
+    });
+    expect(report.class).toBe('identical');
   });
 
   it('never reports complete: exactly the four open rows stay', async () => {

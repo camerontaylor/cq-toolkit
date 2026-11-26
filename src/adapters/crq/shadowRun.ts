@@ -13,6 +13,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   unlinkSync,
@@ -362,14 +363,18 @@ export interface ComposedRunResult {
 export type ComposedRunner = (root: string) => Promise<ComposedRunResult>;
 
 /**
- * Inputs the composed phases read that `freezeStateRoot` does not copy. A sample holding one would
- * run both sides with that phase silently switched off and could still report `identical`, so the
- * sample is refused instead.
+ * Live-root entries a composed sample may hold besides `SHADOW_FILES`: outputs the tick overwrites
+ * without reading them (`status.json`, `status.md`, `next-review-at`) and the lock file. Any other
+ * entry (`backfill-rollout.json`, `ledger`, `runs`, `receipts`, `reconcile`, `backfill/findings`
+ * and whatever is added later) is an input the composed phases may read and the freeze does not
+ * copy: both sides would run with that phase silently switched off and still report `identical`,
+ * so the sample is refused (default-deny).
  */
-export const COMPOSED_UNFROZEN_INPUTS: readonly string[] = [
-  'backfill-rollout.json',
-  'ledger',
-  'runs',
+export const COMPOSED_HARMLESS_ENTRIES: readonly string[] = [
+  'status.json',
+  'status.md',
+  'next-review-at',
+  'tick.lock',
 ];
 
 export interface ComposedShadowOptions {
@@ -403,9 +408,10 @@ export interface ComposedShadowReport {
 export async function runComposedShadow(
   options: ComposedShadowOptions,
 ): Promise<ComposedShadowReport> {
-  const unfrozen = COMPOSED_UNFROZEN_INPUTS.filter((name) =>
-    existsSync(join(options.liveRoot, name)),
-  );
+  const allowed = new Set<string>([...SHADOW_FILES, ...COMPOSED_HARMLESS_ENTRIES]);
+  const unfrozen = readdirSync(options.liveRoot)
+    .filter((name) => !allowed.has(name))
+    .sort();
   if (unfrozen.length > 0) {
     throw new Error(
       `composed shadow refuses a live root holding inputs it does not freeze: ${unfrozen.join(', ')}`,
