@@ -320,7 +320,7 @@ describe('backfillHarvest effect: queue write-back', () => {
     expect(got.queue.items[1]).toBeNull();
     // A retained number is a JsonNumber instance, not a record: it must not be emptied.
     expect(got.queue.items[2]).toBeInstanceOf(JsonNumber);
-    expect((got.queue.items[2] as JsonNumber).integer).toBe(7n);
+    expect((got.queue.items[2] as unknown as JsonNumber).integer).toBe(7n);
     expect(got.queue.items[0]).toBe(got.item);
     expect(got.log).toEqual(pick().expected.log);
   });
