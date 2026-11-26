@@ -13,6 +13,10 @@ export type PyErrorKind =
   | 'OSError'
   | 'RuntimeError'
   | 'AttributeError'
+  /** `subprocess.CalledProcessError` (`subprocess.run(check=True)` on a non-zero exit). */
+  | 'CalledProcessError'
+  /** `crq_repair.retain.UnsupportedUntracked`, a `ValueError` subclass. */
+  | 'UnsupportedUntracked'
   /** `crq_repair.DetectorUnavailable`, a `ValueError` subclass. */
   | 'DetectorUnavailable';
 
@@ -31,7 +35,10 @@ export class PyError extends Error {
 export function isPyError(e: unknown, ...kinds: readonly PyErrorKind[]): e is PyError {
   if (!(e instanceof PyError)) return false;
   return kinds.some(
-    (kind) => kind === e.kind || (kind === 'ValueError' && e.kind === 'DetectorUnavailable'),
+    (kind) =>
+      kind === e.kind ||
+      (kind === 'ValueError' &&
+        (e.kind === 'DetectorUnavailable' || e.kind === 'UnsupportedUntracked')),
   );
 }
 
