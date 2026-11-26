@@ -16,7 +16,7 @@
  *
  * Left injected, on purpose: `repairEnqueue` (bound in `tickComposition.ts` over
  * the repair-backfill effects, since it needs git and config),
- * `backfillHarvest` (the backfill runtime), and the `coverage` seam
+ * `backfillHarvest` (bound separately, unrouted, by `backfillHarvestEffect.ts`), and the `coverage` seam
  * (start-one's `CoverageEffects`, a separate slice), plus the clock, event,
  * queue save and repo-registry effects.
  */

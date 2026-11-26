@@ -137,9 +137,9 @@ export const STAGED_GAPS: readonly TickGap[] = [
     python: 'harvest_review (crq.py:2619)',
     missing:
       'fileHarvestReviewEffects binds findings.md for non-local kinds, removeWorktree, writeReceipt and ' +
-      'requestPrReview; backfillHarvest and the coverage seam stay injected, and repairEnqueue is bound ' +
-      'only when the repairBackfill input (git, config) is supplied: ' +
-      'backfillHarvest has no TS port of backfill_runtime.harvest; the coverage seam has no harvest-side implementation (start-one CoverageEffects)',
+      'requestPrReview; the coverage seam stays injected, repairEnqueue is bound ' +
+      'only when the repairBackfill input (git, config) is supplied, and backfillHarvest is bound by backfillHarvestEffect (src/adapters/crq/backfillHarvestEffect.ts, differentially pinned, not routed) over the injected git, outbox, inbox, store, state_event, queue save and cleanup, but not the Python unverified-terminal retain strings or the quota-cause/no-cooldown outcomes, which throw; ' +
+      'the coverage seam has no harvest-side implementation (start-one CoverageEffects)',
   },
   {
     id: 'repair-harvest-effects',
