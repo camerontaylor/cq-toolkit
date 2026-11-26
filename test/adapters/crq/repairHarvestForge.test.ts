@@ -25,6 +25,7 @@ import {
   ghCreateRepairPr,
   QueueCompaction,
   queueIdentity,
+  type QueueIdentity,
 } from '../../../src/adapters/crq/repairHarvestForge.js';
 import { filePublicationEffects } from '../../../src/adapters/crq/publicationFiles.js';
 import { forgePublicationReads } from '../../../src/adapters/crq/publicationForgeReads.js';
@@ -391,5 +392,54 @@ describe('repair-harvest remaining effects against the Python oracle', () => {
     );
     expect(error).toBeInstanceOf(PyError);
     expect(className(error)).toBe('OSError');
+  });
+
+  describe('the compaction identity guard is pinned field by field', () => {
+    const marked = '{"backfill_admission_history_version": 1, "items": []}';
+    const attempt = async (tweak: (id: QueueIdentity) => QueueIdentity): Promise<string> => {
+      const state = join(root, 'state');
+      await mkdir(state);
+      const queuePath = join(state, 'queue.json');
+      await writeFile(queuePath, marked);
+      const compaction = new QueueCompaction();
+      compaction.note(tweak(await queueIdentity(queuePath)));
+      let stderr = '';
+      await fileRepairSaveQueue({
+        stateRoot: state,
+        compaction,
+        stderr: (line) => {
+          stderr += line;
+        },
+      })(JSON.parse(marked) as Rec);
+      return stderr;
+    };
+
+    it('logs when every field matches', async () => {
+      expect(await attempt((id) => id)).toMatch(
+        /^admission compaction v1: before_bytes=\d+ after_bytes=\d+\n$/,
+      );
+    });
+
+    for (const field of ['path', 'dev', 'ino', 'size', 'mtimeNs'] as const) {
+      it(`stays silent when only ${field} differs`, async () => {
+        const tweaked = await attempt((id) => ({
+          ...id,
+          [field]: field === 'path' ? `${id.path}.other` : (id[field] as bigint) + 1n,
+        }));
+        expect(tweaked).toBe('');
+      });
+    }
+  });
+
+  it('pins the unmodelled float order: fileRepairNewItem throws where Python enrolls', async () => {
+    const state = join(root, 'state');
+    await mkdir(state);
+    const newItem = fileRepairNewItem({ stateRoot: state, now: () => FROZEN });
+    const q = toPlainJsonRetainingNumbers(
+      parseJsonValue('{"items": [{"id": "x", "order": 3.0, "state": "pending"}]}') as never,
+    ) as Rec;
+    await expect(newItem(q, { id: 'y', kind: 'open' })).rejects.toThrow(
+      'unsupported item order representation',
+    );
   });
 });

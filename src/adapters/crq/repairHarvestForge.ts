@@ -22,6 +22,13 @@
  * queue that needs compaction (`queueEffects.ts`), so no caller records a pending identity
  * today; {@link QueueCompaction.note} is the seam a future loader would call. The forge
  * reads stay in `publicationForgeReads.ts`.
+ *
+ * Not modelled, and pinned as such: on a retained-number queue a live item whose `order` is a
+ * float (`3.0`, `1e2`) makes {@link fileRepairNewItem} throw the unmapped `unsupported item
+ * order representation` (`publicationEnroll.ts`), where Python enrolls with a float `order`;
+ * likewise a float `item.pr` on an `open_pr` publication throws `unsupported PR number
+ * representation` (`publicationFinalize.ts`). Python's own writers only write integers, so
+ * only a hand-edited queue reaches either; do not assume full parity there.
  */
 import { stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
