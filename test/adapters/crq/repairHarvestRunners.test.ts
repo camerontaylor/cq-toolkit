@@ -129,7 +129,9 @@ describe('repairHarvestRunners', () => {
     const { path, branch } = await runners.makeWorktree(`verify-${JOB}`, wrongJob);
     try {
       await rm(join(state, 'repair', JOB, 'repair.patch'), { force: true });
-      const error = await runners.mechanical(path, base, [wrongJob, fixed], JOB).catch((e) => e);
+      const error = await runners
+        .mechanical(path, base, [wrongJob, fixed], JOB)
+        .catch((e: unknown) => e);
       expect(isPyError(error, 'ValueError')).toBe(true);
       expect(await exists(join(state, 'repair', JOB, 'repair.patch'))).toBe(false);
     } finally {
@@ -148,9 +150,9 @@ describe('repairHarvestRunners', () => {
     ] as const) {
       const { path, branch } = await runners.makeWorktree(`verify-${JOB}`, fixed);
       try {
-        const error = await runners.mechanical(path, base, [fixed], JOB).catch((e) => e);
+        const error = await runners.mechanical(path, base, [fixed], JOB).catch((e: unknown) => e);
         expect(isPyError(error, kind)).toBe(true);
-        expect(error.kind).toBe(kind);
+        expect((error as { kind: string }).kind).toBe(kind);
       } finally {
         await runners.removeWorktree(path, branch);
       }
@@ -160,7 +162,7 @@ describe('repairHarvestRunners', () => {
   it('refuses to remove a worktree it does not own', async () => {
     const error = await make()
       .removeWorktree(join(root, 'elsewhere'), 'crq/verify-x')
-      .catch((e) => e);
+      .catch((e: unknown) => e);
     expect(isPyError(error, 'ValueError')).toBe(true);
   });
 });
