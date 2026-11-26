@@ -11,7 +11,6 @@ import { afterAll, describe, expect, test, vi } from 'vitest';
 import { closeSync, openSync, readSync } from 'node:fs';
 import {
   fileRepairWorkerStarter,
-  RepairWorkerFdUnavailableError,
   workerExitFromStatus,
   MAX_WORKER_PAYLOAD_BYTES,
   ownedWorkerCount,
