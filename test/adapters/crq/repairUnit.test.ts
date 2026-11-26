@@ -98,11 +98,17 @@ describe('fileRepairUnit', () => {
     expect(reachedJobs).toBe(true);
   });
 
+  it('throws synchronously from startWorker when no launch is configured', async () => {
+    const { unit: u } = await unit(false);
+    expect(() => u.drain.startWorker('pr-1', ['j1'])).toThrow(
+      'repair worker launch is not configured',
+    );
+  });
+
   it('lists only the drain effects the unit still leaves unbound', () => {
     expect(REPAIR_UNIT_MISSING_EFFECTS.map((e) => e.name)).toEqual([
       'RepairDrainEffects.triage',
       'RepairDrainEffects.processItem',
-      'RepairDrainEffects.startWorker',
     ]);
   });
 });
