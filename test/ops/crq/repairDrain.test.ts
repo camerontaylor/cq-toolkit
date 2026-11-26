@@ -1000,6 +1000,86 @@ describe('drainItems concurrency', () => {
   });
 });
 
+describe('drainItems worker failure aggregation', () => {
+  /** Admit workers one at a time (each admission waits on its predecessor's barrier). */
+  const admitAll = async (m: ReturnType<typeof manualWorkers>, count: number): Promise<void> => {
+    for (let i = 0; i < count; i += 1) {
+      for (let spins = 0; m.workers.length <= i; spins += 1) {
+        if (spins > 200) throw new Error(`worker ${i} never started`);
+        await flush();
+      }
+      m.workers[i]!.channel.publish('admitted');
+    }
+    await flush();
+  };
+  const run = async (exits: WorkerExit[], items: string[]) => {
+    const m = manualWorkers();
+    const r = rig({ startWorker: (item) => m.start(item) });
+    const done = drainItems(r.effects, groupsOf(...items), items, Math.max(2, items.length));
+    await admitAll(m, exits.length);
+    exits.forEach((exit, i) => {
+      if (exit.kind === 'lost') m.workers[i]!.fail();
+      else m.workers[i]!.finish(exit);
+    });
+    return done;
+  };
+  test.each<[string, WorkerExit]>([
+    ['exit code 1', { kind: 'exit', code: 1 }],
+    ['exit code 9', { kind: 'exit', code: 9 }],
+    ['a signal', { kind: 'signal', signal: 9 }],
+    ['a lost status (rejected wait)', { kind: 'lost' }],
+  ])('%s is a worker failure', async (_name, exit) => {
+    expect(await run([exit], ['a'])).toEqual(['a']);
+  });
+  test.each([0, 2, 3])('exit code %i is not a worker failure', async (code) => {
+    expect(await run([{ kind: 'exit', code }], ['a'])).toEqual([]);
+  });
+  test('the aggregate is returned only after every worker is reaped', async () => {
+    const failed = await run(
+      [
+        { kind: 'exit', code: 1 },
+        { kind: 'exit', code: 0 },
+        { kind: 'signal', signal: 6 },
+      ],
+      ['a', 'b', 'c'],
+    );
+    expect(failed).toEqual(['a', 'c']);
+  });
+  test('runRepairDrain reports sorted worker failures as an error', async () => {
+    const jobs = { 'pr-2-job': { item: 'pr-2' }, 'pr-1-job': { item: 'pr-1' } };
+    const m = manualWorkers();
+    const r = rig({ jobs, limit: int(2), startWorker: (item) => m.start(item) });
+    const done = runRepairDrain(r.effects);
+    await admitAll(m, 2);
+    for (const w of m.workers) w.finish({ kind: 'exit', code: 1 });
+    expect(await done).toEqual({ status: 'error', error: 'worker failures: pr-1, pr-2' });
+  });
+  test('the failure list is capped at 300 characters after the prefix', async () => {
+    const long = Array.from({ length: 10 }, (_, i) => `pr-${1000 + i}-${'x'.repeat(40)}`);
+    const jobs = Object.fromEntries(long.map((item) => [`${item}-job`, { item }]));
+    const m = manualWorkers();
+    const r = rig({ jobs, limit: int(10), startWorker: (item) => m.start(item) });
+    const done = runRepairDrain(r.effects);
+    await admitAll(m, 10);
+    for (const w of m.workers) w.finish({ kind: 'exit', code: 1 });
+    const out = await done;
+    expect(out?.status).toBe('error');
+    expect(out?.error?.length).toBe('worker failures: '.length + 300);
+  });
+  test('a stop exit alone leaves the pass drained', async () => {
+    const m = manualWorkers();
+    const r = rig({
+      jobs: { 'pr-1-job': { item: 'pr-1' } },
+      limit: int(2),
+      startWorker: (item) => m.start(item),
+    });
+    const done = runRepairDrain(r.effects);
+    await admitAll(m, 1);
+    m.workers[0]!.finish({ kind: 'exit', code: 2 });
+    expect(await done).toEqual({ status: 'drained' });
+  });
+});
+
 describe('drainItems serial path', () => {
   test('limit one runs items in-process in order and never forks', async () => {
     const r = rig({ jobs: { a1: { item: 'a' }, b1: { item: 'b' } } });

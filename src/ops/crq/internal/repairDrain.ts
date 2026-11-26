@@ -381,14 +381,17 @@ function exitMessage(exit: WorkerExit): string | null {
  * `drain_items`: one coordinator owns admission; workers run isolated up to the
  * limit, with serial findings inside each item. Never kills a paid worker: on an
  * abort or an admission failure, admitted workers are reaped before returning.
+ * Resolves with the items whose workers failed (Python's `_WORKER_FAILURES`),
+ * aggregated only after every owned worker is reaped.
  */
 export async function drainItems(
   effects: RepairDrainEffects,
   groups: Groups,
   order: readonly string[],
   limit: number,
-): Promise<void> {
+): Promise<string[]> {
   const active = new Set<ActiveWorker>();
+  const failures: string[] = [];
   let stopped = false;
 
   const reapCompleted = (): { failed: boolean; reaped: boolean } => {
@@ -403,6 +406,10 @@ export async function drainItems(
       if (message !== null) {
         effects.narrate(`repair item ${worker.item}: ${message}`);
         failed = true;
+      }
+      // `_WORKER_FAILURES`: a deliberate admission stop (exit 2 or 3) is not a failure.
+      if (exit.kind !== 'exit' || (exit.code !== 0 && exit.code !== 2 && exit.code !== 3)) {
+        failures.push(worker.item);
       }
     }
     return { failed, reaped };
@@ -476,6 +483,7 @@ export async function drainItems(
   } finally {
     while (active.size > 0) await reapItem();
   }
+  return failures;
 }
 
 /** `finding.get('severity') in ('critical', 'major')` of a job object. */
@@ -587,7 +595,12 @@ export async function runRepairDrain(
     rank.set(item, first);
   }
   const order = [...held.keys()].sort((left, right) => rank.get(left)! - rank.get(right)!);
-  await drainItems(effects, held, order, limit);
+  const failed = await drainItems(effects, held, order, limit);
+  if (failed.length > 0) {
+    const byCodeUnit = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+    result.status = 'error';
+    result.error = `worker failures: ${failed.sort(byCodeUnit).join(', ').slice(0, 300)}`;
+  }
   return result;
 }
 

@@ -47,6 +47,7 @@ import { fileRepairHarvestEffects } from './repairHarvestSource.js';
 import { blocked, fileRepairPauseEffects } from './repairPauseSource.js';
 import { fileRepairRunOptions } from './repairRunSource.js';
 import { fileRepairStateEffects, pathExists } from './repairStateSource.js';
+import { fileRepairWorkerStarter, type RepairWorkerLaunch } from './repairWorkerProcess.js';
 
 export interface RepairUnitOptions {
   readonly stateRoot: string;
@@ -60,6 +61,10 @@ export interface RepairUnitOptions {
    * then reject, as Python's `config['repair']` would raise on a missing section.
    */
   readonly config?: JsonValue;
+  /** The exact text `config` was parsed from; the worker child re-parses it (a fork would inherit the dict). */
+  readonly configText?: string;
+  /** How to start a worker process; without it (and `configText`) `startWorker` throws. */
+  readonly workerLaunch?: RepairWorkerLaunch;
   /** Wall clock for the pause and blackout checks; defaults to `new Date()`. */
   readonly now?: () => Date;
   /** `os.environ` for provider readiness in `dispatch_paused`. */
@@ -92,6 +97,7 @@ export type RepairDrainBindings = Pick<
   | 'pending'
   | 'markStale'
   | 'withAdmissionLock'
+  | 'startWorker'
 >;
 
 export interface RepairUnit {
@@ -212,6 +218,19 @@ function drainBindings(options: RepairUnitOptions): RepairDrainBindings {
     pending: (jobId) => state.pending(jobId),
     markStale: (job, reason) => state.markStale(job, reason),
     withAdmissionLock: fileRepairAdmissionLock({ stateRoot }),
+    // Construction stays I/O-free: the starter does nothing until called. An unrouted
+    // unit has no launch entry, so it throws, which `drainItems` reaps correctly.
+    startWorker:
+      options.workerLaunch !== undefined && options.configText !== undefined
+        ? fileRepairWorkerStarter({
+            stateRoot,
+            clone: options.clone,
+            configText: options.configText,
+            launch: options.workerLaunch,
+          })
+        : () => {
+            throw new Error('repair worker launch is not configured');
+          },
   };
 }
 
@@ -225,14 +244,16 @@ function drainBindings(options: RepairUnitOptions): RepairDrainBindings {
  * here (`PassGateEffects`). Everything below is a binding to supply before the
  * drain can run for real; none activates anything by existing.
  *
- * Three effects remain, each for a stated reason:
+ * Two effects remain, each for a stated reason:
  * - `triage`: only the "not configured" gates are bound; the judge, context scan and
  *   delivery transport are the cq-op path (D3), not this slice.
  * - `processItem`: `repairItemLoop.processRepairItem` ports the serial loop, but its
  *   `process` effect is Python's `process()`, which creates the worktree, runs the
  *   fixer and judge, and calls `resume_worktree` recovery (held on #2342). The loop
  *   cannot be bound without one of those, so it is left unbound rather than half-bound.
- * - `startWorker`: process isolation (fork, private pipe, reap, never kill).
+ *
+ * `startWorker` (process isolation: private pipe, reap, never kill) is bound by
+ * `repairWorkerProcess`; the worker entry it launches leaves `processItem` unbound.
  */
 export const REPAIR_UNIT_MISSING_EFFECTS: readonly { name: string; python: string }[] = [
   {
@@ -244,9 +265,5 @@ export const REPAIR_UNIT_MISSING_EFFECTS: readonly { name: string; python: strin
     name: 'RepairDrainEffects.processItem',
     python:
       'crq_repair.process_item (serial findings; its `process` runs the fixer/judge and resume_worktree recovery)',
-  },
-  {
-    name: 'RepairDrainEffects.startWorker',
-    python: 'crq_repair.drain_items (fork + private pipe; runs runRepairWorker)',
   },
 ];
