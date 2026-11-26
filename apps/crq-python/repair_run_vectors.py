@@ -165,8 +165,10 @@ def build_scenarios() -> None:
               raw_files={"state/queue.json": [255, 254]}, answers=answers(**qbase))
     drain_scn("drain: an empty queue file is a read failure",
               files={"state/queue.json": ""}, answers=answers(**qbase))
+    # The read error names the queue path; a deep root makes `str(exc)` exceed the 300 clip.
     drain_scn("drain: a long queue error is clipped",
-              files={"state/queue.json": '{"k": "' + "é" * 400 + "}"}, answers=answers(**qbase))
+              root_parts=["d" * 120, "d" * 120, "d" * 120], dirs=["state/queue.json"],
+              answers=answers(**qbase))
     # --- priority, hold and the worker pool ---------------------------------------------------
     pbase = dict(runner_disabled=[False, False], dispatch_paused=[None, None], fetch_clone=[None],
                  triage_phase=[None])
@@ -279,7 +281,9 @@ def build_scenarios() -> None:
 
 
 def _scrub(value, tmp):
-    return json.loads(json.dumps(value).replace(str(tmp), "/T"))
+    # The placeholder keeps the temp path's length, so a clip Python applied to an unscrubbed
+    # message still lands on the same character of the scrubbed text.
+    return json.loads(json.dumps(value).replace(str(tmp), "/T".ljust(len(str(tmp)), "_")))
 
 
 def _read_outcome(path: Path):
@@ -299,9 +303,9 @@ def _exc_record(exc, tmp):
 
 
 def _run(spec):
-    tmp = Path(tempfile.mkdtemp(prefix="crq-run-lane-"))
-    root = tmp / "root"
-    root.mkdir()
+    tmp = Path(tempfile.mkdtemp(prefix="crq-run-lane-", dir="/tmp"))
+    root = tmp.joinpath(*spec.get("root_parts", []), "root")
+    root.mkdir(parents=True)
     trace: list = []
     answers_ = copy.deepcopy(spec["answers"])
     lock_fd = None

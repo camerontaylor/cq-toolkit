@@ -205,7 +205,6 @@ async function replay(scenario: Scenario, expected: Dict): Promise<Dict> {
       };
     }
     // main(): one artifact per path; a failure narrates twice and exits 1.
-    const expectedTrace = expected['trace'] as unknown[][];
     try {
       trace.push(['run', scenario.argv]);
       const [code, result] = answer('run') as [number, Dict | null];
@@ -217,10 +216,12 @@ async function replay(scenario: Scenario, expected: Dict): Promise<Dict> {
         narrations += 1;
         if (narrations === 1) trace.push(['narrate', line]);
         else {
-          // Python narrates `traceback.format_exc()`; the frames are not portable,
-          // so the port's contract is that the stack carries the message.
-          expect(line).toContain(e instanceof Error ? e.message : String(e));
-          trace.push(expectedTrace[trace.length]);
+          // Python narrates `traceback.format_exc()`; the frames are not portable, so
+          // the oracle pins the final line (`Class: message`, or the bare class).
+          expect(line.startsWith('Traceback (most recent call last):\n')).toBe(true);
+          expect(line.endsWith('\n')).toBe(true);
+          const parts = line.split('\n');
+          trace.push(['narrate', { traceback_ends_with: `${parts[parts.length - 2]}\n` }]);
         }
       });
       trace.push(['write_result', failed.artifact]);

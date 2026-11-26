@@ -18,8 +18,9 @@
  * - `main()` (:1685-1698): the second narration of the full traceback
  *   ({@link narrateMainFailure}).
  *
- * Deviations: the traceback is Node's `error.stack` (frames differ by
- * construction; the header line `Class: message` is the pinned part), and a
+ * Deviations: the traceback frames are Node's (they differ by construction);
+ * the banner and the final `Class: message` line, which the fixture pins, are
+ * reproduced exactly, and a
  * triage-phase failure is caught only when it is an `Error` (Python's
  * `except Exception`).
  *
@@ -293,6 +294,24 @@ export async function drain(config: Dict, effects: RepairDrainEffects): Promise<
 }
 
 /**
+ * The shape of `traceback.format_exc()`: the banner, the frames, then the
+ * `Class: message` header as the final line (the bare class when the message
+ * is empty). The class is the Python kind of a `PyError`, else the error name.
+ */
+function traceback(error: unknown, message: string): string {
+  const name = error instanceof Error ? error.name : 'Error';
+  const frames =
+    error instanceof Error && error.stack !== undefined
+      ? error.stack
+          .split('\n')
+          .filter((line) => /^\s+at /.test(line))
+          .join('\n')
+      : '';
+  const header = message === '' ? name : `${name}: ${message}`;
+  return `Traceback (most recent call last):\n${frames === '' ? '' : `${frames}\n`}${header}\n`;
+}
+
+/**
  * `main()`'s failure lane (crq_repair.py:1688-1696): two narrations, the
  * message clipped to 300 and then the full traceback, and the `failed`
  * artifact (message clipped to 200). Exit code 1.
@@ -303,7 +322,7 @@ export function narrateMainFailure(
 ): { readonly exitCode: 1; readonly artifact: Dict } {
   const message = excText(error);
   narrate(`repair dispatch failed: ${clip300(message)}`);
-  narrate(error instanceof Error && error.stack !== undefined ? error.stack : String(error));
+  narrate(traceback(error, message));
   return {
     exitCode: 1,
     artifact: {
