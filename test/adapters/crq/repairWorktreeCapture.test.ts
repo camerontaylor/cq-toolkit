@@ -20,6 +20,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
@@ -304,6 +305,46 @@ describe('TS-only pins', () => {
       expect(thrown).toBeInstanceOf(PyError);
       expect((thrown as PyError).kind).toBe('ValueError');
       expect(existsSync(join(scratch.root, 'evidence'))).toBe(false);
+    } finally {
+      scratch.dispose();
+    }
+  });
+
+  it('archives a symlink target byte for byte, even when it is not UTF-8', () => {
+    const scratch = runSteps([
+      ['git', 'init', '-q', '-b', 'main'],
+      ['write', 'a.txt', 'one\n'],
+      ['commit_all', 'base'],
+      ['mark', 'c0'],
+    ]);
+    try {
+      const raw = Buffer.concat([Buffer.from('bad'), Buffer.from([0xff]), Buffer.from('target')]);
+      symlinkSync(raw as unknown as string, join(scratch.repo, 'lnk'));
+      const target = retain(scratch.repo, markOf(scratch, 'c0'), join(scratch.root, 'evidence'));
+      const archive = readFileSync(join(target as string, 'untracked.tar'));
+      expect(archive.includes(raw)).toBe(true);
+      expect(archive.includes(Buffer.from([0xef, 0xbf, 0xbd]))).toBe(false);
+    } finally {
+      scratch.dispose();
+    }
+  });
+
+  it('keeps a pre-epoch mtime readable by moving it to a PAX record', () => {
+    const scratch = runSteps([
+      ['git', 'init', '-q', '-b', 'main'],
+      ['write', 'a.txt', 'one\n'],
+      ['commit_all', 'base'],
+      ['mark', 'c0'],
+      ['write', 'old.txt', 'old\n'],
+    ]);
+    try {
+      execFileSync('touch', ['-d', '1968-01-01T00:00:00Z', join(scratch.repo, 'old.txt')]);
+      const target = retain(scratch.repo, markOf(scratch, 'c0'), join(scratch.root, 'evidence'));
+      const tar = join(target as string, 'untracked.tar');
+      const listed = spawnSync('tar', ['-tvf', tar], { encoding: 'utf8' });
+      expect(listed.status, listed.stderr).toBe(0);
+      expect(listed.stdout).toContain('old.txt');
+      expect(listed.stdout).toContain('1968-0');
     } finally {
       scratch.dispose();
     }

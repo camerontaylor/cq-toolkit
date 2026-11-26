@@ -25,9 +25,10 @@ const BLOCK = 512;
 /** `tarfile.RECORDSIZE` (`BLOCKSIZE * 20`): the archive is zero-padded to it. */
 const RECORD = 10240;
 
-function field(value: string, length: number): Buffer {
+function field(value: string | Buffer, length: number): Buffer {
   const out = Buffer.alloc(length);
-  out.write(value, 0, length, 'latin1');
+  if (typeof value === 'string') out.write(value, 0, length, 'latin1');
+  else value.copy(out, 0, 0, Math.min(length, value.length));
   return out;
 }
 
@@ -43,7 +44,7 @@ function header(
   size: number,
   mtime: number,
   type: string,
-  linkname: string,
+  linkname: Buffer,
 ): Buffer {
   const block = Buffer.alloc(BLOCK);
   const parts: [number, Buffer][] = [
@@ -73,8 +74,12 @@ function padded(data: Buffer): Buffer {
 }
 
 /** One PAX record: `"<len> <key>=<value>\n"`, `len` counting itself. */
-function paxRecord(key: string, value: string): Buffer {
-  const body = Buffer.from(` ${key}=${value}\n`, 'utf8');
+function paxRecord(key: string, value: string | Buffer): Buffer {
+  const body = Buffer.concat([
+    Buffer.from(` ${key}=`, 'utf8'),
+    typeof value === 'string' ? Buffer.from(value, 'utf8') : value,
+    Buffer.from('\n'),
+  ]);
   let length = body.length + 1;
   while (String(length).length + body.length !== length)
     length = String(length).length + body.length;
@@ -82,10 +87,13 @@ function paxRecord(key: string, value: string): Buffer {
 }
 
 const ASCII = /^[^\u0080-\u{10ffff}]*$/u;
+const asciiBytes = (bytes: Buffer): boolean => bytes.every((byte) => byte < 0x80);
+/** `tarfile`: a numeric field outside `0 <= n < 8**(digits-1)` moves to a PAX record. */
+const fits = (value: number, digits: number): boolean => value >= 0 && value < 8 ** (digits - 1);
 
 function entry(
   name: string,
-  linkname: string,
+  linkname: Buffer,
   type: string,
   mode: number,
   uid: number,
@@ -95,14 +103,33 @@ function entry(
 ): Buffer {
   const records: Buffer[] = [];
   if (name.length > 100 || !ASCII.test(name)) records.push(paxRecord('path', name));
-  if (linkname.length > 100 || !ASCII.test(linkname)) records.push(paxRecord('linkpath', linkname));
+  if (linkname.length > 100 || !asciiBytes(linkname)) records.push(paxRecord('linkpath', linkname));
+  const numeric: Record<string, number> = { uid, gid, mtime };
+  for (const key of ['uid', 'gid', 'mtime'] as const) {
+    if (!fits(numeric[key] as number, key === 'mtime' ? 12 : 8)) {
+      records.push(paxRecord(key, String(numeric[key])));
+      numeric[key] = 0;
+    }
+  }
   const chunks: Buffer[] = [];
   if (records.length > 0) {
     const pax = Buffer.concat(records);
-    chunks.push(header('././@PaxHeader', 0o644, 0, 0, pax.length, 0, 'x', ''), padded(pax));
+    chunks.push(
+      header('././@PaxHeader', 0o644, 0, 0, pax.length, 0, 'x', Buffer.alloc(0)),
+      padded(pax),
+    );
   }
   chunks.push(
-    header(name.slice(0, 100), mode, uid, gid, data.length, mtime, type, linkname.slice(0, 100)),
+    header(
+      name.slice(0, 100),
+      mode,
+      numeric.uid as number,
+      numeric.gid as number,
+      data.length,
+      numeric.mtime as number,
+      type,
+      linkname.subarray(0, 100),
+    ),
     padded(data),
   );
   return Buffer.concat(chunks);
@@ -124,16 +151,38 @@ export function untrackedTar(wt: string, names: readonly string[]): Buffer {
     const mtime = Math.floor(stat.mtimeMs / 1000);
     if (stat.isSymbolicLink()) {
       chunks.push(
-        entry(name, readlinkSync(path), '2', mode, stat.uid, stat.gid, mtime, Buffer.alloc(0)),
+        entry(
+          name,
+          readlinkSync(path, { encoding: 'buffer' }),
+          '2',
+          mode,
+          stat.uid,
+          stat.gid,
+          mtime,
+          Buffer.alloc(0),
+        ),
       );
     } else if (stat.isFile()) {
       const inode = `${stat.dev}:${stat.ino}`;
       const first = stat.nlink > 1 ? inodes.get(inode) : undefined;
       if (first !== undefined && first !== name) {
-        chunks.push(entry(name, first, '1', mode, stat.uid, stat.gid, mtime, Buffer.alloc(0)));
+        chunks.push(
+          entry(
+            name,
+            Buffer.from(first, 'utf8'),
+            '1',
+            mode,
+            stat.uid,
+            stat.gid,
+            mtime,
+            Buffer.alloc(0),
+          ),
+        );
       } else {
         if (stat.nlink > 1) inodes.set(inode, name);
-        chunks.push(entry(name, '', '0', mode, stat.uid, stat.gid, mtime, readFileSync(path)));
+        chunks.push(
+          entry(name, Buffer.alloc(0), '0', mode, stat.uid, stat.gid, mtime, readFileSync(path)),
+        );
       }
     } else {
       throw new PyError(
