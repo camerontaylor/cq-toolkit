@@ -258,6 +258,25 @@ function hasSummaryText(summary: unknown): boolean {
   return typeof summary !== 'string' || pyStrip(summary) !== '';
 }
 
+/** `attempts.append(item)`: only a list has `append`. */
+function appendAttempt(attempts: unknown, item: Dict): void {
+  if (!Array.isArray(attempts)) {
+    throw new PyError(
+      'AttributeError',
+      `'${pyTypeName(attempts)}' object has no attribute 'append'`,
+    );
+  }
+  attempts.push(item);
+}
+
+/** A citation `line` as Python's `isinstance(line, int)` (bool excluded): native or lossless ints. */
+function citationLine(line: unknown): bigint | null {
+  if (line instanceof JsonNumber) return line.kind === 'int' ? (line.integer as bigint) : null;
+  if (typeof line === 'bigint') return line;
+  if (typeof line === 'number' && Number.isSafeInteger(line)) return BigInt(line);
+  return null;
+}
+
 /** One `unchanged_with_reason` citation, verified against `base:path` (`:655-667`). */
 async function verifyCitation(
   citation: unknown,
@@ -267,13 +286,13 @@ async function verifyCitation(
 ): Promise<Dict> {
   const path = pySubscript(citation, 'path');
   const line = pySubscript(citation, 'line');
-  const lineIsInt = line instanceof JsonNumber && line.kind === 'int';
+  const lineValue = citationLine(line);
   if (
     typeof path !== 'string' ||
     path.startsWith('/') ||
     path.split('/').includes('..') ||
-    !lineIsInt ||
-    (line.integer as bigint) < 1n
+    lineValue === null ||
+    lineValue < 1n
   ) {
     throw new PyError('ValueError', 'invalid unchanged evidence anchor');
   }
@@ -283,13 +302,13 @@ async function verifyCitation(
   const blob = await effects.catFileBlob(worktree, `${base}:${path}`);
   if (blob.returncode) throw new PyError('ValueError', 'unchanged evidence blob absent');
   const source = splitlines(blob.stdout);
-  if ((line.integer as bigint) > BigInt(source.length)) {
+  if (lineValue > BigInt(source.length)) {
     throw new PyError('ValueError', 'unchanged evidence line absent');
   }
   return {
     path,
     line,
-    quoted_text: source[Number(line.integer as bigint) - 1],
+    quoted_text: source[Number(lineValue) - 1],
     target: base,
   };
 }
@@ -508,8 +527,7 @@ export async function runRepairProcess(
           stop,
           changed: getDefault(report, 'changed', false),
         };
-        pySubscript(result, 'attempts');
-        (result.attempts as unknown[]).push(attempt);
+        appendAttempt(pySubscript(result, 'attempts'), attempt);
         if (stop === 'configuration') {
           result.reason = getDefault(report, 'summary', 'driver prerequisite missing; needs human');
           break rungLoop;
@@ -721,10 +739,12 @@ export async function runRepairProcess(
         );
       }
       pop(result, 'pending_mechanical');
-      const attempts = pySubscript(result, 'attempts') as unknown[];
-      const tail = attempts.length === 0 ? undefined : attempts[attempts.length - 1];
+      const attempts = pySubscript(result, 'attempts');
+      const tail = pyTruthy(attempts)
+        ? (attempts as unknown[])[(attempts as unknown[]).length - 1]
+        : undefined;
       if (tail === undefined || pySubscript(tail, 'rung') !== rungName(rung)) {
-        attempts.push({
+        appendAttempt(attempts, {
           rung: rungName(rung),
           driver: pySubscript(role, 'driver'),
           model: pySubscript(role, 'model'),

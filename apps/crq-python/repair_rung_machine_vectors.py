@@ -582,6 +582,14 @@ def build_scenarios() -> None:
     scenario("job id that is not a string is a TypeError", job_=job(job=5))
     scenario("repair that is not an object",
              config_={"repair": [], "clone": "/T/clone"})
+    # An empty non-list ``attempts`` passes the eager max() and `not attempts`,
+    # then `.append` raises AttributeError at either append site.
+    for label, empty in (("mapping", {}), ("string", "")):
+        scenario("empty attempts " + label + " cannot take the dispatch append",
+                 progress=prior(next_rung=0, attempts=empty), dispatch=[ok()], mechanical=[{"verdict": "pass"}])
+        scenario("empty attempts " + label + " cannot take the handler append",
+                 progress=prior(next_rung=0, attempts=empty),
+                 dispatch=[raising("RuntimeError", "provider down")])
 
 
 # ---------------------------------------------------------------------------

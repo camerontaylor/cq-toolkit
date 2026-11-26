@@ -297,4 +297,32 @@ describe('repair rung machine vs the production process()', () => {
       expect(run.outcome.returned).toEqual(snapshot(expected.returned));
     }
   });
+
+  // The loader wraps integers in `JsonNumber`; the effect contract does not.
+  it.each([
+    'unchanged_with_reason cites verified evidence',
+    'unchanged evidence line splitting follows splitlines',
+  ])('native integer citation lines behave like Python ints: %s', async (name) => {
+    const entry = cases.find((candidate) => candidate.name === name);
+    expect(entry).toBeDefined();
+    const native = (value: unknown): unknown => {
+      if (value instanceof JsonNumber) return value.kind === 'int' ? Number(value.integer) : value;
+      if (Array.isArray(value)) return value.map(native);
+      if (value !== null && typeof value === 'object') {
+        return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, native(v)]));
+      }
+      return value;
+    };
+    const scenario = entry!.scenario;
+    const run = await replay(
+      {
+        ...scenario,
+        seams: { ...scenario.seams, dispatch: native(scenario.seams.dispatch) as unknown[] },
+      },
+      NOW,
+    );
+    expect(run.trace).toEqual(snapshot(entry!.expected.trace));
+    expect(run.writes).toEqual(entry!.expected.writes);
+    expect(run.outcome.returned).toEqual(snapshot(entry!.expected.returned));
+  });
 });
