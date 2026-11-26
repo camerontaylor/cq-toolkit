@@ -34,6 +34,12 @@ from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+# Keep every git command inside the temporary repositories: drop the caller's
+# repository-location overrides and pin the locale so git's diagnostics are stable.
+for _name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+              "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_NAMESPACE", "GIT_PREFIX"):
+    os.environ.pop(_name, None)
+os.environ["LC_ALL"] = "C"
 os.environ["GIT_CONFIG_GLOBAL"] = "/dev/null"
 os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
 import crq  # noqa: E402
@@ -244,8 +250,16 @@ def resolve(work: Path, value: Any) -> Any:
 
 
 def failure(error: BaseException) -> dict:
-    return {"raises": type(error).__name__, "message": str(error)[:300] if not isinstance(error, subprocess.CalledProcessError)
-            else "git exit " + str(error.returncode)}
+    """Class plus a stable message; git's own diagnostic text (a RuntimeError from
+    ``crq.git``, a CalledProcessError) is locale- and version-dependent, so it is
+    recorded as a fixed marker."""
+    if isinstance(error, subprocess.CalledProcessError):
+        message = "git exit " + str(error.returncode)
+    elif isinstance(error, RuntimeError):
+        message = "git failure"
+    else:
+        message = str(error)[:300]
+    return {"raises": type(error).__name__, "message": message}
 
 
 def snapshot(work: Path, outcome: dict) -> dict:

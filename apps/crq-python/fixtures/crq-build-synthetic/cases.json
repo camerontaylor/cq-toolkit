@@ -1342,7 +1342,7 @@
     {
      "item_unchanged": true,
      "outcome": {
-      "message": "git diff --name-status --no-renames ffffffffffffffffffffffffffffffffffffffff^1 ffffffffffffffffffffffffffffffffffffffff \u2026 exit 128: fatal: ambiguous argument 'ffffffffffffffffffffffffffffffffffffffff^1': unknown revision or path not in the working tree.\nUse '--' to separate paths from revisions, lik",
+      "message": "git failure",
       "raises": "RuntimeError"
      },
      "refs": []
@@ -1404,7 +1404,7 @@
     {
      "item_unchanged": true,
      "outcome": {
-      "message": "git diff --name-status --no-renames ^1  \u2026 exit 128: fatal: bad revision '^1'",
+      "message": "git failure",
       "raises": "RuntimeError"
      },
      "refs": []
