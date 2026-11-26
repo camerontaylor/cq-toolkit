@@ -459,6 +459,7 @@ describe('composed tick shadow: Python crq.tick vs the TS composed tick', () => 
       (root: string) => appendFileSync(join(root, 'events.jsonl'), '{"at":"x","event":"x"}\n'),
       (root: string) => writeFileSync(join(root, 'heartbeat.json'), '{}'),
       // Queue corruption and lost reports are not the retirement delta.
+      (root: string) => writeFileSync(join(root, 'queue.json'), '{}'),
       (root: string) => writeFileSync(join(root, 'queue.json'), '{"items":[]}'),
       (root: string) => unlinkSync(join(root, 'status.json')),
       (root: string) => unlinkSync(join(root, 'status.md')),
