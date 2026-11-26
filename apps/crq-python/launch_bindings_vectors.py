@@ -127,6 +127,15 @@ def build_scenarios() -> None:
     # --- secret scans -------------------------------------------------------------------
     clean = {"src/a.ts": hexs("export const a = 1;\n")}
     secret = {"src/a.ts": hexs(SECRET + "\n")}
+    ctx = lambda tail: hexs("l1\nl2\n" + SECRET + "\nl4\n" + tail + "\nl6\nl7\n")
+    add("scan: a secret on an unchanged context line is not a hit (-U0)", "scan",
+        base={"src/a.ts": ctx("l5")}, head={"src/a.ts": ctx("l5-edited")})
+    add("scan: the patterns are read from origin/main, not from the head", "scan",
+        base={}, head={"policy/denylist/patterns.yml": custom(), "src/a.ts": hexs(SECRET + "\n")})
+    add("scan: a colour config does not hide a hit", "scan", base=clean, head=secret,
+        config=[["color.ui", "always"], ["color.diff", "always"]])
+    add("scan: an external diff driver is not used", "scan", base=clean, head=secret,
+        config=[["diff.external", "false"]])
     add("scan: a clean range", "scan", base=clean, head={"src/a.ts": hexs("export const a = 2;\n")})
     add("scan: a secret added", "scan", base=clean, head=secret)
     add("scan: a secret removed is still a hit", "scan", base=secret, head=clean)
@@ -224,6 +233,8 @@ def _repo(root: Path, spec: dict) -> Path:
     repo = root / "clone"
     repo.mkdir()
     _git(repo, "init", "-q", "-b", "main")
+    for key, value in spec.get("config", []):
+        _git(repo, "config", key, value)
     patterns = bytes.fromhex(spec["patterns"]) if "patterns" in spec else CORPUS.encode()
     (repo / "policy" / "denylist").mkdir(parents=True)
     (repo / "policy" / "denylist" / "patterns.yml").write_bytes(patterns)

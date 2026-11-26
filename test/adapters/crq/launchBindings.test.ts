@@ -36,6 +36,7 @@ interface Spec {
   patterns?: string;
   classes?: string[] | null;
   spec?: string;
+  config?: [string, string][];
 }
 interface Expected {
   error: string | null;
@@ -100,6 +101,7 @@ async function makeRepo(root: string, spec: Spec): Promise<string> {
   const repo = join(root, 'clone');
   await mkdir(join(repo, 'policy', 'denylist'), { recursive: true });
   git(repo, 'init', '-q', '-b', 'main');
+  for (const [key, value] of spec.config ?? []) git(repo, 'config', key, value);
   await writeFile(
     join(repo, 'policy', 'denylist', 'patterns.yml'),
     spec.patterns === undefined ? CORPUS : Buffer.from(spec.patterns, 'hex'),
@@ -266,5 +268,40 @@ describe('projection scans (no Python callable: `launch` inlines them)', () => {
   });
   it('honours none without an exemption base', async () => {
     expect(await run(null)).toBe(false);
+  });
+
+  const hex = (text: string): string => Buffer.from(text, 'utf8').toString('hex');
+  const secret = hex(['DEPLOY_', 'TOKEN=', 'abababababababab\n'].join(''));
+  const scanSpec = async (spec: Spec): Promise<boolean> => {
+    const repo = await makeRepo(root, spec);
+    const rdir = join(root, 'run');
+    await mkdir(rdir);
+    const decision = await fileLaunchBindings(bindings(repo)).scan({
+      mode: 'projection',
+      item: {},
+      base: 'base',
+      head: 'head',
+      exemptionBase: null,
+      clone: repo,
+      classes: null,
+      rdir,
+    });
+    return decision.ok;
+  };
+  it('reads a binary file as text (--text)', async () => {
+    const binary = `0000${secret}`;
+    expect(await scanSpec({ name: 'p', op: 'scan', base: {}, head: { 'b.bin': binary } })).toBe(
+      false,
+    );
+  });
+  it('does not follow renames (--no-renames)', async () => {
+    expect(
+      await scanSpec({
+        name: 'p',
+        op: 'scan',
+        base: { 'src/a.ts': secret },
+        head: { 'src/b.ts': secret },
+      }),
+    ).toBe(false);
   });
 });
