@@ -36,8 +36,7 @@
  * {@link PyError} of the same class. Documented deviations: a `next_rung`
  * that is a float or a bool (Python accepts both and builds `A1.5` / `ATrue`
  * directories) is refused with a `TypeError`; `int()` of a rung suffix accepts
- * ASCII digits only; `str()` of a container rung inside the `pending_mechanical`
- * comparison never equals a rung string.
+ * ASCII digits only.
  */
 import { JsonNumber, type JsonValue } from '../policy/crq/jsonValue.js';
 import { pythonRepr } from '../policy/crq/prReviewFindings.js';

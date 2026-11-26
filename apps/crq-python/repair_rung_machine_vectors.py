@@ -228,7 +228,7 @@ def build_scenarios() -> None:
              mechanical=[{"verdict": "pass"}])
     scenario("float stop renders as a Python float",
              dispatch=[{"stop": 2.5, "summary": "q"}, ok()], mechanical=[{"verdict": "pass"}])
-    scenario("pending_mechanical container rung matches the same container in the last attempt",
+    scenario("pending_mechanical container rung: the eager max() ValueErrors on the A['x'] attempt before any comparison",
              progress=prior(next_rung=0, attempts=[attempt("A['x']", "ok")],
                             pending_mechanical={"rung": ["x"], "commits": [], "fixer_reason": "r"}),
              mechanical=[{"verdict": "pass"}], trees=["/T/wt"])
