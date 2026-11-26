@@ -11,6 +11,7 @@
  * Everything that touches the world is injected through {@link LaunchEffects};
  * the caller owns tick.lock throughout.
  */
+import { pyTruthy } from '../policy/crq/queueDoc.js';
 import { StartAuthorRefused, type StartPlan, type StartRecord } from './startOne.js';
 import {
   AUTHOR_KIND,
@@ -87,6 +88,12 @@ export interface LaunchEffects {
      * for none. A range scan reads the range base; a projection scan reads the
      * push's subject base or the merge's first parent (`exemption_base`), never
      * the projection base.
+     *
+     * No `scan` implementation reads this yet: the consumer (the projection
+     * scan adapter that loads `.crq/scan-exemptions.toml` from this commit)
+     * lands with the routing slice, so passing it changes no behaviour today.
+     * That slice must add a test that a pushed exemption file is not honoured
+     * (`test_scan_exemptions.py`, the pushed-file cases).
      */
     exemptionBase: string | null;
     clone: string | null;
@@ -156,19 +163,6 @@ function requireString(value: unknown, name: string): string {
 function flagList(value: unknown): unknown[] {
   return Array.isArray(value) ? (value as unknown[]) : [];
 }
-
-const truthy = (value: unknown): boolean =>
-  value !== undefined &&
-  value !== null &&
-  value !== false &&
-  value !== 0 &&
-  value !== '' &&
-  !(Array.isArray(value) && value.length === 0) &&
-  !(
-    typeof value === 'object' &&
-    !Array.isArray(value) &&
-    Object.keys(value as object).length === 0
-  );
 
 export async function launch(
   queue: StartRecord,
@@ -260,7 +254,7 @@ export async function launch(
     kind === AUTHOR_KIND ||
     kind === RECEIPT_KIND ||
     kind === PUSH_KIND ||
-    truthy(plan.range_policy)
+    pyTruthy(plan.range_policy)
   )
     cliCmd.push('--committed');
   const startedAt = fx.nowIso();
@@ -287,7 +281,7 @@ export async function launch(
     started_at: startedAt,
     cmd: [...cliCmd, '--base-commit', base],
   };
-  if (truthy(plan.profile)) {
+  if (pyTruthy(plan.profile)) {
     const flags = record(plan.profile).flags;
     meta.profile = plan.profile;
     meta.config_digest = plan.config_digest;
