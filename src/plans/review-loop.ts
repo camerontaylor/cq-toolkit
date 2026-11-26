@@ -404,6 +404,7 @@ export interface ReviewLoopOpts {
   /** The PR → worktree registry (persistence seam behind the worktree stage). */
   registry: SlotWorktreeRegistry;
   isBookkeepingPath?: (path: string, root: string) => Promise<boolean>;
+  isRetirableIgnoredPath?: (path: string, root: string) => Promise<boolean>;
   legacySources?: readonly string[];
   /**
    * Model identity for the fix workers (ModelSpec data on every fix input).
@@ -985,6 +986,9 @@ async function runOwnedReviewLoop(
       run: opts.git,
       registry: opts.registry,
       ...(opts.isBookkeepingPath ? { isBookkeepingPath: opts.isBookkeepingPath } : {}),
+      ...(opts.isRetirableIgnoredPath
+        ? { isRetirableIgnoredPath: opts.isRetirableIgnoredPath }
+        : {}),
       nowMs: opts.nowMs,
       ...(opts.expectedHead !== undefined ? { expectedHead: opts.expectedHead } : {}),
       ...(opts.worktreeRoot !== undefined ? { worktreeRoot: opts.worktreeRoot } : {}),

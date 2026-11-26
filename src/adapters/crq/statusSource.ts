@@ -6,6 +6,7 @@
  * no environment variable and no working-directory default is consulted, so a
  * test or a future `crq` subcommand controls the roots.
  */
+import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
@@ -43,6 +44,55 @@ async function readTextStrict(path: string): Promise<string> {
   }
 }
 
+const FULL_SHA = /^[0-9a-f]{40}$/;
+const SUBJECT_TIMEOUT_MS = 10_000;
+
+/** One commit subject from the runner's primary clone; null on any failure. */
+function gitSubject(clone: string, sha: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    execFile(
+      'git',
+      ['-C', clone, 'log', '-1', '--no-show-signature', '--format=%s', sha],
+      { encoding: 'utf8', timeout: SUBJECT_TIMEOUT_MS, killSignal: 'SIGKILL', maxBuffer: 65_536 },
+      (error, stdout) => {
+        const text = error === null ? stdout.trim() : '';
+        resolve(text === '' ? null : text);
+      },
+    );
+  });
+}
+
+/**
+ * Commit subjects (#1420) from the primary clone named by `config.json`.
+ * Read-only git `log -1`; a bad sha, a missing clone or a failed command just
+ * omits that subject.
+ */
+async function readCommitSubjects(
+  roots: StatusStateRoots,
+  shas: readonly string[],
+): Promise<ReadonlyMap<string, string>> {
+  const out = new Map<string, string>();
+  let clone: unknown;
+  try {
+    const config = JSON.parse(await readTextStrict(join(roots.runnerRoot, 'config.json'))) as {
+      clone?: unknown;
+    };
+    clone = config.clone;
+  } catch {
+    return out;
+  }
+  if (typeof clone !== 'string' || clone === '') return out;
+  await Promise.all(
+    shas
+      .filter((sha) => FULL_SHA.test(sha))
+      .map(async (sha) => {
+        const subject = await gitSubject(clone, sha);
+        if (subject !== null) out.set(sha, subject);
+      }),
+  );
+  return out;
+}
+
 /** Bind the read-only route to one runner root and one state root. */
 export function fileReadOnlyStatusEffects(
   roots: StatusStateRoots,
@@ -64,6 +114,7 @@ export function fileReadOnlyStatusEffects(
         return null;
       }
     },
+    readCommitSubjects: (shas) => readCommitSubjects(roots, shas),
     now,
   };
 }

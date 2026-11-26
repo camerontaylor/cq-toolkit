@@ -471,20 +471,24 @@ class ExecutionTests(SnapshotGitFixture, unittest.TestCase):
             raise OSError("receipt crash")
         for point in ("receipt", "terminal-queue", "outbox", "publication-queue"):
             with self.subTest(point):
+                # Per-case roots: only the receipt and outbox writes this case
+                # actually made can survive its simulated crash.
+                c = copy.copy(self.c)
+                c.STATE = self.state / point
                 self.q = copy.deepcopy(baseline)
                 self.item = self.q["items"][0]
-                store = review_ledger.ArtifactStore(self.state / "artifacts")
-                outbox = review_ledger.Outbox(self.state / "publication", store)
+                store = review_ledger.ArtifactStore(c.STATE / "artifacts")
+                outbox = review_ledger.Outbox(c.STATE / "publication", store)
                 real_spool = outbox.spool
-                calls = []
+                saved = []
                 fired.clear()
                 def save(q):
-                    calls.append(copy.deepcopy(q))
-                    if (point == "terminal-queue" and len(calls) == 1
-                            or point == "publication-queue" and len(calls) == 2):
+                    if (point == "terminal-queue" and not saved
+                            or point == "publication-queue" and len(saved) == 1):
                         fired.append(point)
                         raise OSError("queue crash")
-                self.c.save_queue = save
+                    saved.append(copy.deepcopy(q))
+                c.save_queue = save
                 def spool(value):
                     if point == "outbox":
                         fired.append(point)
@@ -497,10 +501,10 @@ class ExecutionTests(SnapshotGitFixture, unittest.TestCase):
                      mock.patch.object(review_receipt, "write_receipt", side_effect=after_write if point == "receipt" else real_write):
                     if point == "outbox":
                         # Spool faults are handled in-place, so completion returns.
-                        runtime.complete(self.c, self.q, self.item, self.rdir, "run-1", self.cls, "2026-11-08T00:01:00Z", 0)
+                        runtime.complete(c, self.q, self.item, self.rdir, "run-1", self.cls, "2026-11-08T00:01:00Z", 0)
                     else:
                         with self.assertRaises(OSError) as caught:
-                            runtime.complete(self.c, self.q, self.item, self.rdir, "run-1", self.cls, "2026-11-08T00:01:00Z", 0)
+                            runtime.complete(c, self.q, self.item, self.rdir, "run-1", self.cls, "2026-11-08T00:01:00Z", 0)
                         self.assertEqual(str(caught.exception),
                                          "receipt crash" if point == "receipt" else "queue crash")
                     self.assertEqual(fired, [point])  # the selected fault actually fired
@@ -508,15 +512,31 @@ class ExecutionTests(SnapshotGitFixture, unittest.TestCase):
                         self.assertEqual(self.item["state"], "done")
                         self.assertTrue(self.item["publication_pending"])
                         self.assertEqual(self.item["publication_reason"], "outbox crash")
-                # Recover from the pre-terminal persisted snapshot, then replay
-                # retained completion bytes. This path never invokes launch.
-                self.q = copy.deepcopy(baseline)
+                # Recover from the last successfully persisted queue snapshot, then
+                # replay completion and publication with publication enabled. This
+                # path never invokes launch.
+                self.q = saved[-1] if saved else copy.deepcopy(baseline)
                 self.item = self.q["items"][0]
-                self.c.save_queue = lambda q: None
-                self.finish()
+                replayed = []
+                c.save_queue = lambda q: None
+                with mock.patch.object(backfill_runtime, "settings", return_value={"enabled": True}), \
+                     mock.patch.object(backfill_runtime, "services", return_value=(None, store, outbox, None)), \
+                     mock.patch.object(backfill_runtime, "publish"):
+                    for _ in range(2):  # a repeated replay must not duplicate the outbox entry
+                        if self.item["state"] == "pending":
+                            replayed.append("complete")
+                            runtime.complete(c, self.q, self.item, self.rdir, "run-1", self.cls,
+                                             "2026-11-08T00:01:00Z", 0)
+                        else:
+                            replayed.append("republish")
+                            runtime.republish(c, self.q, self.item)
+                # Only the last saved snapshot already holds the terminal state, so
+                # recovering from it enters republish; the baseline would re-complete.
+                self.assertEqual(replayed[0], "republish" if saved else "complete")
                 self.assertEqual(self.item["state"], "done")
                 self.assertEqual(len(self.q["review_events"]), 1)
                 self.assertEqual(len(self.item["attempts"]), 1)
+                self.assertEqual(len(outbox.pending()), 1)
 
     def test_explicit_repeat_launches_despite_completed_pr_or_local_evidence(self):
         initial = copy.deepcopy(self.q)

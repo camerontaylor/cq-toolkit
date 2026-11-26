@@ -72,21 +72,39 @@ class ReviewTransportTests(SnapshotTransportFixture, unittest.TestCase):
             index = chunk["next_index"]
         self.assertEqual(hashlib.sha256(b"".join(parts)).hexdigest(), item["receipt_id"])
 
-    def test_queue_policy_and_primary_repo_only(self):
+    def test_queue_policy_principal_and_unclonable_repo(self):
         self.policy["write"] = []
         with self.assertRaisesRegex(ValueError, "principal"):
             self.call_review(self.review)
         self.policy["write"] = ["queue-client"]
+        # Any repository may be submitted; one the runner cannot clone answers
+        # unsupported (repo-unavailable) and leaves no queue item or clone.
         self.review["inputs"]["repo"] = "other/repo"
-        self.assertEqual(self.call_review(self.review)["reason"], "unsupported-repo")
+        with mock.patch.object(transport, "clone_url", return_value=str(self.state / "missing.git")):
+            self.assertEqual(self.call_review(self.review)["reason"], "repo-unavailable")
         self.assertEqual(self.saved["items"], [])
+        self.assertEqual(sorted(p.name for p in (self.state / "review-repos").iterdir()), [".tmp"])
+        self.assertEqual(list((self.state / "review-repos" / ".tmp").iterdir()), [])
+        # A failed clone never touches another repository's clone, even one
+        # whose name extends this repository's name (owner/project.partial).
+        sibling = self.state / "review-repos" / "other" / "repo.partial"
+        (sibling / ".git").mkdir(parents=True)
+        (sibling / ".git" / "keep").write_text("retained snapshot objects")
+        with mock.patch.object(transport, "clone_url", return_value=str(self.state / "missing.git")):
+            self.assertEqual(self.call_review(self.review)["reason"], "repo-unavailable")
+        self.assertEqual((sibling / ".git" / "keep").read_text(), "retained snapshot objects")
+        # A slug that is not owner/name is still refused before any clone.
+        self.review["inputs"]["repo"] = "not-a-slug"
+        with mock.patch.object(transport, "provision") as provision:
+            with self.assertRaises(ValueError):
+                self.call_review(self.review)
+        provision.assert_not_called()
 
-    def test_primary_case_variant_submit_requires_exact_policy_admission(self):
+    def test_primary_case_variant_submit_needs_no_policy_entry(self):
         variant = self.runner.REPO.upper()
         self.review["inputs"]["repo"] = variant
-        # Repository identity does not expand the explicit wire allowlist.
-        self.assertEqual(self.call_review(self.review)["reason"], "unsupported-repo")
-        self.policy["repos"] = [variant]
+        # No policy repository allowlist: the primary's alternate spelling is
+        # admitted against the primary clone.
         with mock.patch.object(author_snapshot, "install", wraps=author_snapshot.install) as install:
             self.assertEqual(self.call_review(self.review)["action"], "created")
         self.assertEqual(install.call_args.kwargs["clone"], self.destination)
@@ -98,11 +116,36 @@ class ReviewTransportTests(SnapshotTransportFixture, unittest.TestCase):
             runtime.republish(self.runner, self.saved, item)
         self.assertEqual(item["publication_reason"], "publication-disabled")
 
-    def test_allowlisted_unconfigured_foreign_repo_is_rejected(self):
-        self.review["inputs"]["repo"] = "foreign/unconfigured"
-        self.policy["repos"] = ["foreign/unconfigured"]
-        self.assertEqual(self.call_review(self.review)["reason"], "unsupported-repo")
-        self.assertEqual(self.saved["items"], [])
+    def test_unconfigured_foreign_repo_is_cloned_on_demand(self):
+        # Manual review of a repository that is neither configured nor in the
+        # policy: the runner clones it once under its state and admits it.
+        self.review["inputs"]["repo"] = "Foreign/Unconfigured"
+        self.runner.UNIVERSAL_SCAN_CLASSES = crq.UNIVERSAL_SCAN_CLASSES
+        self.runner.denylist_rules = lambda classes=None: [{"regex": "(?!)"}]
+        clone = self.state / "review-repos" / "foreign" / "unconfigured"
+        with mock.patch.object(transport, "clone_url", return_value=str(self.repo)) as url, \
+                mock.patch.object(author_snapshot, "install", wraps=author_snapshot.install) as install:
+            self.assertEqual(self.call_review(self.review)["action"], "created")
+            url.assert_called_once()
+            self.assertEqual(install.call_args.kwargs["clone"], clone)
+            self.assertEqual(install.call_args.kwargs["classes"], crq.UNIVERSAL_SCAN_CLASSES)
+            # A second request reuses the clone instead of cloning again.
+            self.review["request_id"] = "local-2"
+            self.review["repeat"] = True
+            self.call_review(self.review)
+            url.assert_called_once()
+        self.assertTrue((clone / ".git").is_dir())
+        self.assertEqual(list((self.state / "review-repos" / ".tmp").iterdir()), [])
+        self.assertEqual(self.saved["items"][0]["identity_inputs"]["repo"], "Foreign/Unconfigured")
+        self.assertFalse(hasattr(self.runner, "REPOS"))
+
+    def test_clone_url_reuses_primary_origin_transport(self):
+        author_snapshot.git(self.destination, "remote", "remove", "origin") \
+            if b"origin" in author_snapshot.git(self.destination, "remote") else None
+        author_snapshot.git(self.destination, "remote", "add", "origin",
+                            "git@github.com:CameronTaylor/cq-toolkit.git")
+        self.assertEqual(transport.clone_url(self.runner, "camerontaylor/agents"),
+                         "git@github.com:camerontaylor/agents.git")
 
     def test_six_mib_reader_and_additive_dispatch(self):
         raw = b'{"v":1,"op":"capabilities"}'
@@ -422,28 +465,30 @@ class ReviewTransportTests(SnapshotTransportFixture, unittest.TestCase):
                 with self.assertRaisesRegex(author_snapshot.AuthorRefused, "3145728 decoded bytes"):
                     self.call_review(req)
 
-    def test_foreign_repo_snapshot_plan_launch_and_cleanup(self, removed=False):
+    def test_foreign_repo_snapshot_plan_launch_and_cleanup(self, removed=False, manual=False):
         import local_review_runtime as runtime
         foreign = "example/secondary"
         self.review["inputs"]["repo"] = foreign
-        self.policy["repos"] = [foreign]
         cfg = dict(repo=foreign, clone=str(self.destination), scan_extra_classes=[])
-        self.runner.REPOS = [cfg]
+        repos = [] if manual else [cfg]
+        target = self.state / "review-repos" / "example" / "secondary" if manual else self.destination
+        self.runner.REPOS = repos
         self.runner.UNIVERSAL_SCAN_CLASSES = crq.UNIVERSAL_SCAN_CLASSES
-        self.runner.CLONE = self.repo  # different object store: import must target destination
+        self.runner.CLONE = self.repo  # different object store: import must target the foreign clone
         ref = self.seed_live_denylist()
         with mock.patch.multiple(crq, CLONE=self.destination, DEFAULT_REF=ref):
             rules = crq.denylist_rules()
         self.assertGreater(len(rules), 0)
         self.runner.denylist_rules = lambda classes=None: [r for r in rules if classes is None or r["id"] in classes]
-        result = self.call_review(self.review)
+        with mock.patch.object(transport, "clone_url", return_value=str(self.destination)):
+            result = self.call_review(self.review)
         self.assertEqual(result["action"], "created")
-        self.assertTrue(author_snapshot.git(self.destination, "cat-file", "commit", self.head))
-        self.assertTrue(author_snapshot.git(self.destination, "for-each-ref", "refs/crq/author-snapshots"))
+        self.assertTrue(author_snapshot.git(target, "cat-file", "commit", self.head))
+        self.assertTrue(author_snapshot.git(target, "for-each-ref", "refs/crq/author-snapshots"))
         self.assertFalse(author_snapshot.git(self.repo, "for-each-ref", "refs/crq/author-snapshots"))
         item = self.saved["items"][0]
         wt_root = self.state / "worktrees"
-        with mock.patch.multiple(crq, CLONE=self.repo, REPOS=[cfg], STATE=self.state,
+        with mock.patch.multiple(crq, CLONE=self.repo, REPOS=repos, STATE=self.state,
                 RUNS=self.state / "runs", WT_ROOT=wt_root, CONFIG={}), \
              mock.patch.object(crq, "save_queue"), mock.patch.object(crq, "event"), \
              mock.patch.object(crq, "append_work_record"), \
@@ -459,7 +504,8 @@ class ReviewTransportTests(SnapshotTransportFixture, unittest.TestCase):
             processes.side_effect = spawn
             run_id = crq.launch(self.saved, item, plan)
             scan.assert_called_once()
-            self.assertEqual(scan.call_args.kwargs["clone"], self.destination)
+            self.assertEqual(scan.call_args.kwargs["clone"], target)
+            self.assertEqual(scan.call_args.kwargs["classes"], crq.UNIVERSAL_SCAN_CLASSES)
             meta = json.loads((crq.RUNS / run_id / "meta.json").read_text())
             self.assertEqual(meta["repo"], foreign)
             self.assertEqual(author_snapshot.git(Path(meta["worktree"]), "rev-parse", "HEAD").decode().strip(), self.head)
@@ -478,7 +524,7 @@ class ReviewTransportTests(SnapshotTransportFixture, unittest.TestCase):
             self.assertIsNotNone(runtime.retained(crq, item))
             self.assertFalse(item["publication_pending"])
             self.assertEqual(item["publication_reason"], "multi-repo publication unsupported")
-            self.assertNotIn(meta["wt_branch"], author_snapshot.git(self.destination, "branch", "--list").decode())
+            self.assertNotIn(meta["wt_branch"], author_snapshot.git(target, "branch", "--list").decode())
             if not removed:
                 self.assertTrue(crq.local_review_pr.associate(crq, self.saved, foreign, 7, self.base, self.head, False))
         self.assertEqual(self.call_review(dict(v=1, op="status", request_id="local-1"))["state"], "completed")
@@ -488,12 +534,21 @@ class ReviewTransportTests(SnapshotTransportFixture, unittest.TestCase):
     def test_removed_foreign_repo_harvest_cleans_owning_worktree(self):
         self.test_foreign_repo_snapshot_plan_launch_and_cleanup(removed=True)
 
-    def test_clone_is_not_authorization_and_repos_is_optional(self):
+    def test_manual_unconfigured_repo_plan_launch_and_cleanup(self):
+        # The manual-review clone serves planning, the universal scan, the
+        # worktree and cleanup exactly as a configured clone does.
+        self.test_foreign_repo_snapshot_plan_launch_and_cleanup(manual=True)
+
+    def test_configured_repo_needs_no_policy_entry_and_repos_is_optional(self):
         import queue_transport
         foreign = "example/secondary"
-        self.runner.REPOS = [dict(repo=foreign, clone=str(self.destination))]
+        self.runner.REPOS = [dict(repo=foreign, clone=str(self.destination), scan_extra_classes=[])]
+        self.runner.UNIVERSAL_SCAN_CLASSES = crq.UNIVERSAL_SCAN_CLASSES
+        self.runner.denylist_rules = lambda classes=None: [{"regex": "(?!)"}]
         self.review["inputs"]["repo"] = foreign
-        self.assertEqual(self.call_review(self.review)["reason"], "unsupported-repo")
+        with mock.patch.object(transport, "clone_url") as url:
+            self.assertEqual(self.call_review(self.review)["action"], "created")
+        url.assert_not_called()
         policy_file = self.state / "queue-policy.json"
         policy_file.write_text(json.dumps(self.policy))
         self.assertEqual(queue_transport.validate_policy(json.loads(policy_file.read_text()))["repo"], crq.REPO)
@@ -510,7 +565,6 @@ class ReviewTransportTests(SnapshotTransportFixture, unittest.TestCase):
         author_snapshot.git(self.repo, "update-ref", "refs/heads/available", self.head)
         self.runner.REPOS = [dict(repo=foreign, clone=str(clone))]
         self.runner.fetch = lambda **kw: crq.fetch(**kw)
-        self.policy["repos"] = [foreign]
         self.review["inputs"]["repo"] = foreign
         self.review.pop("snapshot")
         with mock.patch.object(crq, "fetch", wraps=crq.fetch) as fetch:

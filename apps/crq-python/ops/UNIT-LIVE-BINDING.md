@@ -24,15 +24,25 @@ It returns the adapter and its selected identity. It never calls
 
 Recovery composes the same adapter through
 `production_adapter(effects, overlay, unit=record.unit,
-runtime=record.prior_runtime)`. The controller supplies the unit and prior
-runtime from the one retained record it has already validated, under its lock,
-and calls the composition callback after the read-only queue-drain gate and
-before snapshot validation. The record's snapshot is authoritative for the
-bytes, modes, ownership and activation that are restored, so a checkout `HEAD`
-advance between the failed switch and the recovery changes the composed
-selection but not what recovery restores, and the composed render is not
-consumed by the recovery path. Composing for the abandoned target instead
-would make recovery depend on an artifact that may no longer be installed.
+runtime=record.prior_runtime, source_sha=<retained prior_head>)`. The
+controller supplies the unit, prior runtime and pinned source from the one
+retained record it has already validated, under its lock. It reads the
+retained head from the record's top-level `prior_head` first, and falls back to
+`state.prior_head` only when the top-level value is absent (snapshot-phase
+records have no `state`, so they depend on the top-level value). A missing or
+malformed retained head is refused rather than falling back to the current
+HEAD. The pinned source (the checkout `HEAD` captured before the
+failed switch) decides what the adapter renders for the composed selection,
+and its inventory also determines the allowed snapshot paths
+(`validate_snapshot` refuses a snapshot whose paths differ) and the restore
+targets (`restore`). The record's snapshot is separately authoritative for the
+restored bytes, modes, ownership and activation. A checkout `HEAD` advance
+between the failed switch and the recovery does not change the composed
+selection or what recovery restores, and the composed render is not consumed by
+the recovery path. Composing for the abandoned target instead
+would make recovery depend on an artifact that may no longer be installed. The
+controller calls the composition callback after the read-only queue-drain gate
+and before snapshot validation.
 
 The adapter's `error_type` and default queue drain come from the loaded
 controller module that owns the supplied `Effects` object, not from a second

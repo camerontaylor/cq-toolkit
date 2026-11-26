@@ -1,6 +1,7 @@
 {
   "test/adapters/crq/coverageSource.test.ts": "pure",
   "test/adapters/crq/notifyCoverageVectors.test.ts": "process",
+  "test/adapters/crq/repairFetchLock.test.ts": "process",
   "test/adapters/crq/repairPreparation.test.ts": "process",
   "test/adapters/crq/repairScan.test.ts": "pure",
   "test/adapters/crq/summarySource.test.ts": "process",
@@ -833,5 +834,8 @@
   "test/workflows/ratchet-provenance.test.ts": "process",
   "test/workflows/self-host-concurrency.test.ts": "pure",
   "test/workflows/self-host-sandbox.test.ts": "pure",
-  "test/workflows/template-render.test.ts": "process"
+  "test/workflows/template-render.test.ts": "process",
+  "test/adapters/crq/tickHostEffects.test.ts": "process",
+  "test/policy/crq/coverageOpportunity.test.ts": "process",
+  "test/queue-runner/tickShadowDifferential.test.ts": "process"
 }

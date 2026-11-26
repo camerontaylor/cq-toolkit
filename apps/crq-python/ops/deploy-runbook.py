@@ -47,15 +47,15 @@ are kept:
   rollback (no queue schema marker, no ``author_*`` state keys). The live
   ``repair.cq_bin`` pointer and its entry bytes are measured before the
   deploy; the target render must keep both. Rollback switches back to the
-  measured prior SHA with the same helper fence, requires the live config
+  measured prior SHA with the same helper (the prior SHA is not re-verified as a deploy target; the measured config bytes are restored verbatim), requires the live config
   bytes to equal the pre-deploy bytes (pointer included), requires the queue
   bytes to survive the rollback switch (re-measured after its own drain when
   a completed health tick may have advanced them), and restarts exactly the
   triggers observed active before the run.
 
 The target's own helper and controller are extracted and executed. A target
-whose ``verify_target`` still requires an annotated tag is refused before the
-hold: it cannot support a tagless switch or the tagless automatic rollback.
+whose helper still requires an annotated tag or lacks exact-byte rollback
+support is refused before the hold.
 
 Only a failure *after* the switch triggers automatic rollback: a failed
 verification or a failed health check. A failure before the switch restarts
@@ -285,7 +285,10 @@ def measure_cq_bin(config_bytes):
 
     The configuration string alone does not prove what the runner executes;
     the measured entry does. A placeholder is recorded as such (the overlay
-    did not render a runtime) and compared as a string.
+    did not render a runtime) and compared as a string. A non-placeholder
+    pointer must name an existing entry: a missing one is refused here so
+    preflight rejects it before the admission hold, while the later
+    pre-restart checks still detect deletion after preflight.
     """
     try:
         config = json.loads(config_bytes.decode("utf-8"))
@@ -306,10 +309,12 @@ def measure_cq_bin(config_bytes):
     require(entry.is_absolute(),
             "live repair.cq_bin is not an absolute path: " + repr(pointer))
     record["exists"] = entry.is_file()
-    if record["exists"]:
-        record["sha256"] = sha256_file(entry)
-        record["mode"] = oct(entry.stat().st_mode & 0o777)
-        record["resolved"] = str(entry.resolve())
+    require(record["exists"],
+            "live repair.cq_bin points at a missing entry: " + repr(pointer)
+            + "; the runtime this deploy would execute cannot be measured")
+    record["sha256"] = sha256_file(entry)
+    record["mode"] = oct(entry.stat().st_mode & 0o777)
+    record["resolved"] = str(entry.resolve())
     return record
 
 
@@ -441,10 +446,17 @@ class Hold:
         self.acquired = True
 
     def owns(self):
+        return self.ownership() is True
+
+    def ownership(self):
+        """True when the marker holds this run's token, False when it verifiably
+        does not (absent or foreign), None when a read failure leaves it unknown."""
         try:
             return self.path.read_bytes() == self.token
-        except OSError:
+        except FileNotFoundError:
             return False
+        except OSError:
+            return None
 
     def release(self):
         require(self.owns(),
@@ -641,31 +653,13 @@ class Run:
                     "target that contains the tagless-helper change first. "
                     "Nothing has been switched.")
 
+        require("rollback_config" in inspect.signature(
+                    self.helper.switch).parameters,
+                "the target revision's prepare-host.switch cannot restore "
+                "recorded rollback config bytes. Choose a target with "
+                "rollback_config support. Nothing has been switched.")
+
     # -- steps ---------------------------------------------------------
-    def require_rollback_target(self):
-        """Refuse before admission if the rollback target would not verify.
-
-        Automatic rollback switches back to the live prior SHA through the
-        helper's ``switch``, which runs ``verify_target`` on it: merged to
-        ``refs/remotes/origin/main`` and at or above the policy floor. The
-        preflight above tests only the target, so a local-only prior SHA
-        passes it and then fails inside the helper after the forward switch
-        has already installed the target, leaving admission held for the
-        owner. Apply the rollback's own rule to the prior SHA here, before
-        admission and before any switch, so preflight and rollback agree.
-        """
-        verify = getattr(self.helper, "verify_target", None)
-        if verify is None:
-            return
-        try:
-            verify(self.root, self.prior_sha, None)
-        except Exception as exc:
-            raise Refused(
-                "the live prior SHA " + self.prior_sha + " fails the helper's "
-                "rollback target check, so a health failure could not roll "
-                "back to it; nothing has been admitted or switched: "
-                + str(exc)[:200]) from exc
-
     def refuse_unfinished_controller_transactions(self):
         """Run the controller's unfinished-transaction guard before admission.
 
@@ -732,10 +726,6 @@ class Run:
         require(self.git("rev-parse", "HEAD") == self.prior_sha,
                 "live HEAD changed before the controller lock was acquired; "
                 "nothing has been switched. Retry the deploy.")
-        # Preflight proves only the target. Rollback switches back to the
-        # prior SHA through the helper's own fence, so that SHA must pass the
-        # same rule now, before admission and any switch.
-        self.require_rollback_target()
         if self.units is None:
             self.units = RealUnits()
         self.original_config = read_config(self.root)
@@ -858,19 +848,51 @@ class Run:
             while True:
                 result = self.controller.drain_check(self.effects, liveness)
                 polls.append(result)
-                if result["drained"]:
+                # A drained answer only counts while the deadline holds: an
+                # observation taken at or after expiry fails closed, even if
+                # the queue settled while an over-long interval slept.
+                # One clock read decides both branches and the sleep, so a
+                # deadline that passes between reads cannot yield a negative
+                # sleep (time.sleep raises ValueError on one).
+                now = self.clock()
+                if result["drained"] and now < deadline:
                     break
-                if self.clock() >= deadline:
-                    durable_write(Path(self.run_dir) / record_name,
-                                  {"polls": polls,
-                                   "drained": False,
-                                   "deadline_s": self.args.drain_deadline_s})
+                if now >= deadline:
+                    late_clean = bool(result["drained"])
+                    record = {"polls": polls,
+                              "drained": False,
+                              "deadline_s": self.args.drain_deadline_s}
+                    if late_clean:
+                        record["drained_after_deadline"] = True
+                    try:
+                        durable_write(Path(self.run_dir) / record_name,
+                                      record)
+                    except OSError as exc:
+                        # A diagnostic that cannot be recorded must not
+                        # replace the FailStop: live work may still be
+                        # running against this checkout, and an escaping
+                        # I/O error would reach recovery as an ordinary
+                        # refusal that restarts the triggers and releases
+                        # admission.
+                        try:
+                            self.narrate("drain.json could not be written ("
+                                         + repr(exc)[:200] + ")")
+                        except OSError:
+                            # Narration shares the failing filesystem; it
+                            # must not replace the FailStop either.
+                            pass
                     raise FailStop(
                         "queue drain expired after "
                         + str(self.args.drain_deadline_s)
                         + "s; hold retained, nothing killed: "
-                        + json.dumps(result.get("blocked"), sort_keys=True))
-                self.sleep(self.args.drain_interval_s)
+                        + ("the queue reported drained only after the "
+                           "deadline, so the answer was not accepted"
+                           if late_clean else
+                           json.dumps(result.get("blocked"), sort_keys=True)))
+                # Never wait past the deadline this loop enforces: cap the
+                # interval at the time that remains.
+                self.sleep(min(self.args.drain_interval_s,
+                               deadline - now))
         result = polls[-1]
         if self.drain_fn is None:
             durable_write(Path(self.run_dir) / record_name,
@@ -947,9 +969,15 @@ class Run:
                 "target " + self.target[:12] + " changes rendered unit "
                 "templates this flow cannot reconcile: it installs no unit "
                 "files, verifies none with the user manager, and rollback "
-                "cannot restore the prior definitions. The owner must "
-                "install and verify the changed unit definitions against "
-                "this target first: " + ", ".join(changed))
+                "cannot restore the prior definitions. This runbook cannot "
+                "deploy a template-changing target from the current "
+                "checkout: installing the unit files changes neither Git "
+                "tree, so a retry finds the same delta and refuses again. "
+                "Complete the template change through the separate owner "
+                "ceremony documented in apps/crq-python/ops/HOST-DEPLOY.md "
+                "(\"Owner procedure for any template-changing target\": "
+                "prepare --units-output into the user manager); changed "
+                "templates: " + ", ".join(changed))
 
     def verify_after_switch(self):
         """The three facts a switch must not change: queue bytes, runtime
@@ -1115,8 +1143,13 @@ class Run:
         # guard as the forward switch; a refusal keeps the hold and is
         # surfaced as recovery_required.
         self.refuse_unfinished_controller_transactions()
+        # Rollback restores the recorded prior SHA and the exact measured
+        # pre-deploy config bytes; the prior revision ran live, so it is not
+        # re-verified as a deploy target (it may be a local merge that is not
+        # on origin/main). A helper without the keyword cannot do this.
         self.helper.switch(self.root, self.overlay, self.overlay_raw,
-                           self.prior_sha, None)
+                           self.prior_sha, None,
+                           rollback_config=self.original_config)
         self.switched = False
         require(self.git("rev-parse", "HEAD") == self.prior_sha,
                 "helper returned but HEAD is not the prior SHA")
@@ -1154,11 +1187,25 @@ class Run:
         self.narrate("rolled back to " + self.prior_sha[:12]
                      + "; triggers restored")
 
+    def admission_held(self):
+        """Whether admission is held by this run right now (None: marker
+        unreadable, so ownership is unknown).
+
+        A failed rollback reacquires admission and can fail again before
+        releasing it, leaving the hold retained while ``released`` is still
+        True: ``released`` records the earlier health-window release (and
+        selects the rollback digest baseline), so the recovery record must
+        report the current admission state separately."""
+        if self.hold is None:
+            return False
+        return self.hold.ownership()
+
     def document(self, outcome, **extra):
         return {
             "operation": "deploy",
             "outcome": outcome,
             "released": self.released,
+            "admission_held": self.admission_held(),
             "target": self.target,
             "prior_sha": self.prior_sha,
             "tag": self.args.tag,
@@ -1516,12 +1563,17 @@ def main(argv=None, run_factory=Run) -> int:
         return 0 if document.get("outcome") == "completed" else 1
     except RecoveryRequired as exc:
         record = exc.record or {}
-        print(json.dumps({"error": {"kind": "recovery_required",
-                                    "operation": args.operation,
-                                    "message": str(exc)[:400],
-                                    "run_dir": record.get("run_dir"),
-                                    "outcome": record.get("outcome")}},
-                         indent=2, sort_keys=True))
+        error = {"kind": "recovery_required",
+                 "operation": args.operation,
+                 "message": str(exc)[:400],
+                 "run_dir": record.get("run_dir"),
+                 "outcome": record.get("outcome")}
+        if record.get("persistence_error") is not None:
+            # deploy.json could not be written, so this JSON error is the
+            # only artifact holding the trigger map, runtime measurement
+            # and structured storage error; embed the whole record.
+            error["recovery_record"] = record
+        print(json.dumps({"error": error}, indent=2, sort_keys=True))
         return 3
     except Refused as exc:
         if args.operation == "status":

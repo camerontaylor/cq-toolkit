@@ -508,6 +508,7 @@ def _prepare_gate_case(spec):
         )]}
         if "queue_extra" in spec:
             queue.update(spec["queue_extra"])
+        queue["items"].extend(json.loads(_dump(spec.get("extra_items", []))))
         item = queue["items"][0]
         if "queue_item_overrides" in spec:
             item.update(spec["queue_item_overrides"])
@@ -1207,6 +1208,27 @@ def _gate_cases():
              OLD_RUN: {"jobs": [OLD], "base": HISTORICAL, "pin": HISTORICAL, "state": "queued"},
              "previous": {"jobs": ["crq-previous-F1"], "base": SOURCE, "pin": SOURCE, "state": "done"},
          }}},
+        # The PR-pin count keys on the PR number alone: another repository's
+        # item with the same number, and any two items that both lack a PR,
+        # share one ceiling. The ceiling is reached by the sibling's run only.
+        {"name": "legacy-round-foreign-repo-same-pr-ceiling", "max_rounds": 1,
+         "extra_items": [{"id": "other-repo-pr", "repo": "other/x", "pr": 1,
+                          "repair_runs": {"z": {"jobs": [], "pin": SOURCE, "state": "done"}}}],
+         "ts_refusal": "round-ceiling"},
+        {"name": "legacy-round-foreign-repo-other-pr-below-ceiling", "max_rounds": 1,
+         "extra_items": [{"id": "other-repo-pr", "repo": "other/x", "pr": 2,
+                          "repair_runs": {"z": {"jobs": [], "pin": SOURCE, "state": "done"}}}]},
+        {"name": "legacy-round-foreign-repo-other-pin-below-ceiling", "max_rounds": 1,
+         "extra_items": [{"id": "other-repo-pr", "repo": "other/x", "pr": 1,
+                          "repair_runs": {"z": {"jobs": [], "pin": OTHER, "state": "done"}}}]},
+        {"name": "legacy-round-no-pr-items-share-ceiling", "max_rounds": 1,
+         "queue_item_overrides": {"pr": None},
+         "extra_items": [{"id": "no-pr", "repo": "other/x",
+                          "repair_runs": {"z": {"jobs": [], "pin": SOURCE, "state": "done"}}}],
+         "ts_refusal": "round-ceiling"},
+        {"name": "legacy-round-no-pr-item-not-counted-for-numbered-pr", "max_rounds": 1,
+         "extra_items": [{"id": "no-pr",
+                          "repair_runs": {"z": {"jobs": [], "pin": SOURCE, "state": "done"}}}]},
         {"name": "canonical-handoff-old-owner", "canonical": CANONICAL,
          "previous_round": True, "old_overrides": minor, "handoff_owner": "old"},
         {"name": "canonical-handoff-prepared-owner", "canonical": CANONICAL,

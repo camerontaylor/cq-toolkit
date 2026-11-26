@@ -171,11 +171,24 @@ describe('linux and container boundary construction', () => {
     const adapter = containerAdapter({
       image: 'x',
       allowUnpinnedImage: true,
-      command: '/nonexistent/cq-docker',
+      // An existing executable whose `info` probe fails: the launcher resolves
+      // (realpath'd), the daemon probe runs and reports the exact blocker.
+      command: '/usr/bin/false',
     });
     const availability = await adapter.available();
     expect(availability.available).toBe(false);
     expect(availability.blocker).toMatch(/daemon unreachable/);
+  });
+
+  test('a container CLI that does not exist reports it as not found', async () => {
+    const adapter = containerAdapter({
+      image: 'x',
+      allowUnpinnedImage: true,
+      command: '/nonexistent/cq-docker',
+    });
+    const availability = await adapter.available();
+    expect(availability.available).toBe(false);
+    expect(availability.blocker).toMatch(/not found on the adapter PATH/);
   });
 });
 

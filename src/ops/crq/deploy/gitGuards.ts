@@ -59,7 +59,7 @@ export function splitlines(text: string): string[] {
   return lines;
 }
 
-function pyStrip(text: string): string {
+export function pyStrip(text: string): string {
   return text.replace(PY_TRIM, '');
 }
 

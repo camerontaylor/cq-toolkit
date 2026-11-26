@@ -1,4 +1,5 @@
 import { JsonObject, type JsonValue } from '../../policy/crq/jsonValue.js';
+import { expired, isExecutionOwner, retireSuperseded } from '../../policy/crq/backfillJobs.js';
 import {
   capture,
   effectiveLimits,
@@ -51,14 +52,59 @@ export interface InventoryPreparationEffects {
   ): { queue: JsonObject; item: JsonObject };
 }
 
+/**
+ * Python's `run_inventory` rules that the operator route does not yet apply.
+ * The tick's in-lock inventory opts into both:
+ *
+ * - `retire`: before capture, pending non-execution-owner jobs at another pin
+ *   (or past the 24 h bound) become `skipped` and release their lines;
+ * - `enqueueLimit`: stop enqueueing once this many pending jobs sit at the target.
+ */
+export interface InventoryPreparationOptions {
+  readonly retire?: boolean;
+  readonly enqueueLimit?: number;
+}
+
+const items = (queue: JsonObject): JsonValue[] => {
+  const value = queue.get('items') ?? [];
+  if (!Array.isArray(value)) throw new Error('inventory queue items must be a list');
+  return value;
+};
+
+const isPendingBackfillAt = (item: JsonValue, target: string): boolean =>
+  item instanceof JsonObject &&
+  item.get('kind') === 'backfill' &&
+  item.get('state') === 'pending' &&
+  item.get('target') === target;
+
 /** Prepare the inventory off lock. Its queue is a private snapshot, not a live write. */
 export async function prepareInventory(
-  queue: JsonObject,
+  snapshot: JsonObject,
   enqueue: boolean,
   effects: InventoryPreparationEffects,
+  options: InventoryPreparationOptions = {},
 ): Promise<PreparedInventory> {
   effects.accounting.beginInvocation();
   const input = await effects.acquire();
+  let queue = snapshot;
+  const retired: { id: JsonValue; at: string }[] = [];
+  if (enqueue && options.retire === true) {
+    // Pending jobs at an older pin own their lines and would hold them out of this ranking.
+    const rows = items(queue).map((item) => {
+      if (
+        !(item instanceof JsonObject) ||
+        item.get('kind') !== 'backfill' ||
+        item.get('state') !== 'pending' ||
+        isExecutionOwner(item)
+      )
+        return item;
+      const at = effects.now();
+      if (item.get('target') === input.target && !expired(item, at)) return item;
+      retired.push({ id: item.get('id') ?? null, at });
+      return retireSuperseded(item, input.target);
+    });
+    if (retired.length > 0) queue = withObjectKeys(queue, [['items', rows]]);
+  }
   const manifest = await capture({
     repo: effects.accounting,
     target: input.target,
@@ -89,19 +135,23 @@ export async function prepareInventory(
   const eventItems: JsonValue[] = [];
   if (enqueue) {
     effectiveLimits(input.limits, { requireVerified: true });
+    let pending = items(prepared).filter((item) => isPendingBackfillAt(item, input.target)).length;
     for (const candidate of ranked.candidates) {
+      if (options.enqueueLimit !== undefined && pending >= options.enqueueLimit) break;
       const members = candidate.prs.flatMap((pr) => {
         const member = input.members[String(pr)];
         return member === undefined ? [] : [member];
       });
       const construction = await construct(effects.subjects, candidate, input.limits, members);
       for (const partition of construction.partitions) {
+        const before = items(prepared).length;
         const result = effects.enqueue(
           prepared,
           { ...partition, tier_importance: partition['tier'], subject_kind: partition['kind'] },
           effects.now(),
         );
         prepared = result.queue;
+        if (items(prepared).length > before && result.item.get('state') === 'pending') pending += 1;
         const id = result.item.get('id');
         if (id === undefined) throw new Error('inventory item missing id');
         eventItems.push(id);
@@ -123,5 +173,11 @@ export async function prepareInventory(
     triage,
   });
   report['construction_debt'] = debt;
-  return { queue: prepared, ranked, report, eventItems };
+  return {
+    queue: prepared,
+    ranked,
+    report,
+    eventItems,
+    ...(retired.length > 0 ? { retired } : {}),
+  };
 }

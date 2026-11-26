@@ -456,6 +456,53 @@ describe('queue-v1 forced-command gate', () => {
     for (const item of cases) expect(await runQueueCapabilityMain(item)).toBe(2);
   });
 
+  test('a disabled policy answers unsupported without reading the runner config', async () => {
+    // `queue_main` imports `crq` (and so needs the runner) only for an enabled policy.
+    const { root, policyPath } = await runnerRoot(policy({ enabled: false }));
+    await rm(join(root, 'config.json'));
+    const written: Uint8Array[] = [];
+    const exitCode = await runQueueCapabilityMain({
+      ...deps({
+        root,
+        policyPath,
+        env: { SSH_ORIGINAL_COMMAND: 'queue-v1' },
+        frame: `${JSON.stringify({ v: 1, op: 'status', ...mergedRef })}\n`,
+      }),
+      stdout: (bytes) => written.push(bytes),
+    });
+    expect(exitCode).toBe(0);
+    expect(JSON.parse(new TextDecoder().decode(written[0]))).toMatchObject({
+      result: { unsupported: 'Reviewed D1C queue-v1 activation required' },
+    });
+  });
+
+  test('the retry probe on a disabled policy needs no runner config; an enabled one does', async () => {
+    const frame = `${JSON.stringify({ v: 1, op: 'retry-capability', ...mergedRef })}\n`;
+    const transient = [
+      { principal: PRINCIPAL, requestId: 'req-merged', binding: mergedRef.binding },
+    ];
+    const disabled = await runnerRoot(policy({ enabled: false, transient_retries: transient }));
+    await rm(join(disabled.root, 'config.json'));
+    const written: Uint8Array[] = [];
+    expect(
+      await runQueueCapabilityMain({
+        ...deps({ ...disabled, env: { SSH_ORIGINAL_COMMAND: 'queue-v1' }, frame }),
+        stdout: (bytes) => written.push(bytes),
+      }),
+    ).toBe(0);
+    expect(JSON.parse(new TextDecoder().decode(written[0]))).toMatchObject({
+      result: { unsupported: 'Reviewed D1C queue-v1 activation required' },
+    });
+    // Enabled: Python's `import crq` fails without the runner, so the request is refused.
+    const enabled = await runnerRoot(policy({ transient_retries: transient }));
+    await rm(join(enabled.root, 'config.json'));
+    expect(
+      await runQueueCapabilityMain(
+        deps({ ...enabled, env: { SSH_ORIGINAL_COMMAND: 'queue-v1' }, frame }),
+      ),
+    ).toBe(2);
+  });
+
   test('the deadline refuses, stops the work and never writes a late success', async () => {
     const { root, policyPath } = await runnerRoot(policy());
     let terminated = 0;

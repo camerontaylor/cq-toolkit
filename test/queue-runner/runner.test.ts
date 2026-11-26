@@ -2,6 +2,7 @@ import { mkdtemp, readFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { UNIT_COMMANDS } from '../../src/ops/crq/deploy/unitRender.js';
 import { run } from '../../src/queue-runner/runner.js';
 
 describe('queue runner skeleton', () => {
@@ -106,6 +107,40 @@ it('writes backfill wrapper JSON with Python sorted keys and separators', async 
   );
 });
 
+describe('dispatch route in the shipped runner', () => {
+  const cli = async (): Promise<string> =>
+    (await import('node:url')).fileURLToPath(
+      new URL('../../dist/queue-runner/crq.js', import.meta.url),
+    );
+
+  it('refuses a missing or unknown forced command with exit 2 and the opaque line', async () => {
+    const { spawnSync } = await import('node:child_process');
+    for (const command of [undefined, 'status', 'queue-v1 x']) {
+      const env = { ...process.env };
+      delete env.SSH_ORIGINAL_COMMAND;
+      if (command !== undefined) env.SSH_ORIGINAL_COMMAND = command;
+      const result = spawnSync(process.execPath, [await cli(), 'dispatch'], {
+        encoding: 'utf8',
+        env,
+      });
+      expect(result.status).toBe(2);
+      expect(result.stdout).toBe('');
+      expect(result.stderr).toBe('queue capability refused; no permission\n');
+    }
+  });
+
+  it('refuses extra argv silently, as capability_dispatcher.py does', async () => {
+    const { spawnSync } = await import('node:child_process');
+    const result = spawnSync(process.execPath, [await cli(), 'dispatch', 'extra'], {
+      encoding: 'utf8',
+      env: { ...process.env, SSH_ORIGINAL_COMMAND: 'queue-v1' },
+    });
+    expect(result.status).toBe(2);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toBe('');
+  });
+});
+
 describe('operator-live command seam (D1)', () => {
   it('keeps the operator-live set separate from the unit live set', async () => {
     const { LIVE_OPERATOR_COMMANDS } = await import('../../src/queue-runner/runner.js');
@@ -116,12 +151,35 @@ describe('operator-live command seam (D1)', () => {
     expect([...LIVE_OPERATOR_COMMANDS]).toEqual([
       'repair-prepare',
       'status',
+      'summary',
       'backfill',
       'reconcile-merged',
     ]);
+    // The backfill unit's declaration is its whole ExecStart argv
+    // (`backfill inventory`), never the bare operator command.
     for (const command of LIVE_OPERATOR_COMMANDS) {
       expect([...LIVE_UNIT_COMMANDS]).not.toContain(command);
     }
+    expect([...LIVE_UNIT_COMMANDS]).toContain('backfill inventory');
+  });
+
+  it('routes the backfill unit ExecStart through the operator handler with the inventory argv', async () => {
+    const seen: string[][] = [];
+    // Derived from the rendered ExecStart command so the route tracks the unit.
+    const unitArgv = (UNIT_COMMANDS['crq-backfill.service'] ?? '').split(' ');
+    expect(unitArgv).toEqual(['backfill', 'inventory']);
+    const result = await run(unitArgv, {
+      shadowRoot: '/unused',
+      tick: 'x',
+      operatorLive: async (command, args) => {
+        seen.push([command, ...args]);
+        return { artifact: { status: 'ok', value: { inventoried: 0 } }, exitCode: 0 };
+      },
+    });
+    expect(seen).toEqual([unitArgv]);
+    expect(result.exitCode).toBe(0);
+    // The bare `backfill` is a usage error, not a live unit.
+    expect((await run(['backfill'], { shadowRoot: '/unused', tick: 'x' })).exitCode).toBe(2);
   });
 
   it('forwards argv to the operator handler and preserves its exit code', async () => {

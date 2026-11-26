@@ -145,6 +145,12 @@ calling principal:
    `PATH` under `env -i`, not from a login shell. The crq systemd units put
    `~/.local/bin` after the mise shims; the forced command needs the same.
 
+   A review-v1 frame is one JSON object terminated by a single LF; a frame
+   without the terminating LF is refused (the TypeScript capability is stricter
+   than the Python transport here, and TypeScript is the contract). review-v1
+   `cancel` is owner-bound: only the principal that submitted the request may
+   cancel it, and any other principal gets "cancel request owner denied".
+
 3. Create the policy file (mode 0600) disabled, owned by the queue-state account
    that runs the dispatcher. Verify that account can read it before enabling it.
    Turn it on only for an approved window:

@@ -154,5 +154,24 @@ class ScopeTests(unittest.TestCase):
         self.assertFalse(repo_registry.in_scope(cfg, "src/a.js"))
 
 
+class ManualCloneTests(unittest.TestCase):
+    def test_identity_keyed_path_under_state(self):
+        from pathlib import Path
+        self.assertEqual(repo_registry.manual_clone("/s", "CameronTaylor/Agents"),
+                         Path("/s/review-repos/camerontaylor/agents"))
+        self.assertEqual(repo_registry.manual_clone("/s", "camerontaylor/agents"),
+                         repo_registry.manual_clone("/s", "CAMERONTAYLOR/AGENTS"))
+
+    def test_malformed_slugs_have_no_clone(self):
+        for slug in (None, "", "agents", "a/b/c", "../x", "a/..", "-a/b", "a/b\n"):
+            with self.subTest(slug=slug):
+                self.assertIsNone(repo_registry.manual_clone("/s", slug))
+
+    def test_manual_clone_never_joins_configured_repos(self):
+        repos = repo_registry.parse({"repo": PRIMARY, "repos": [entry()]})
+        repo_registry.manual_clone("/s", "camerontaylor/agents")
+        self.assertIsNone(repo_registry.by_repo(repos, "camerontaylor/agents"))
+
+
 if __name__ == "__main__":
     unittest.main()

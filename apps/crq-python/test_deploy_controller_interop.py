@@ -133,7 +133,7 @@ class InteropTests(DeployPlanFixture):
             "runtime": NODE,
             "prior_runtime": "python",
             "at": "2026-10-27T00:00:00Z",
-            "snapshot": {"proof": True},
+            "snapshot": {"runtime": "python", "proof": True},
             "state": {},
             "phase": "activation_pending",
         }
@@ -159,7 +159,7 @@ class InteropTests(DeployPlanFixture):
             "runtime": NODE,
             "prior_runtime": "python",
             "at": "2026-10-27T00:00:00Z",
-            "snapshot": {"proof": True},
+            "snapshot": {"runtime": "python", "proof": True},
             "state": None,
             "phase": "snapshot",
         })
@@ -385,6 +385,24 @@ class InteropTests(DeployPlanFixture):
                 finally:
                     path.unlink()
 
+    def test_terminal_unit_history_without_prior_runtime_snapshot_is_malformed(self):
+        # The writer records a snapshot of the prior runtime; terminal history
+        # whose snapshot is missing that proof must not clear the gate.
+        for outcome in ("completed", "rolled_back"):
+            for snapshot in (None, {}, {"runtime": NODE}):
+                with self.subTest(outcome=outcome, snapshot=snapshot):
+                    record = self.completed_unit_switch(outcome)
+                    record["snapshot"] = snapshot
+                    path = self.effects.journal_append(record)
+                    try:
+                        original = path.read_bytes()
+                        with self.assertRaisesRegex(
+                                dc.Refused, "invalid unit switch journal"):
+                            dc.refuse_unfinished_transactions(self.effects)
+                        self.assertEqual(path.read_bytes(), original)
+                    finally:
+                        path.unlink()
+
     def test_pending_and_recovery_unit_phases_are_unfinished_not_malformed(self):
         cases = [
             ("pending", "snapshot", None),
@@ -407,7 +425,7 @@ class InteropTests(DeployPlanFixture):
                     "runtime": NODE,
                     "prior_runtime": "python",
                     "at": "2026-10-27T00:00:00Z",
-                    "snapshot": {"proof": True},
+                    "snapshot": {"runtime": "python", "proof": True},
                     "state": state,
                     "phase": phase,
                 }

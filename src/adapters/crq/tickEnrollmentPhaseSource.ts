@@ -32,6 +32,12 @@ export interface EnrollmentPhaseSourceOptions {
   readonly gh?: OpenPrSourceOptions['gh'];
   readonly git?: OpenPrSourceOptions['git'];
   readonly now?: OpenPrSourceOptions['now'];
+  /**
+   * The tick's own `fetch` phase has already refreshed the primary clone
+   * (`crq.py:3550`), so skip `discoverOpenPrs`'s second primary fetch. Default
+   * false: a standalone caller has no earlier fetch and relies on this one.
+   */
+  readonly primaryFetched?: boolean;
 }
 
 export function fileEnrollmentPhaseEffects(
@@ -55,7 +61,7 @@ export function fileEnrollmentPhaseEffects(
         .filter((line) => line.length > 0);
       return repairOwnRange(queue, commits);
     });
-  const effects = openPrDiscoveryEffects({
+  const discoveryEffects = openPrDiscoveryEffects({
     repos: options.repos,
     associate: (queue, repo, pr, base, dry) =>
       associateLocalReview(queue, repo.repo, pr.number, base, pr.head, dry, options.localReview),
@@ -65,6 +71,13 @@ export function fileEnrollmentPhaseEffects(
     ...(options.git ? { git: options.git } : {}),
     ...(options.now ? { now: options.now } : {}),
   });
+  const effects: typeof discoveryEffects = options.primaryFetched
+    ? {
+        ...discoveryEffects,
+        fetchDefault: (repo) =>
+          repo.primary ? Promise.resolve() : discoveryEffects.fetchDefault(repo),
+      }
+    : discoveryEffects;
   const pass =
     (primary: boolean) => (queue: Parameters<EnrollmentPhaseEffects['primary']>[0], dry: boolean) =>
       discoverOpenPrs(

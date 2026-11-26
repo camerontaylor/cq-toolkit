@@ -138,6 +138,27 @@ class DeployPlanTests(DeployPlanFixture):
         self.assertEqual(sorted(r["outcome"] for r in self.records()),
                          ["completed", "refused_no_change"])
 
+    def test_state_published_during_drain_does_not_fail_preservation(self):
+        # A final tick can publish the heartbeat between preflight and the
+        # drain fence. The preservation baseline is captured after the drain,
+        # so that write must not read as a change made by the switch.
+        real_drain = dc.drain_check
+
+        def drain_then_publish(effects, liveness):
+            result = real_drain(effects, liveness)
+            effects.completion_heartbeat_path().parent.mkdir(
+                parents=True, exist_ok=True)
+            effects.completion_heartbeat_path().write_text(
+                '{"published_during_drain": true}\n')
+            return result
+
+        with self.fake_switch(), mock.patch.object(
+                dc, "drain_check", side_effect=drain_then_publish):
+            plan = dc.deploy_plan(self.effects, host, self.target, self.tag,
+                                  self.overlay_path)
+        self.assertIn("preservation", [step["step"] for step in plan["steps"]])
+        self.assertEqual([r["outcome"] for r in self.records()], ["completed"])
+
     def test_helper_exception_cli_exits_two_when_unchanged(self):
         with mock.patch.object(host, "switch", side_effect=ValueError("busy unit")):
             with mock.patch.object(dc, "_load_helper", return_value=(host, "0" * 64)):

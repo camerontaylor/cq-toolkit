@@ -39,6 +39,12 @@ export interface ReconcilePhaseSourceOptions {
   /** `CONFIG['repair'].get('max_finding_retries', 2)`. */
   readonly maxFindingRetries?: () => number;
   readonly event: ReconcilePhaseEffects['event'];
+  /**
+   * Called with the working queue after each item install, once it is on disk.
+   * Python mutates the tick's `q` in place; the counting envelope returns only
+   * counts, so this is how the tick phase gets the reconciled queue back.
+   */
+  readonly onSaved?: (queue: JsonObject) => void;
 }
 
 export function fileReconcilePhaseEffects(
@@ -71,6 +77,7 @@ export function fileReconcilePhaseEffects(
           ),
         );
         await atomicWrite(join(options.stateRoot, 'queue.json'), queueBytes(working));
+        options.onSaved?.(working);
       };
       const seams =
         options.fixRun ??

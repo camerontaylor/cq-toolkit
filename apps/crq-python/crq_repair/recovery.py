@@ -16,9 +16,15 @@ BLACKOUT_WAIT = dt.timedelta(hours=12)
 
 
 def blackout_deferral(report):
-    """Typed blackout stop, never inferred from the judge's reason prose."""
-    return (isinstance(report, dict) and report.get('stop') == 'configuration'
-            and report.get('errorClass') == 'blackout')
+    """Typed blackout stop, never inferred from the judge's reason prose.
+
+    The pre-dispatch check returns ``configuration``/``blackout``; dispatch
+    itself returns ``stop: blackout`` when the window opens during
+    preparation or before a fallback provider's launch."""
+    return (isinstance(report, dict)
+            and (report.get('stop') == 'blackout'
+                 or (report.get('stop') == 'configuration'
+                     and report.get('errorClass') == 'blackout')))
 
 
 def handover_deferral(report):

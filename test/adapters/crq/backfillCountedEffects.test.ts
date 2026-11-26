@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { mkdtemp, mkdir, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -205,6 +206,37 @@ describe('counted backfill retained event reader', () => {
   });
 });
 
+describe('counted backfill retained event reader (FIFO)', () => {
+  it('refuses a writer-less FIFO instead of blocking on open', async () => {
+    const root = await scratch();
+    try {
+      const dir = await stage(good, root);
+      execFileSync('mkfifo', [join(dir, 'review-event.json')]);
+      const read = backfillCountedRetainedEventReader(join(root, 'state'));
+      await expect(read('r')).rejects.toThrow('not a regular file');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 5000);
+
+  it.each(['meta.json', 'exit.json', 'review.ndjson'])(
+    'refuses a writer-less FIFO as %s instead of blocking on open',
+    async (name) => {
+      const root = await scratch();
+      try {
+        const dir = await stage(good, root);
+        await rm(join(dir, name), { force: true });
+        execFileSync('mkfifo', [join(dir, name)]);
+        const read = backfillCountedArtifactReader(join(root, 'state'));
+        await expect(read('r')).rejects.toThrow('not a regular file');
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+    5000,
+  );
+});
+
 describe('deferred artifact store', () => {
   it('returns the real store reference and writes only on flush', async () => {
     const root = await scratch();
@@ -243,6 +275,46 @@ describe('deferred artifact store', () => {
 });
 
 describe('counted harvest over real file seams', () => {
+  it('confines the retained-event read to its own run directory', async () => {
+    const root = await scratch();
+    try {
+      await stage(good, root);
+      const store = fileArtifactStore(join(root, 'durable'));
+      const effects = backfillCountedEffects({
+        stateRoot: join(root, 'state'),
+        durableRoot: join(root, 'durable'),
+        store,
+        repo: repoOf(sub(good, 'repo')),
+        publication: { spool: async () => '' },
+        inbox: { ingest: async () => undefined },
+        stateEvent: async (q) => q,
+        saveQueue: async () => undefined,
+        cleanup: async () => undefined,
+      });
+      const read = effects.readRetainedEvent;
+      if (read === undefined) throw new Error('readRetainedEvent is not wired');
+      // No retained event yet: null, not an error.
+      expect(await read('r')).toBeNull();
+      expect(await read('absent')).toBeNull();
+      // Another run's event, reached through a symlink, is refused.
+      const other = join(root, 'state', 'runs', 'other');
+      await mkdir(other, { recursive: true });
+      await writeFile(join(other, 'review-event.json'), '{"id":"x"}');
+      await symlink(
+        join(other, 'review-event.json'),
+        join(root, 'state', 'runs', 'r', 'review-event.json'),
+      );
+      await expect(read('r')).rejects.toThrow('escapes run directory');
+      // A symlink on the run directory itself must not serve another run's event.
+      await rm(join(root, 'state', 'runs', 'r', 'review-event.json'));
+      await symlink(other, join(root, 'state', 'runs', 'alias'));
+      await expect(read('alias')).rejects.toThrow('escapes its identity');
+      await expect(read('..')).rejects.toThrow('invalid run id');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('retains every artifact before the outbox verifies the event', async () => {
     const root = await scratch();
     try {

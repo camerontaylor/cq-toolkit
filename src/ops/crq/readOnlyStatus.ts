@@ -56,6 +56,13 @@ export interface ReadOnlyStatusEffects {
   readReceipt(receiptId: string): Promise<Uint8Array | null>;
   /** One wall clock reading for the whole invocation, in epoch seconds. */
   now(): number;
+  /**
+   * Optional (#1420): commit subjects by sha, for PR-less pending items. The
+   * route asks only for shas the rendered `pending_items` actually look up:
+   * up to four candidate shas per row over ten rows (at most 40); an absent port or a missing sha leaves the item's title
+   * label, never a failure.
+   */
+  readCommitSubjects?(shas: readonly string[]): Promise<ReadonlyMap<string, string>>;
 }
 
 export type StatusRouteErrorKind =
@@ -134,14 +141,30 @@ export async function readSummaryCore(effects: ReadOnlyStatusEffects): Promise<S
 
   let view: StatusSummaryView;
   try {
-    view = summarize(
-      { generated_at: generatedAt },
-      queue.exact,
-      { last_tick: queue.exact.last_tick },
-      config.value,
-      events,
-      now,
-    );
+    const summarizeWith = (commitSubjects?: ReadonlyMap<string, string>) =>
+      summarize(
+        { generated_at: generatedAt },
+        queue.exact,
+        { last_tick: queue.exact.last_tick },
+        config.value,
+        events,
+        now,
+        commitSubjects === undefined ? {} : { commitSubjects },
+      );
+    view = summarizeWith();
+    if (effects.readCommitSubjects !== undefined) {
+      // Pass one records which shas the top-ten rows look up; pass two supplies them.
+      const wanted = new Set<string>();
+      const recorder = new Map<string, string>();
+      recorder.get = (sha: string) => {
+        wanted.add(sha);
+        return undefined;
+      };
+      summarizeWith(recorder);
+      if (wanted.size > 0) {
+        view = summarizeWith(await effects.readCommitSubjects([...wanted]));
+      }
+    }
   } catch (error) {
     throw asRouteError('summary-failed', error);
   }

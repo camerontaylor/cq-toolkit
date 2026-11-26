@@ -28,6 +28,11 @@ IMPORT_BATCH_BYTES = 4 * 1024 * 1024
 # body is buffered.
 RECORD_BYTES = 1024 * 1024
 READ_GROUP_BYTES = 4 * 1024 * 1024
+# Total decoded line entries one record may expand across every row of all
+# three scopes. The record byte cap bounds the encoded intervals, not their
+# decoded expansion, so the total is computed from the interval bounds before
+# any per-file set is materialized.
+SCOPE_ENTRIES = 1_000_000
 
 
 def independent_import(value):
@@ -102,6 +107,22 @@ def loads(raw):
     value = json.loads(raw, object_pairs_hook=pairs, parse_float=refuse, parse_constant=refuse)
     canonical(value)
     return value
+
+
+def retained_loads(raw):
+    """loads() over retained record bytes, wrapping malformed JSON as integrity.
+
+    A truncated or byte-corrupt retained .json file raises JSONDecodeError or
+    UnicodeDecodeError out of loads(); readers that skip unreadable records
+    (review_transport._retained_records) catch IntegrityError, so wrap the
+    JSON syntax and decoding errors to skip the corrupt record and keep
+    scanning later valid ones. loads() itself is unchanged: the B1
+    cross-language vectors pin its exact refusal names and ordering.
+    """
+    try:
+        return loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise IntegrityError("malformed JSON") from exc
 
 
 def timestamp(value):
@@ -185,6 +206,24 @@ def scope(rows):
     return result
 
 
+def scope_entries(payload):
+    """Decoded entry total per record, from interval bounds before any set is built.
+
+    Applies the same interval rules as intervals() so the count is exact and a
+    record over SCOPE_ENTRIES is rejected before any scope map is materialized.
+    """
+    total = 0
+    for rows in (payload["requested_scope"], payload["input_scope"], payload["reviewed_scope"]):
+        for row in rows:
+            last = 0
+            for start, end in row["intervals"]:
+                if type(start) is not int or type(end) is not int or start <= last or end < start or end > 1_000_000:
+                    raise IntegrityError("invalid or overlapping intervals")
+                total += end - start + 1
+                last = end
+    return total
+
+
 def event(kind, source_key, occurred_at, payload):
     value = {"schema": "cq.review-ledger/v1", "event_type": kind,
              "source_key": source_key, "occurred_at": occurred_at, "payload": payload}
@@ -209,6 +248,8 @@ def validate(value):
         if value["source_key"] != expected or p["source"]["repo"] != p["repo"]:
             raise IntegrityError("review source identity mismatch")
         validate_provenance(value)
+        if scope_entries(p) > SCOPE_ENTRIES:
+            raise IntegrityError("scope entries exceed record bound")
         requested, input_scope, reviewed = map(scope, (p["requested_scope"], p["input_scope"], p["reviewed_scope"]))
         if digest(p["requested_scope"]) != p["scope_digest"]:
             raise IntegrityError("scope digest mismatch")
@@ -381,12 +422,22 @@ def durable_directory(directory):
 def atomic(filename, data):
     filename = Path(filename)
     durable_directory(filename.parent)
-    with tempfile.NamedTemporaryFile(dir=filename.parent, delete=False) as stream:
-        stream.write(data)
-        stream.flush()
-        os.fsync(stream.fileno())
-        temporary = stream.name
-    os.replace(temporary, filename)
+    # Record the staging path before the first write so a failed write, fsync,
+    # or replace removes the staging file: a retry would otherwise stage
+    # another file beside every leftover until the disk holds the bytes that
+    # recovery itself needs.
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=filename.parent, delete=False) as stream:
+            temporary = stream.name
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, filename)
+        temporary = None
+    finally:
+        if temporary is not None:
+            Path(temporary).unlink(missing_ok=True)
     fsync_dir(filename.parent)
 
 
@@ -626,40 +677,49 @@ class GitLedger:
         validate_sequence(values)
         return values
 
-    def fetch(self):
+    def fetch(self, attempts=3):
         # Bind rollback protection before network I/O; another validator may
         # advance the checkpoint while this invocation obtains its snapshot.
         checkpoint = "refs/crq/review-ledger-validated"
-        previous = self.git("rev-parse", "--verify", "--quiet", checkpoint, check=False).decode().strip()
-        ref = "refs/crq/ledger-fetch/" + uuid.uuid4().hex
-        try:
-            self.git("fetch", "--no-tags", "--no-write-fetch-head", self.remote, "refs/heads/" + self.branch + ":" + ref)
-            head = self.git("rev-parse", ref).decode().strip()
-        finally:
-            self.git("update-ref", "-d", ref)
-        if previous and subprocess.run(["git", "merge-base", "--is-ancestor", previous, head], cwd=self.repo, capture_output=True).returncode:
-            raise IntegrityError("ledger head is not a descendant of validated history")
-        values = self.read(head)
         def ancestor(a, b):
             return subprocess.run(["git", "merge-base", "--is-ancestor", a, b],
                                   cwd=self.repo, capture_output=True).returncode == 0
 
-        expected = previous or "0" * len(head)
-        for _ in range(8):
+        for _ in range(attempts):
+            previous = self.git("rev-parse", "--verify", "--quiet", checkpoint, check=False).decode().strip()
+            ref = "refs/crq/ledger-fetch/" + uuid.uuid4().hex
             try:
-                self.git("update-ref", checkpoint, head, expected)
-                break
-            except subprocess.CalledProcessError:
-                latest = self.git("rev-parse", "--verify", checkpoint).decode().strip()
-                # Never move the checkpoint backward; advance past an older concurrent validation.
-                if ancestor(head, latest):
+                self.git("fetch", "--no-tags", "--no-write-fetch-head", self.remote, "refs/heads/" + self.branch + ":" + ref)
+                head = self.git("rev-parse", ref).decode().strip()
+            finally:
+                self.git("update-ref", "-d", ref)
+            if previous and not ancestor(previous, head):
+                raise IntegrityError("ledger head is not a descendant of validated history")
+            values = self.read(head)
+            stale = False
+            expected = previous or "0" * len(head)
+            for _ in range(8):
+                try:
+                    self.git("update-ref", checkpoint, head, expected)
                     break
-                if not ancestor(latest, head):
-                    raise IntegrityError("validated checkpoint diverged from ledger head")
-                expected = latest
-        else:
-            raise IntegrityError("validated checkpoint contention")
-        return head, values
+                except subprocess.CalledProcessError:
+                    latest = self.git("rev-parse", "--verify", checkpoint).decode().strip()
+                    # Never move the checkpoint backward; advance past an older
+                    # concurrent validation. Equal heads are success, but a
+                    # checkpoint strictly newer than this head makes the whole
+                    # snapshot stale: refetch so publication cannot append
+                    # behind the validated checkpoint.
+                    if ancestor(head, latest):
+                        stale = head != latest
+                        break
+                    if not ancestor(latest, head):
+                        raise IntegrityError("validated checkpoint diverged from ledger head")
+                    expected = latest
+            else:
+                raise IntegrityError("validated checkpoint contention")
+            if not stale:
+                return head, values
+        raise IntegrityError("ledger head is older than the validated checkpoint")
 
     def publish(self, outbox, attempts=3):
         common = self.git("rev-parse", "--git-common-dir").decode().strip()
@@ -681,12 +741,13 @@ class GitLedger:
                             deps = [p["review_id"], p["previous_event_id"]]
                         elif value["event_type"] == "import-result":
                             # Mirror validate_sequence(): a credited import links
-                            # only its review, so a stray duplicate_id that is
-                            # absent from history cannot block publication.
+                            # only its review and any other result only its
+                            # duplicate_id, so a stray companion id absent from
+                            # history cannot block publication.
                             if p["result"] == "credited":
                                 deps = [p["review_id"]]
                             else:
-                                deps = [p["review_id"], p["duplicate_id"]]
+                                deps = [p["duplicate_id"]]
                         if all(d is None or d in available for d in deps):
                             ready.append(value)
                     if not ready:

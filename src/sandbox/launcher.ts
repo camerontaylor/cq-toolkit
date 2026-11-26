@@ -245,11 +245,14 @@ export function runChild(
 }
 
 /**
- * Resolve a launcher name to an ABSOLUTE path ONCE per adapter
+ * Resolve a launcher name to a CANONICAL absolute path ONCE per adapter
  * (final-head review): the certification probe and every later launch must
  * execute the SAME binary even when a request supplies a parentEnv whose PATH
  * differs — a PATH pointing into the workspace could otherwise select a
  * planted launcher while adapter identity still matches the receipt.
+ * The bound path is realpath'd: a launcher reached through a symlink binds its
+ * TARGET, so the containment check and every spawn canonicalize to the same
+ * file the probe ran instead of a replaceable symlink inside the workspace.
  * Resolution deliberately uses the ADAPTER environment (the env the
  * probe's availability check ran under), never the per-request parent env:
  * that is the run's entry snapshot (`currentEntryEnv()`), so an ambient PATH
@@ -265,17 +268,26 @@ export function resolveLauncher(
   name: string,
   env: EntryEnv = currentEntryEnv(),
 ): string | undefined {
-  const absolute = (candidate: string): string => resolve(candidate);
+  const absolute = (candidate: string): string | undefined => {
+    try {
+      return realpathSync(resolve(candidate));
+    } catch {
+      return undefined;
+    }
+  };
   if (name.includes('/')) return absolute(name);
   for (const dir of (env['PATH'] ?? '').split(delimiter)) {
     if (dir === '') continue;
-    const candidate = absolute(join(dir, name));
+    const candidate = resolve(join(dir, name));
     try {
       accessSync(candidate, constants.X_OK);
-      return candidate;
     } catch {
-      // Keep searching the remaining PATH entries.
+      continue;
     }
+    // A candidate that is executable but whose realpath fails (broken or
+    // racing symlink) must not end the search: try the remaining entries.
+    const canonical = absolute(candidate);
+    if (canonical !== undefined) return canonical;
   }
   return undefined;
 }

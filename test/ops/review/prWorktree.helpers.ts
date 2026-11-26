@@ -97,10 +97,16 @@ interface FakeGit {
   fetchHeadSha?: string;
   /** Current worktrees (porcelain list order); branch null = detached. */
   worktrees: Array<{ path: string; branch: string | null; head: string }>;
+  /** Local `refs/heads/<name>` labels no tree holds → unique commits ahead of the fetched head. */
+  localBranches?: Record<string, { unique: number }>;
+  /** Paths whose `ls-files --ignored` lists these files. */
+  ignoredFiles?: Record<string, string[]>;
   /** When set, `worktree add` fails with this result. */
   addFails?: { code: number; stderr: string };
   /** When set, `worktree remove` fails with this result. */
   removeFails?: { code: number; stderr: string };
+  /** Local branch refs with no checkout: branch name → head sha (absent = no such branch). */
+  branchHeads?: Record<string, string>;
   /** Worktree path → what HEAD is checked out there (absent = not a repo). */
   headOf: Record<string, { branch: string | null; head: string }>;
 }
@@ -142,6 +148,28 @@ export const fakeGit = (
     const initial = firstCall;
     firstCall = false;
     const sub = args[2];
+    if (sub === 'ls-files' && args.includes('--ignored')) {
+      const files = model.ignoredFiles?.[args[1] ?? ''] ?? [];
+      return { code: 0, stdout: files.map((f) => `${f}\0`).join(''), stderr: '' };
+    }
+    if (sub === 'show-ref') {
+      const name = (args[5] ?? '').replace(/^refs\/heads\//, '');
+      // Branch-presence: a fixture may model the ref in EITHER representation
+      // (localBranches with unique counts, or branchHeads with a head sha);
+      // present in either → found, absent from both → the 1 miss.
+      return {
+        code:
+          model.localBranches?.[name] === undefined && model.branchHeads?.[name] === undefined
+            ? 1
+            : 0,
+        stdout: '',
+        stderr: '',
+      };
+    }
+    if (sub === 'rev-list' && args.includes('--not')) {
+      const name = (args[4] ?? '').replace(/^refs\/heads\//, '');
+      return { code: 0, stdout: `${model.localBranches?.[name]?.unique ?? 0}\n`, stderr: '' };
+    }
     if (sub === 'diff' || sub === 'ls-files') return { code: 0, stdout: '', stderr: '' };
     if (sub === 'rev-parse' && args.includes('--git-common-dir')) {
       commonDir ??= initial ? join(args[1]!, '.git') : join(REPO, '.git');
@@ -167,6 +195,19 @@ export const fakeGit = (
         };
       }
       return { code: 0, stdout: '', stderr: '' };
+    }
+    if (sub === 'rev-list' && (args[4] ?? '').includes('..refs/heads/')) {
+      const name = (args[4] ?? '').split('..refs/heads/')[1] ?? '';
+      // Same either-representation rule as show-ref: a fixture may model the
+      // ref via localBranches (unique counts) or branchHeads (head sha), so
+      // every `expectedSha..branchRef` reachability probe gets a valid
+      // answer for either model.
+      const unique = model.localBranches?.[name]?.unique;
+      if (unique !== undefined) return { code: 0, stdout: `${unique}\n`, stderr: '' };
+      const head = model.branchHeads?.[name];
+      if (head === undefined) return { code: 128, stdout: '', stderr: 'fatal: bad revision' };
+      const ancestor = head === SHA_A || head === (model.fetchHeadSha ?? SHA_B);
+      return { code: 0, stdout: `${ancestor ? '0' : '1'}\n`, stderr: '' };
     }
     if (sub === 'rev-list') {
       // argv shape: ['-C', <path>, 'rev-list', '--count', '<range>'] —

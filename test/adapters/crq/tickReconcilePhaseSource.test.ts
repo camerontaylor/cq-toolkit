@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -104,5 +105,66 @@ describe('fileReconcilePhaseEffects', () => {
     expect(budget.available()).toBe(true);
     await effects.reconcile(doc(FIX), budget);
     expect(budget.available()).toBe(false);
+  });
+});
+
+describe('fileReconcilePhaseEffects onSaved', () => {
+  const build = (state: string | null, onSaved: (queue: JsonObject) => void) =>
+    fileReconcilePhaseEffects({
+      stateRoot: root,
+      clone: '/fake/clone',
+      repo: 'o/r',
+      now: () => new Date('2026-11-15T01:02:03.999Z'),
+      gh: async () =>
+        state === null
+          ? { code: 1, stdout: '', stderr: 'boom' }
+          : { code: 0, stdout: `{"number":7,"state":"${state}"}`, stderr: '' },
+      runGit: async (args) => ({ args, code: 0, stdout: new Uint8Array(), stderr: '' }),
+      fixRun: () => ({
+        proveMerge: NEVER,
+        recheckRevalidation: NEVER,
+        markFixedOutcome: NEVER,
+        publishSource: NEVER,
+      }),
+      event: async () => undefined,
+      onSaved,
+    });
+
+  it('hands back the installed queue only after it is on disk, equal to what was written', async () => {
+    await writeFile(join(root, 'queue.json'), FIX);
+    const onDisk: string[] = [];
+    const seen: JsonObject[] = [];
+    const effects = build('CLOSED', (queue) => {
+      seen.push(queue);
+      onDisk.push(readFileSync(join(root, 'queue.json'), 'utf8'));
+    });
+    await runReconcilePhase(doc(FIX), effects, undefined);
+    expect(seen).toHaveLength(1);
+    // The file already holds the abandoned-fix-PR stamp when the hook runs.
+    expect(onDisk[0]).toContain('"fix_closed": "2026-11-15T01:02:03Z"');
+    const handed = seen[0] as JsonObject;
+    const record = ((handed.get('items') as JsonObject[])[0] as JsonObject).get(
+      'repair_runs',
+    ) as JsonObject;
+    expect((record.get('r1') as JsonObject).get('fix_closed') as string).toBe(
+      '2026-11-15T01:02:03Z',
+    );
+    expect(doc(onDisk[0] as string).get('unknown')).toBeDefined();
+  });
+
+  it('is not called when nothing is installed (a forge failure leaves the queue as it was)', async () => {
+    await writeFile(join(root, 'queue.json'), FIX);
+    let calls = 0;
+    const effects = build(null, () => {
+      calls += 1;
+    });
+    await runReconcilePhase(doc(FIX), effects, undefined);
+    expect(calls).toBe(0);
+    expect(await readFile(join(root, 'queue.json'), 'utf8')).toBe(FIX);
+  });
+
+  it('omitting the hook changes nothing', async () => {
+    const { saved } = await run(FIX, 'CLOSED');
+    expect(saved).toContain('fix_closed');
   });
 });

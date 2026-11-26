@@ -156,6 +156,7 @@ import { RoutingTableSchema, defaultRoutingTable, resolveRoute } from './routing
 import type { RoutingTable } from './routing.js';
 import { buildChildEnv } from '../../shared/proc.js';
 import { abortRootFollowing } from './process.js';
+import { nativeTranscriptPath } from './cli.js';
 import { readCliSessionId, writeCliSessionId, SDK_NARRATION_TOOL } from './sessions.js';
 import { applyCorrelationEnv } from '../correlation-env.js';
 import {
@@ -775,6 +776,7 @@ export class ClaudeCodeSdkTransport implements Driver {
       structuredMiss,
       resultCause,
       accounting,
+      record.workspace,
     );
   }
 
@@ -831,6 +833,7 @@ export class ClaudeCodeSdkTransport implements Driver {
     structuredMiss: string | undefined,
     resultCause: string | undefined,
     accounting: ReturnType<typeof prepareResultUsage>,
+    workspacePath?: string,
   ): WorkerResult {
     const measuredFrame = accounting.measured;
     const measured = measuredFrame !== undefined ? measuredFrame.usage : undefined;
@@ -931,6 +934,21 @@ export class ClaudeCodeSdkTransport implements Driver {
       usageProvenance: usageMeasured ? 'measured' : 'unmeasured',
       ...cost,
       sessionId,
+      // The harness-native session id the SDK reported (init/assistant/result
+      // frames) and the transcript path it implies, for the session archiver.
+      ...(observation.agentSessionId !== undefined
+        ? {
+            nativeSessionId: observation.agentSessionId,
+            ...(nativeTranscriptPath(observation.agentSessionId, workspacePath) !== undefined
+              ? {
+                  nativeSessionPath: nativeTranscriptPath(
+                    observation.agentSessionId,
+                    workspacePath,
+                  ) as string,
+                }
+              : {}),
+          }
+        : {}),
       denials: observation.denials,
       stopReason: effectiveStopReason,
       ...(error !== undefined ? { error: boundedErrorText(error) } : {}),
@@ -1188,6 +1206,11 @@ function asString(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
 }
 
+/** A native session id must be non-empty: an empty frame value never replaces an earlier id. */
+function asNonEmptyString(value: unknown): string | undefined {
+  return typeof value === 'string' && value !== '' ? value : undefined;
+}
+
 function asArray(value: unknown): unknown[] | undefined {
   return Array.isArray(value) ? value : undefined;
 }
@@ -1230,7 +1253,8 @@ export function foldMessage(observation: SdkRunObservation, message: unknown): v
   switch (event['type']) {
     case 'system': {
       if (event['subtype'] === 'init') {
-        observation.agentSessionId = asString(event['session_id']) ?? observation.agentSessionId;
+        observation.agentSessionId =
+          asNonEmptyString(event['session_id']) ?? observation.agentSessionId;
         observation.servedModel = asString(event['model']) ?? observation.servedModel;
         if (frameCarriesRefusal(event) && !observation.refusalSeen) {
           observation.refusalSeen = true;
@@ -1266,7 +1290,8 @@ export function foldMessage(observation: SdkRunObservation, message: unknown): v
         observation.narration.push(JSON.stringify(event));
         return;
       }
-      observation.agentSessionId = asString(event['session_id']) ?? observation.agentSessionId;
+      observation.agentSessionId =
+        asNonEmptyString(event['session_id']) ?? observation.agentSessionId;
       // The refusal stop reason rides the inner Anthropic Messages API
       // Message shape (`message.stop_reason`) — the D-E′ refusal void's
       // SDK-transport observation point.
@@ -1340,7 +1365,8 @@ export function foldMessage(observation: SdkRunObservation, message: unknown): v
     }
     case 'result': {
       observation.result = event;
-      observation.agentSessionId = asString(event['session_id']) ?? observation.agentSessionId;
+      observation.agentSessionId =
+        asNonEmptyString(event['session_id']) ?? observation.agentSessionId;
       // The result frame can carry the refusal stop reason too — observe it
       // wherever the substrate states it (the void is channel-agnostic).
       if (frameCarriesRefusal(event) && !observation.refusalSeen) {

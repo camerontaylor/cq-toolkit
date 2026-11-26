@@ -1532,6 +1532,134 @@ def summary_vectors() -> Dict[str, Any]:
     return _family("summary", cases)
 
 
+def usage_context_vectors() -> Dict[str, Any]:
+    """`backfill_runtime.usage_context` as `admit_available` calls it, unstubbed.
+
+    The tick binds a usage read to local holds before it counts slots. Each row
+    records what the real context wrote (`usage`, `backfill_usage`, the mutated
+    `backfill_reservations`, `backfill_starts_at_observation`, the queue's key
+    order) next to the admission result, or the refusal when state is unreadable.
+    """
+    cases: List[Dict[str, Any]] = []
+
+    def context(name: str, *, queue: Dict[str, Any], usage: Any = None,
+                reserved: Any = None, now: str = AT) -> None:
+        inputs = {"queue": queue, "usage": usage,
+                  "reserved": [] if reserved is None else reserved,
+                  "max_starts_per_hour": 5, "max_starts_per_tick": 10,
+                  "max_inflight": 10, "now": now}
+        cases.append(_capture(name, "crq.admit_available+backfill_runtime.usage_context", inputs,
+                              lambda: _admission_probe(inputs, usage_context=True)))
+
+    def reviewing(item_id: str, attempt: Any, started: Any) -> Dict[str, Any]:
+        run: Dict[str, Any] = {"run_id": item_id + "-run"}
+        if started is not False:
+            run["started_at"] = started
+        return {"id": item_id, "kind": "open", "state": "reviewing",
+                "attempt_id": attempt, "run": run}
+
+    start = "2026-11-13T23:50:00Z"
+    later = "2026-11-13T23:55:00Z"
+    window = {"remaining": 4, "limit": 10, "rollingWindowMs": 3600000}
+    reserved_hold = {"att-a": {"quota_state": "reserved"}}
+
+    def terminal(at: str, state: str = "reserved") -> Dict[str, Any]:
+        return {"k": {"terminal_at": at, "quota_state": state}}
+
+    context("fresh-usage-no-holds", queue={"items": [], "starts": []}, usage=window)
+    context("usage-unavailable-is-unsuccessful-zero",
+            queue={"items": [], "starts": ["2026-11-13T23:30:00Z"]}, reserved=[start])
+    context("usage-subtracts-every-unrepresented-hold",
+            queue={"items": [reviewing("a", "att-a", start)], "starts": [start]},
+            usage=window, reserved=[start, later])
+    context("represented-backfill-hold-is-not-subtracted",
+            queue={"items": [reviewing("a", "att-a", start)], "starts": [start],
+                   "backfill_reservations": reserved_hold},
+            usage=window, reserved=[start, later])
+    context("undated-represented-hold-matches-null-stamp",
+            queue={"items": [reviewing("a", "att-a", False)], "starts": [],
+                   "backfill_reservations": reserved_hold},
+            usage=window, reserved=[None])
+    context("represented-hold-needs-a-matching-stamp",
+            queue={"items": [reviewing("a", "att-a", start)], "starts": [],
+                   "backfill_reservations": reserved_hold},
+            usage=window, reserved=[later])
+    context("holds-above-remaining-clamp-to-zero",
+            queue={"items": [], "starts": []},
+            usage={"remaining": 1, "limit": 10}, reserved=[start, start, start])
+    context("terminal-hold-is-reflected",
+            queue={"items": [], "starts": [],
+                   "backfill_reservations": terminal("2026-11-13T23:30:00Z")},
+            usage=window)
+    context("terminal-hold-already-reflected-by-vendor-stays-single",
+            queue={"items": [], "starts": [],
+                   "backfill_reservations": terminal("2026-11-13T23:30:00Z")},
+            usage={"remaining": 4, "limit": 10, "reflected_reservations": ["k"]})
+    context("terminal-hold-outside-window-expires",
+            queue={"items": [], "starts": [],
+                   "backfill_reservations": terminal("2026-11-13T22:59:59Z")},
+            usage=window)
+    context("terminal-hold-at-window-edge-expires",
+            queue={"items": [], "starts": [],
+                   "backfill_reservations": terminal("2026-11-13T23:00:00Z")},
+            usage=window)
+    context("window-defaults-to-an-hour-when-zero",
+            queue={"items": [], "starts": [],
+                   "backfill_reservations": terminal("2026-11-13T22:59:00Z")},
+            usage={"remaining": 4, "limit": 10, "rollingWindowMs": 0})
+    context("longer-vendor-window-keeps-the-hold",
+            queue={"items": [], "starts": [],
+                   "backfill_reservations": terminal("2026-11-13T22:00:00Z")},
+            usage={"remaining": 4, "limit": 10, "rollingWindowMs": 7200000})
+    context("released-and-expired-holds-are-never-reflected",
+            queue={"items": [], "starts": [], "backfill_reservations": {
+                "r": {"terminal_at": "2026-11-13T23:30:00Z", "quota_state": "released"},
+                "e": {"terminal_at": "2026-11-13T23:30:00Z", "quota_state": "expired"}}},
+            usage=window)
+    context("future-terminal-hold-is-not-reflected",
+            queue={"items": [], "starts": [],
+                   "backfill_reservations": terminal("2026-11-14T00:30:00Z")},
+            usage=window)
+    context("hold-without-terminal-time-is-untouched",
+            queue={"items": [], "starts": [],
+                   "backfill_reservations": {"k": {"quota_state": "reserved"}}},
+            usage=window)
+    context("unavailable-usage-leaves-holds-alone",
+            queue={"items": [], "starts": [],
+                   "backfill_reservations": terminal("2026-11-13T22:00:00Z")})
+    context("absent-reservations-are-not-created",
+            queue={"items": [], "starts": [], "paused": False}, usage=window)
+    context("queue-key-order-keeps-existing-usage-position",
+            queue={"usage": None, "items": [], "backfill_usage": {"stale": True},
+                   "starts": ["2026-11-13T23:30:00Z"]},
+            usage=window)
+    context("starts-count-is-recorded-at-observation",
+            queue={"items": [], "starts": ["2026-11-13T23:10:00Z", "2026-11-13T23:20:00Z"]},
+            usage=window)
+    context("closed-gate-still-binds-the-context",
+            queue={"items": [], "starts": [], "paused": True, "pause_reason": "auth"},
+            usage={"remaining": 0, "limit": 10})
+    context("refuses-an-unreadable-terminal-time",
+            queue={"items": [], "starts": [], "backfill_reservations": terminal("yesterday")},
+            usage=window)
+    context("refuses-a-non-object-hold",
+            queue={"items": [], "starts": [], "backfill_reservations": {"k": "held"}},
+            usage=window)
+    context("refuses-an-unhashable-attempt-id",
+            queue={"items": [{"id": "a", "attempt_id": ["x"]}], "starts": []},
+            usage=window)
+    context("refuses-a-non-object-run-on-a-represented-item",
+            queue={"items": [{"id": "a", "attempt_id": "att-a", "run": "r"}], "starts": [],
+                   "backfill_reservations": {"att-a": {}}},
+            usage=window)
+    # `{}` is falsy, so usage_context writes remaining 0, then `usage["remaining"]`
+    # raises. `usage_slots.parse_usage` never returns it; the port refuses earlier.
+    context("refuses-an-empty-usage-object",
+            queue={"items": [], "starts": []}, usage={})
+
+    return _family("usage-context", cases)
+
+
 # --------------------------------------------------------------- assembly
 
 
@@ -1857,14 +1985,16 @@ def liveness_vectors() -> Dict[str, Any]:
     return _family("liveness", cases)
 
 
-def _admission_probe(inputs: Dict[str, Any]) -> Dict[str, Any]:
-    """`crq.admit_available` with launch and the backfill usage context stubbed.
+def _admission_probe(inputs: Dict[str, Any], usage_context: bool = False) -> Dict[str, Any]:
+    """`crq.admit_available` with launch stubbed.
 
     The stub journals one deterministic reservation per loop iteration, so the
     recorded `admissions` count, `remaining`, gate, log and usage/start
     projections are the oracle's own arithmetic. The backfill usage context is
-    a later slice: it is stubbed here rather than reimplemented.
+    stubbed (the `tick-admission` family) unless `usage_context` is true (the
+    `usage-context` family), which also records what the real context wrote.
     """
+    from contextlib import nullcontext
     from unittest.mock import patch
 
     queue = copy.deepcopy(inputs["queue"])
@@ -1880,12 +2010,13 @@ def _admission_probe(inputs: Dict[str, Any]) -> Dict[str, Any]:
     config = {"max_starts_per_hour": inputs["max_starts_per_hour"],
               "max_starts_per_tick": inputs["max_starts_per_tick"],
               "max_inflight": inputs["max_inflight"]}
-    with patch.object(crq, "start_one", stub_start_one), \
-            patch.object(crq.backfill_runtime, "usage_context", lambda *a, **k: None), \
+    stubbed = (nullcontext() if usage_context else
+               patch.object(crq.backfill_runtime, "usage_context", lambda *a, **k: None))
+    with patch.object(crq, "start_one", stub_start_one), stubbed, \
             patch.multiple(crq, CONFIG=config, now=lambda: queue_time.parse_utc(inputs["now"])):
         _, gate, remaining = crq.admit_available(
             queue, inputs["usage"], log, reserved=tuple(inputs["reserved"]))
-    return {
+    value = {
         "gate": gate,
         "remaining": remaining,
         "start_attempts": len(calls),
@@ -1894,6 +2025,11 @@ def _admission_probe(inputs: Dict[str, Any]) -> Dict[str, Any]:
         "usage": queue.get("usage"),
         "backfill_starts_at_observation": queue.get("backfill_starts_at_observation"),
     }
+    if usage_context:
+        value["backfill_usage"] = queue.get("backfill_usage")
+        value["backfill_reservations"] = queue.get("backfill_reservations")
+        value["queue_keys"] = list(queue)
+    return value
 
 
 def tick_admission_vectors() -> Dict[str, Any]:
@@ -1986,6 +2122,7 @@ BUILDERS: Dict[str, Callable[[], Dict[str, Any]]] = {
     "tick-schedule": tick_schedule_vectors,
     "liveness": liveness_vectors,
     "tick-admission": tick_admission_vectors,
+    "usage-context": usage_context_vectors,
 }
 
 

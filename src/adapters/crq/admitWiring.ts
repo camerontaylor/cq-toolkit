@@ -4,11 +4,20 @@
  * injected per-kind `startOne`. Inactive: nothing imports this from a runtime
  * entry point.
  *
+ * Before the gate, Python's `admit_available` records the usage read
+ * (`q["usage"]`), binds it to the local holds (`backfill_runtime.usage_context`:
+ * `backfill_usage`, reflected and expired backfill holds) and stamps
+ * `backfill_starts_at_observation`. That happens whatever the gate then says,
+ * dry runs included, so it is applied to the queue first and the decision reads
+ * the bound queue, as Python's mutated `q` does.
+ *
  * Python's `admit_available` mutates the queue, so its effect counters see what
  * `start_one` wrote. Here the live queue is a closed-over variable that each
  * `startOne` result replaces, and the counters read it on every call.
  */
-import { JsonObject, toPlainJson } from '../../policy/crq/jsonValue.js';
+import { usageContext } from '../../ops/crq/internal/backfillGate.js';
+import { JsonNumber, JsonObject, toPlainJson, type JsonValue } from '../../policy/crq/jsonValue.js';
+import { fromPlainJson, withObjectKeys } from '../../policy/crq/queueDoc.js';
 import {
   admissionDecision,
   type AdmissionConfig,
@@ -46,17 +55,46 @@ const startsCount = (queue: JsonObject): number => {
   return Array.isArray(starts) ? starts.length : 0;
 };
 
+/** `crq.iso()`: whole seconds, UTC, trailing `Z` (Python's `strftime` floors). */
+const isoSeconds = (micros: bigint): string =>
+  `${new Date(Number(micros / 1000n)).toISOString().slice(0, 19)}Z`;
+
+/**
+ * `q["usage"] = usage`, `backfill_runtime.usage_context(...)` and
+ * `q["backfill_starts_at_observation"] = len(q["starts"])`, in Python's order so
+ * the saved queue keeps Python's key order.
+ */
+function bindUsage(
+  queue: JsonObject,
+  usage: VendorUsage | null,
+  held: readonly ReservationHold[],
+  nowMicros: bigint,
+): JsonObject {
+  const observed = usage === null ? null : fromPlainJson(usage);
+  if (observed !== null && !(observed instanceof JsonObject))
+    throw new TypeError('usage must be an object or null');
+  // A missing `run.started_at` is Python's `None`, which `usage_context` matches
+  // against a represented item that also has no start time.
+  const stamps: JsonValue[] = held.map((hold) => fromPlainJson(hold.startedAt ?? null));
+  const recorded = withObjectKeys(queue, [['usage', observed]]);
+  const bound = usageContext(recorded, observed, stamps, isoSeconds(nowMicros));
+  return withObjectKeys(bound, [
+    ['backfill_starts_at_observation', JsonNumber.int(startsCount(bound))],
+  ]);
+}
+
 export function bindAdmit(env: AdmitEnv): TickPhases['admit'] {
   return async (queue, request): Promise<AdmissionOutcome> => {
     const usage = (request.usage ?? null) as VendorUsage | null;
     const held = request.reserved as readonly ReservationHold[];
-    let live = queue;
+    const nowMicros = env.nowMicros();
+    let live = bindUsage(queue, usage, held, nowMicros);
     const decision = admissionDecision({
-      queue: toPlainJson(queue) as Record<string, unknown>,
+      queue: toPlainJson(live) as Record<string, unknown>,
       usage,
       held,
       config: env.config,
-      nowMicros: env.nowMicros(),
+      nowMicros,
     });
     const lines: string[] = [];
     const only = request.only === null || request.only === '' ? undefined : request.only;

@@ -9,7 +9,10 @@
  * Declared divergences: `KeyboardInterrupt` (a BaseException) is not modelled;
  * adapter errors carry a class `name` standing in for `type(exc).__name__`;
  * a record that is not valid UTF-8 is an effects-seam matter (the seam must
- * throw like `read_text`), so it is not driven here.
+ * throw like `read_text`), so it is not driven here; the Python `tick_lock`
+ * (the runner's `state/tick.lock` fence around an issuing unit's transaction)
+ * has no TS counterpart yet, so the Python side's effects stub it as a
+ * nullcontext and the differential does not cover it (the port is inactive).
  */
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -67,6 +70,8 @@ interface Sc {
   runtime: unknown;
   adapterMode?: 'direct' | 'none' | 'factory' | 'factoryNull';
   queue?: string;
+  /** TS-only override of the fake git outputs; scenarios using it must stay out of `scenarios`. */
+  git?: Record<string, string>;
   live?: Record<string, string>;
   /** Raw JSON text: method -> steps ({ret} | {raise, cls} | {}). */
   script?: string;
@@ -122,6 +127,28 @@ const aliveQueue = JSON.stringify({ items: [{ id: 'a', run: { run_id: RID } }] }
 const longReason = 'é'.repeat(450);
 
 const scenarios: Sc[] = [
+  rc(
+    'legacy recovery uses post-drain prior head',
+    drained({
+      state: { ...GOOD_STATE, prior_head: 'b'.repeat(40) },
+    }),
+    { adapterMode: 'factory' },
+  ),
+  rc('snapshot recovery uses top-level prior head', rec({ prior_head: 'a'.repeat(40) }), {
+    adapterMode: 'factory',
+  }),
+  rc('recovery prefers top-level prior head', drained({ prior_head: 'a'.repeat(40) }), {
+    adapterMode: 'factory',
+  }),
+  rc(
+    'malformed top-level head refuses despite valid state head',
+    drained({
+      prior_head: 'bad',
+      state: { ...GOOD_STATE, prior_head: 'a'.repeat(40) },
+    }),
+    { adapterMode: 'factory' },
+  ),
+
   // ---- switch: success and entry refusals
   sw('switch success'),
   sw('switch success watchdog', { unit: WD }),
@@ -484,8 +511,9 @@ for d in sys.argv[5:]:
         completion_heartbeat_path=lambda r=root: r / "hb.json",
         config_path=root / "config.json",
         read_json=lambda rel, s=state: json.loads((s / rel).read_text()),
-        git=lambda *a: GIT[" ".join(a)], unit_digests=lambda: UD,
+        git=lambda *a: GIT[" ".join(a)].strip(), unit_digests=lambda: UD,
         controller_lock=contextlib.nullcontext, record_preflight=lambda: None,
+        tick_lock=contextlib.nullcontext,
         journal_append=append, journal_replace=replace)
     live_map = sc.get("live", {})
     def live(rdir, item, r, has_exit, m=live_map):
@@ -531,8 +559,8 @@ for d in sys.argv[5:]:
             return self._call("restore_activation", [unit, snapshot], None)
     mode = sc.get("adapterMode", "direct")
     adapter = A() if mode == "direct" else None
-    def factory(unit, prior):
-        log.append(["factory", unit, prior])
+    def factory(unit, prior, source_sha):
+        log.append(["factory", unit, prior, source_sha])
         return None if mode == "factoryNull" else A()
     kind = sc.get("pathKind", "normal")
     path = root / "controller-x.json" if kind == "outside" else (
@@ -625,7 +653,7 @@ function harness(root: string, sc: Sc): Harness {
     return v;
   };
   const effects: TransactionEffects = {
-    git: (...args) => GIT[args.join(' ')] ?? '',
+    git: (...args) => ({ ...GIT, ...sc.git })[args.join(' ')]?.trim() ?? '',
     configSha256: () => sha(readFileSync(join(root, 'config.json'), 'utf8')),
     preservedDigest: digest,
     unitDigests: () => UNIT_DIGESTS,
@@ -715,8 +743,8 @@ async function tsRun(root: string, sc: Sc): Promise<unknown> {
     } else {
       const factory =
         mode === 'factory' || mode === 'factoryNull'
-          ? (unit: string, prior: string): UnitAdapter | null => {
-              h.log.push(['factory', unit, prior]);
+          ? (unit: string, prior: string, sourceSha?: string): UnitAdapter | null => {
+              h.log.push(['factory', unit, prior, sourceSha]);
               return mode === 'factoryNull' ? null : h.adapter();
             }
           : undefined;
@@ -794,5 +822,23 @@ describe.skipIf(!haveOracle)('unit transaction matches deploy-controller.py', ()
     ]) {
       expect(text).toContain(needle.replaceAll('": ', '":'));
     }
+  });
+});
+
+describe('switch refuses a prior head that is not 40 hex (TS-only; Python covers only the retained head)', () => {
+  const base = mkdtempSync(join(tmpdir(), 'unit-tx-head-'));
+  test.each([
+    ['short', 'a'.repeat(39)],
+    ['non-hex', 'g'.repeat(40)],
+    ['empty', ''],
+    ['uppercase', 'A'.repeat(40)],
+  ])('%s rev-parse HEAD is refused before anything is journalled', async (name, head) => {
+    const dir = join(base, name);
+    mkdirSync(dir);
+    const sc = sw(`bad head ${name}`, { git: { 'rev-parse HEAD': `${head}\n` } });
+    materialise(dir, sc);
+    const out = (await tsRun(dir, sc)) as { res: Record<string, unknown>; journal: unknown[] };
+    expect(out.res).toEqual({ refused: 'invalid prior head for unit switch' });
+    expect(out.journal).toEqual([]);
   });
 });

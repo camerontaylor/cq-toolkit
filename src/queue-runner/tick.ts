@@ -26,6 +26,7 @@
 import { join } from 'node:path';
 import { fileTickEffects, type TickEffects } from '../adapters/crq/tickSource.js';
 import {
+  JsonNumber,
   JsonObject,
   parseJsonValue,
   toPlainJson,
@@ -58,17 +59,20 @@ import type { VendorUsage } from '../policy/crq/usageSlots.js';
 import { PlannerUsageError, type Mutation, type Plan } from './runner.js';
 
 /**
- * Everything a live tick does that this planner does not. The value's reason
- * repeats this list verbatim, so a reader never has to guess which effects are
- * missing before a switch.
+ * Every live-tick effect with no real binding yet, in `runTick` order. S6-f
+ * composes every merged adapter (src/adapters/crq/tickComposition.ts), so what
+ * remains is only work no adapter does; each entry's leading id is a
+ * `STAGED_GAPS` id there (a test keeps the two in step), and
+ * docs/crq/tick-slot-missing-effects.md gives the Python source for each. A
+ * shadow plan stays `complete: false` until this list is empty. Nothing routes
+ * `tick` or `slot` while it is not.
  */
 export const TICK_MISSING_EFFECTS: readonly string[] = [
-  'merged/push/PR-enrollment discovery',
-  'harvest effects (classification, receipts, cycles, coverage and repair bookkeeping)',
-  'per-kind launch planning and detached spawn',
-  'repair harvest and findings/PR-review delivery passes',
-  'backfill usage context and rank-4 admission',
-  'coverage opportunity ledger, next-slot deadline, status/heartbeat/summary publication',
+  'harvest-review-effects: harvest_review effects beyond the run-artifact reads (findings.md for non-local kinds, removeWorktree, writeReceipt, repairEnqueue, backfillHarvest, requestPrReview, coverage)',
+  'repair-harvest-effects: repair_tick.harvest queue side (worktree, verify, mechanical, markFindingOutcome, cleanupHarvested, publish)',
+  'start-one-effects: CoverageEffects, and the injected scans, receipt, author lease, on-demand clone and queue save of the file LaunchEffects, for admit.startOne',
+  'repair-parity: repair-side tick passes have no seeded differential against Python',
+  'shadow-d2: the composed phases are not shadowed, only the plan',
 ];
 
 /** The `complete: false` reason a shadow plan carries. */
@@ -203,8 +207,9 @@ export function buildTickPlan(observation: TickObservation): Plan {
   const rawItems = queue.items;
   if (!Array.isArray(rawItems)) throw new TickAdmissionError('queue.items must be an array');
   const items: unknown[] = rawItems;
+  // `load_queue` pops `boost` from live items only; retired promotion rows keep it.
   const boostsDropped = items.filter(
-    (item) => isRecord(item) && Object.hasOwn(item, 'boost'),
+    (item) => isRecord(item) && item.kind !== PROMOTION_KIND && Object.hasOwn(item, 'boost'),
   ).length;
   const retired = retireSupersededOpen(queue);
   const context: ScheduleContext = {
@@ -356,11 +361,17 @@ async function observeRun(
   return { itemIndex, liveness };
 }
 
-/** Parse a JSON document that must be an object (queue, config). */
+/** Python `json.loads` reads `NaN`, `Infinity` and `-Infinity` as floats. */
+function pythonConstant(raw: string): JsonValue {
+  const value = raw === 'NaN' ? Number.NaN : raw === '-Infinity' ? -Infinity : Infinity;
+  return JsonNumber.float(value, raw);
+}
+
+/** Parse a JSON document that must be an object (config). */
 function parseObject(name: string, text: string): CrqRecord {
   let value: JsonValue;
   try {
-    value = parseJsonValue(text, { duplicates: 'last' });
+    value = parseJsonValue(text, { duplicates: 'last', parseConstant: pythonConstant });
   } catch (error) {
     throw new TickAdmissionError(
       `${name}: ${error instanceof Error ? error.message : String(error)}`,

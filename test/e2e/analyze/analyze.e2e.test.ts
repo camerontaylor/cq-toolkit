@@ -45,6 +45,7 @@ import { pathAnalysisFileStore } from '../../../src/ops/analyze/analysisStore.js
 import { makeApplyRemediation } from '../../../src/ops/analyze/applyRemediation.js';
 import { clusterErrorsOp } from '../../../src/ops/analyze/clusterErrors.js';
 import { collectFailuresOp } from '../../../src/ops/analyze/collectFailures.js';
+import { makeAnalyzeInit } from '../../../src/ops/analyze/init.js';
 import {
   makeRenderAnalysisReport,
   parseAnalysisSidecar,
@@ -149,6 +150,52 @@ async function seedRepo(): Promise<string> {
   for (const file of SEEDED_FILES) {
     await writeFile(join(dir, file), SEEDED_FILE, 'utf8');
   }
+  return dir;
+}
+
+/**
+ * Seed a composite reference graph: a SOLUTION-style root (`files: []` plus
+ * references) over a composite app that references a composite lib. The app's
+ * only import is the dependency edge — it reads the lib's EMITTED
+ * declarations, so forcing `--noEmit` across the graph cannot type-check it
+ * (the build-mode emit override this regression guards, TS6310).
+ */
+async function seedCompositeRepo(): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), 'analyze-e2e-composite-'));
+  await mkdir(join(dir, 'app', 'src'), { recursive: true });
+  await mkdir(join(dir, 'lib', 'src'), { recursive: true });
+  const compositeOptions = {
+    composite: true,
+    module: 'nodenext',
+    moduleResolution: 'nodenext',
+    outDir: 'dist',
+    rootDir: 'src',
+  };
+  await writeFile(
+    join(dir, 'tsconfig.json'),
+    JSON.stringify({ files: [], references: [{ path: './app' }] }),
+    'utf8',
+  );
+  await writeFile(
+    join(dir, 'app', 'tsconfig.json'),
+    JSON.stringify({
+      compilerOptions: compositeOptions,
+      include: ['src'],
+      references: [{ path: '../lib' }],
+    }),
+    'utf8',
+  );
+  await writeFile(
+    join(dir, 'app', 'src', 'main.ts'),
+    "import { answer } from '../../lib/src/index.js';\nconsole.log(answer);\n",
+    'utf8',
+  );
+  await writeFile(
+    join(dir, 'lib', 'tsconfig.json'),
+    JSON.stringify({ compilerOptions: compositeOptions, include: ['src'] }),
+    'utf8',
+  );
+  await writeFile(join(dir, 'lib', 'src', 'index.ts'), 'export const answer = 42;\n', 'utf8');
   return dir;
 }
 
@@ -337,6 +384,50 @@ describe('end-to-end on a fixture repo (the acceptance check)', () => {
       "ANALYZE_E2E_REQUIRE_REAL=1 but no 'ast-grep' binary is on PATH — the REAL-binary acceptance half (the end-to-end codemod on the real engine) is being silently skipped; install ast-grep in the CI job that sets this variable",
     );
   });
+});
+
+describe('analyze.init over a solution-style reference graph (real tsc build)', () => {
+  test(
+    'composite app → lib graph: the detected -b check carries no --noEmit and builds clean',
+    { timeout: 120_000 },
+    async () => {
+      const dir = await seedCompositeRepo();
+      try {
+        // Detection runs through the REAL op: the pure init suite keeps the
+        // argument assertions for the flat shape; the composite shape holds
+        // the same contract.
+        const init = makeAnalyzeInit();
+        const written = await init({ dir });
+        expect(written.status).toBe('ok');
+        if (written.status !== 'ok') return;
+        const check = written.value.config.checks[0];
+        // Build mode must NOT force --noEmit onto the graph: each referenced
+        // project's own emit settings govern (the lib's composite declaration
+        // emit is what the app's dependency edge reads).
+        expect(check?.command.args).toEqual(['--build', '--pretty', 'false']);
+        if (check === undefined) return;
+        // The dependency edge no longer triggers TS6310: the detected check's
+        // exact arguments over the real compiler exit 0 with no failures —
+        // the lib emits its declarations and the app checks against them.
+        const probe = makeCheckRunner(subprocessRunCheck);
+        const build = await probe({
+          adapter: 'tsc-lines',
+          command: {
+            command: process.execPath,
+            args: [TSC_BIN, ...check.command.args],
+            cwd: dir,
+            timeoutMs: 120_000,
+          },
+        });
+        expect(build.status).toBe('ok');
+        if (build.status !== 'ok') return;
+        expect(build.value.failures).toEqual([]);
+        expect(build.value.exitCode).toBe(0);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 describe('the quarantine lane in miniature (end to end)', () => {

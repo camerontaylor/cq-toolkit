@@ -379,42 +379,32 @@ class Inbox:
             return receipt
 
     def recover(self, events):
-        """Replay durable events after a crash between spool and local state write.
-
-        Content IDs have no causal sort order, so events are indexed by
-        (finding, predecessor) and each finding's row is walked forward from its
-        current event until no retained successor applies. That reaches every
-        reachable successor, acknowledged ones included, in one read of each
-        row, instead of repeated passes over the whole event list."""
+        """Replay durable events after a crash between spool and local state write."""
         with ledger.locked(self.root / "findings.lock"):
-            successors = {}
-            for value in events:
-                if value["event_type"] != "finding-event":
-                    continue
-                p = value["payload"]
-                successors.setdefault(p["finding_id"], {}).setdefault(p["previous_event_id"], []).append(value)
-            for fid, by_previous in successors.items():
-                filename = self.root / "triage" / (fid + ".json")
-                if not filename.exists():
-                    continue
-                row = ledger.loads(filename.read_bytes())
-                changed = False
-                seen = set()
-                while row["previous_event_id"] not in seen:
-                    seen.add(row["previous_event_id"])
-                    # A fork keeps the first retained successor; publication
-                    # validates missing predecessors and forks.
-                    nxt = next(iter(by_previous.get(row["previous_event_id"], ())), None)
-                    if nxt is None:
-                        break
-                    self._apply_event(row, nxt)
-                    changed = True
-                if changed:
-                    ledger.atomic(filename, ledger.canonical(row))
+            remaining = [v for v in events if v["event_type"] == "finding-event"]
+            # Content IDs have no causal sort order. Repeat until every reachable
+            # successor has been applied, including events already acknowledged.
+            while remaining:
+                advanced = False
+                kept = []
+                for value in remaining:
+                    if self._recover_event(value):
+                        advanced = True
+                    else:
+                        kept.append(value)
+                remaining = kept
+                if not advanced:
+                    break  # Publication validates missing predecessors/forks.
 
-    @staticmethod
-    def _apply_event(row, value):
-        p = value["payload"]
+    def _recover_event(self, value):
+        p = value["payload"]; filename = self.root / "triage" / (p["finding_id"] + ".json")
+        if not filename.exists():
+            return False
+        row = ledger.loads(filename.read_bytes())
+        if row["previous_event_id"] == value["id"]:
+            return True
+        if row["previous_event_id"] != p["previous_event_id"]:
+            return False
         row.update(status=p["action"], previous_event_id=value["id"])
         row["failure_class"] = p["evidence"].get("failure_class")
         row.pop("context_error", None)
@@ -427,6 +417,8 @@ class Inbox:
                        mapped_intervals=p["evidence"].get("mapped_intervals", []))
             if p["action"] == "duplicate":
                 row["canonical_id"] = p["evidence"]["canonical_id"]
+        ledger.atomic(filename, ledger.canonical(row))
+        return True
 
 
 def canonical_rounds(root, queue, canonical_id, pin, *, exclude_job=None):

@@ -2,12 +2,15 @@
 // plain writes for status.md/status.json, the paseo schedule probe through
 // the injected command port, the summary publish through the shared A1
 // pipeline, and the summary_failed event isolation.
+import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Buffer } from 'node:buffer';
 import { afterEach, describe, expect, it } from 'vitest';
+import { readSummaryCore } from '../../../src/ops/crq/readOnlyStatus.js';
+import { fileReadOnlyStatusEffects } from '../../../src/adapters/crq/statusSource.js';
 import { runStatusWriter } from '../../../src/adapters/crq/statusWriter.js';
 import { fileStatusWriterEffects } from '../../../src/adapters/crq/statusWriter.js';
 import { resolveComposerSeams } from '../../../src/adapters/crq/statusWriter.js';
@@ -465,5 +468,66 @@ describe('runStatusWriter over a real state root', () => {
     const materializedView = mergedCurrent(materializedQueue, readReceipt);
     expect(materializedView.receipts['proven_terminal']).toBe(0);
     expect(materializedView.receipts['unverified']).toBe(1);
+  });
+
+  it('publishes the commit-subject label the read-only core route computes (#1420)', async () => {
+    const roots = await makeRoots();
+    const clone = join(roots.runnerRoot, 'clone');
+    await mkdir(clone, { recursive: true });
+    const git = (...args: string[]): string =>
+      execFileSync('git', ['-C', clone, ...args], { encoding: 'utf8' }).trim();
+    git('init', '-q');
+    git(
+      '-c',
+      'user.name=t',
+      '-c',
+      'user.email=t@t',
+      'commit',
+      '-q',
+      '--allow-empty',
+      '-m',
+      'feat: the real subject',
+    );
+    const sha = git('rev-parse', 'HEAD');
+    const queue = {
+      ...QUEUE,
+      items: [
+        ...QUEUE.items,
+        {
+          id: 'mc1',
+          pr: 5,
+          kind: 'merged-current',
+          tier: 1,
+          order: 1,
+          prior_cycles: 0,
+          state: 'pending',
+          cycles: [],
+          attempts: [],
+          notes: [],
+          merge_commit: sha,
+          subject: { repo: 'owner/repo', pr: 5 },
+        },
+      ],
+    };
+    await writeFile(join(roots.stateRoot, 'queue.json'), toQueueText(queue));
+    await writeFile(
+      join(roots.runnerRoot, 'config.json'),
+      `${JSON.stringify({ ...CONFIG, clone }, null, 2)}\n`,
+    );
+    await writeFile(join(roots.stateRoot, 'events.jsonl'), '');
+
+    const exitCode = await runStatusWriter(roots, { write: () => {}, error: () => {} }, () => NOW);
+    expect(exitCode).toBe(0);
+    const published = JSON.parse(
+      await readFile(join(roots.xdgStateHome, 'crq', 'summary.json'), 'utf8'),
+    ) as { pending_items: { kind?: string; label?: string }[] };
+    const publishedLabel = published.pending_items.find(
+      (row) => row.kind === 'merged-current',
+    )?.label;
+    expect(publishedLabel).toBe('feat: the real subject');
+
+    const core = await readSummaryCore(fileReadOnlyStatusEffects(roots, () => NOW));
+    const coreRows = (core.value as unknown as typeof published).pending_items;
+    expect(coreRows.find((row) => row.kind === 'merged-current')?.label).toBe(publishedLabel);
   });
 });

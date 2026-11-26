@@ -86,7 +86,7 @@ const CANONICAL_FINDING = /^[0-9a-f]{64}$/;
 /** Python `source_path`'s pre-normalisation character rejection. */
 const UNSAFE_PATH_CHARACTERS = new Set(['\u0000', '\n', '\r', '\t', '"', '\\']);
 
-function hasUnsafePathCharacter(value: string): boolean {
+export function hasUnsafePathCharacter(value: string): boolean {
   return [...value].some((character) => UNSAFE_PATH_CHARACTERS.has(character));
 }
 

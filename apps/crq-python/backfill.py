@@ -172,6 +172,10 @@ def inventory_unlocked(c, args, clock=time.monotonic):
                 current.setdefault("items", []).extend(additions)
             elif key not in original or value != original[key]:
                 current[key] = value
+        by_id = {i["id"]: i for i in current["items"]}
+        for ident in prepared.get("retired", []):
+            runtime.retire_superseded(by_id[ident], prepared["target"])
+            runtime.state_event(c, current, by_id[ident], c.iso(), "superseded by inventory")
         for ident in prepared["event_items"]:
             item = next(i for i in current["items"] if i["id"] == ident)
             runtime.state_event(c, current, item, item["created_at"], "inventory enqueue")

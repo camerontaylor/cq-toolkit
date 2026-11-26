@@ -6,7 +6,7 @@
 // fixtures have systemd units, so the probe is absent by default and the
 // status write must not depend on it); unknown flags refuse with usage exit
 // 2 before any state is touched.
-import { spawnSync } from 'node:child_process';
+import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -118,5 +118,193 @@ describe('crq status dispatch (CLI contract)', () => {
     const artifact = JSON.parse(result.stdout.trim()) as { status: string; error?: string };
     expect(artifact.status).toBe('failed');
     expect(artifact.error).toContain('status-writer:');
+  });
+});
+
+describe('crq summary dispatch (CLI contract, S1)', () => {
+  async function addRepairItem(stateRoot: string): Promise<void> {
+    const path = join(stateRoot, 'queue.json');
+    const queue = JSON.parse(await readFile(path, 'utf8')) as { items: Record<string, unknown>[] };
+    queue.items.push({
+      id: 'pr102',
+      pr: 102,
+      kind: 'open',
+      tier: 1,
+      order: 1,
+      prior_cycles: 0,
+      state: 'pending',
+      cycles: [],
+      attempts: [],
+      notes: [],
+      repair_origin: 'run-1',
+      repair_runs: {
+        'run-1': {
+          state: 'published',
+          verdicts: [
+            {
+              job: 'run-1-F1',
+              verdict: 'NOT-FIXED',
+              finding: { path: 'src/a.ts', title: 'first' },
+              reason: 'parses only stdout',
+            },
+            {
+              job: 'run-1-F2',
+              verdict: 'NOT-FIXED',
+              finding: { path: 'src/b.ts', title: 'second' },
+              reason: 'other',
+            },
+          ],
+        },
+      },
+    });
+    await writeFile(path, `${JSON.stringify(queue, null, 2)}\n`);
+  }
+
+  function runCli(
+    command: string,
+    runnerRoot: string,
+    stateRoot: string,
+    xdg: string,
+  ): SpawnSyncReturns<string> {
+    return spawnSync(process.execPath, [CLI, command, '--state-root', stateRoot], {
+      cwd: runnerRoot,
+      encoding: 'utf8',
+      timeout: 60_000,
+      env: { ...process.env, XDG_STATE_HOME: xdg },
+    });
+  }
+
+  it('publishes only summary.json and reports its path as one JSON document', async () => {
+    const { runnerRoot, stateRoot } = await makeRunnerRoot();
+    await addRepairItem(stateRoot);
+    const xdg = await mkdtemp(join(tmpdir(), 'crq-summary-cli-xdg-'));
+    cleanups.push(xdg);
+    const result = runCli('summary', runnerRoot, stateRoot, xdg);
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+    const artifact = JSON.parse(result.stdout.trim()) as {
+      status: string;
+      value?: { path?: string };
+    };
+    expect(artifact.status).toBe('ok');
+    expect(artifact.value?.path).toBe(join(xdg, 'crq', 'summary.json'));
+    // Unlike `status`, `summary` writes no status.md.
+    for (const name of ['status.md', 'status.json']) {
+      await expect(readFile(join(stateRoot, name), 'utf8')).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    }
+    expect(await readFile(join(stateRoot, 'events.jsonl'), 'utf8')).toBe('');
+    const summary = JSON.parse(await readFile(artifact.value!.path!, 'utf8')) as {
+      schema_version?: number;
+      pending_items: { pr: number; label?: string; repair_origin?: string }[];
+    };
+    expect(summary.schema_version).toBe(2);
+    const fix = summary.pending_items.find((row) => row.pr === 102);
+    expect(fix?.repair_origin).toBe('run-1');
+    expect(fix?.label).toBe('src/a.ts: parses only stdout (+1)');
+    expect(fix!.label!.length).toBeLessThanOrEqual(120);
+  });
+
+  it('writes the same summary.json as the summary stage of `status`', async () => {
+    const { runnerRoot, stateRoot } = await makeRunnerRoot();
+    await addRepairItem(stateRoot);
+    const viaStatus = await mkdtemp(join(tmpdir(), 'crq-summary-cli-a-'));
+    const viaSummary = await mkdtemp(join(tmpdir(), 'crq-summary-cli-b-'));
+    cleanups.push(viaStatus, viaSummary);
+    expect(runCli('status', runnerRoot, stateRoot, viaStatus).status).toBe(0);
+    expect(runCli('summary', runnerRoot, stateRoot, viaSummary).status).toBe(0);
+    const a = JSON.parse(await readFile(join(viaStatus, 'crq', 'summary.json'), 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    const b = JSON.parse(await readFile(join(viaSummary, 'crq', 'summary.json'), 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    // Wall-clock stamps differ between the two runs; everything else is parity.
+    for (const key of ['generated_at', 'status_as_of']) {
+      delete a[key];
+      delete b[key];
+    }
+    expect(b).toEqual(a);
+  });
+
+  it('refuses an unknown flag with usage exit 2 and writes nothing', async () => {
+    const { runnerRoot } = await makeRunnerRoot();
+    const xdg = await mkdtemp(join(tmpdir(), 'crq-summary-cli-xdg-'));
+    cleanups.push(xdg);
+    const result = spawnSync(process.execPath, [CLI, 'summary', '--bogus'], {
+      cwd: runnerRoot,
+      encoding: 'utf8',
+      timeout: 60_000,
+      env: { ...process.env, XDG_STATE_HOME: xdg },
+    });
+    expect(result.status).toBe(2);
+    await expect(readFile(join(xdg, 'crq', 'summary.json'), 'utf8')).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
+  it('exits 1 with the refusal in the artifact when the queue is invalid', async () => {
+    const { runnerRoot, stateRoot } = await makeRunnerRoot();
+    await writeFile(join(stateRoot, 'queue.json'), '{"items": "not-a-list"}');
+    const xdg = await mkdtemp(join(tmpdir(), 'crq-summary-cli-xdg-'));
+    cleanups.push(xdg);
+    const result = runCli('summary', runnerRoot, stateRoot, xdg);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toBe('');
+    const artifact = JSON.parse(result.stdout.trim()) as { status: string; error?: string };
+    expect(artifact.status).toBe('failed');
+    expect(artifact.error).toContain('summary-writer:');
+  });
+
+  async function setSchedule(runnerRoot: string, scheduleId: unknown): Promise<void> {
+    const path = join(runnerRoot, 'config.json');
+    const config = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
+    config['schedule_id'] = scheduleId;
+    await writeFile(path, `${JSON.stringify(config)}\n`);
+  }
+
+  it('takes the schedule state from `paseo schedule inspect` when it succeeds', async () => {
+    const { runnerRoot, stateRoot } = await makeRunnerRoot();
+    await setSchedule(runnerRoot, 'crq-tick.timer');
+    const bin = await mkdtemp(join(tmpdir(), 'crq-summary-cli-bin-'));
+    const xdg = await mkdtemp(join(tmpdir(), 'crq-summary-cli-xdg-'));
+    cleanups.push(bin, xdg);
+    await writeFile(join(bin, 'paseo'), `#!/bin/sh\necho '{"status":"active"}'\n`, { mode: 0o755 });
+    const result = spawnSync(process.execPath, [CLI, 'summary', '--state-root', stateRoot], {
+      cwd: runnerRoot,
+      encoding: 'utf8',
+      timeout: 60_000,
+      env: { ...process.env, XDG_STATE_HOME: xdg, PATH: `${bin}:${process.env.PATH ?? ''}` },
+    });
+    expect(result.status).toBe(0);
+    const summary = JSON.parse(await readFile(join(xdg, 'crq', 'summary.json'), 'utf8')) as {
+      schedule: { id: string; state: string };
+    };
+    expect(summary.schedule).toEqual({ id: 'crq-tick.timer', state: 'active' });
+  });
+
+  it('publishes with the default schedule state when the inspect fails or schedule_id is not a string', async () => {
+    for (const scheduleId of ['crq-tick.timer', 123]) {
+      const { runnerRoot, stateRoot } = await makeRunnerRoot();
+      await setSchedule(runnerRoot, scheduleId);
+      const bin = await mkdtemp(join(tmpdir(), 'crq-summary-cli-bin-'));
+      const xdg = await mkdtemp(join(tmpdir(), 'crq-summary-cli-xdg-'));
+      cleanups.push(bin, xdg);
+      await writeFile(join(bin, 'paseo'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+      const result = spawnSync(process.execPath, [CLI, 'summary', '--state-root', stateRoot], {
+        cwd: runnerRoot,
+        encoding: 'utf8',
+        timeout: 60_000,
+        env: { ...process.env, XDG_STATE_HOME: xdg, PATH: `${bin}:${process.env.PATH ?? ''}` },
+      });
+      expect(result.status).toBe(0);
+      const summary = JSON.parse(await readFile(join(xdg, 'crq', 'summary.json'), 'utf8')) as {
+        schedule: { id: unknown; state: string };
+      };
+      expect(summary.schedule).toEqual({ id: scheduleId, state: 'systemd' });
+    }
   });
 });

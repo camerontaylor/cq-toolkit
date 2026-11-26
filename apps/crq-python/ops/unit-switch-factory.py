@@ -36,8 +36,9 @@ Known limits, unchanged by this composition:
 * root, record-directory and shared-lock coverage are wiring preconditions
   owned by the coordinator, not fields in this factory;
 * a Node target is accepted only when the verified artifact's declaration
-  names the selected command. ``watchdog`` and ``publish`` are the declared
-  live commands; ``tick``, ``slot``, ``backfill`` and ``repair`` still refuse.
+  names the selected command. ``watchdog``, ``publish`` and
+  ``backfill inventory`` are the declared live commands; ``tick``, ``slot``
+  and ``repair`` still refuse.
   The selected artifact must already be installed and inventory verified; this
   factory does not stage it.
 """

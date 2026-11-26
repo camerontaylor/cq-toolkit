@@ -6,6 +6,7 @@ The real guest run is recorded separately and is not part of the unit suite.
 """
 import importlib.util
 import base64
+import contextlib
 import copy
 import io
 import json
@@ -577,6 +578,55 @@ def matrix_evidence():
                       "UnitFileState": "enabled"},
             "preserved": preserved}
     return phases_value, restarts, reboots
+
+
+class CompletionsReadTests(unittest.TestCase):
+    def _read(self, text, writes=(), on_sleep=None):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = pathlib.Path(tmp) / "completions.jsonl"
+            log.write_text(text)
+            pending = list(writes)
+
+            def sleep(seconds):
+                if on_sleep is not None:
+                    on_sleep(seconds)
+                if pending:
+                    log.write_text(pending.pop(0))
+
+            with mock.patch.object(guest, "COMPLETIONS", log), \
+                    mock.patch.object(guest.time, "sleep", sleep):
+                return guest.completions()
+
+    def test_partial_final_line_is_retried_until_complete(self):
+        self.assertEqual(
+            self._read('{"a": 1}\n{"b"', writes=['{"a": 1}\n{"b": 2}\n']),
+            [{"a": 1}, {"b": 2}])
+
+    def test_persistent_partial_line_is_never_accepted(self):
+        with self.assertRaisesRegex(RuntimeError, "line 2 is not JSON"):
+            self._read('{"a": 1}\n{"b"')
+
+    def test_unterminated_valid_json_is_retried_until_newline(self):
+        self.assertEqual(
+            self._read('{"a": 1}\n{"b": 2}', writes=['{"a": 1}\n{"b": 2}\n']),
+            [{"a": 1}, {"b": 2}])
+
+    def test_persistent_unterminated_valid_json_is_never_accepted(self):
+        with self.assertRaisesRegex(RuntimeError, "not JSON"):
+            self._read('{"a": 1}\n{"b": 2}')
+
+    def test_completion_evidence_requires_an_integer_sequence(self):
+        item = {"sequence": 1, "invocation": "a" * 32, "runtime": "python"}
+        entry = dict(item, unit=guest.UNIT, success=True)
+        self.assertTrue(guest.completion_logged(item, [entry]))
+        for bogus in (True, 1.0):
+            self.assertFalse(guest.completion_logged(item, [dict(entry, sequence=bogus)]))
+
+    def test_bad_interior_line_raises_without_retry(self):
+        sleep = mock.Mock()
+        with self.assertRaisesRegex(RuntimeError, "line 1 is not JSON"):
+            self._read('nope\n{"b": 2}\n', on_sleep=sleep)
+        sleep.assert_not_called()
 
 
 class HarnessCheckTests(unittest.TestCase):
@@ -3119,6 +3169,177 @@ class PartialHarnessCheckTests(unittest.TestCase):
             harness._verify_partial_raw({}, root, problems, phases_value)
             self.assertTrue(any("record digest does not match" in item
                                 for item in problems), problems)
+
+
+class FinishCleanupTests(unittest.TestCase):
+    def test_restore_runs_after_a_process_stop_failure(self):
+        calls = []
+
+        def boom():
+            raise RuntimeError("stop failed")
+
+        cleanup = []
+        with self.assertRaisesRegex(RuntimeError, "stop failed"):
+            guest.finish_cleanup(
+                cleanup,
+                [lambda: calls.append("a") or "a", boom,
+                 lambda: calls.append("c") or "c"],
+                [lambda: calls.append("queue"), lambda: calls.append("runs")])
+        self.assertEqual(calls, ["a", "c", "queue", "runs"])
+        # 2149 P3: results of stops that succeeded are kept despite the failure.
+        self.assertEqual(cleanup, ["a", "c"])
+
+    def test_failed_phase_output_carries_the_retained_cleanup_results(self):
+        # Caller level: main() must emit the stop results that succeeded
+        # before a later stop failed, and keep the nonzero exit status.
+        def boom():
+            raise RuntimeError("second stop failed")
+
+        def phase(_args):
+            guest.finish_cleanup([], [lambda: {"stopped": 1}, boom],
+                                 [lambda: None])
+
+        out = io.StringIO()
+        with mock.patch.object(guest, "require", lambda *a, **k: None), \
+                mock.patch.object(guest, "phase_prepare", phase), \
+                contextlib.redirect_stdout(out):
+            status = guest.main(["prepare"])
+        self.assertEqual(status, 1)
+        failure = json.loads(out.getvalue())
+        self.assertEqual(failure["error"], "RuntimeError")
+        self.assertEqual(failure["cleanup"], [{"stopped": 1}])
+
+    def test_process_results_are_collected_on_success(self):
+        cleanup = []
+        guest.finish_cleanup(cleanup, [lambda: 1, lambda: 2], [lambda: None])
+        self.assertEqual(cleanup, [1, 2])
+
+    def test_every_phase_cleanup_site_goes_through_finish_cleanup(self):
+        # 2149 P3: the phases need a live VM, so pin the call sites structurally:
+        # stop_process / restore_queue / remove_drain_runs may be referenced
+        # only inside a finish_cleanup(...) call, never in an inline sequence.
+        import ast
+        tree = ast.parse((OPS / "vm-unit-switch-guest.py").read_text())
+        guarded = {"stop_process", "restore_queue", "remove_drain_runs"}
+        phases = {"drain_refuse_phase", "drain_harvest_phase", "recover_drain_refuse_phase"}
+        seen = set()
+        for fn in (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name in phases):
+            inside = {id(n) for call in ast.walk(fn)
+                      if isinstance(call, ast.Call) and getattr(call.func, "id", "") == "finish_cleanup"
+                      for n in ast.walk(call)}
+            self.assertTrue(any(isinstance(c, ast.Call) and getattr(c.func, "id", "") == "finish_cleanup"
+                                for c in ast.walk(fn)), fn.name)
+            seen.add(fn.name)
+            for node in ast.walk(fn):
+                if isinstance(node, ast.Name) and node.id in guarded:
+                    self.assertIn(id(node), inside, "%s uses %s outside finish_cleanup" % (fn.name, node.id))
+        self.assertEqual(seen, phases)
+
+
+class RunBootLockTests(unittest.TestCase):
+    """cmd_run boots under run.lock, as vm-feasibility cmd_boot does."""
+
+    def _run(self, hold_lock, live=None):
+        import fcntl
+        with tempfile.TemporaryDirectory() as tmp:
+            state = pathlib.Path(tmp)
+            run_dir = state / "runs" / "r1"
+            run_dir.mkdir(parents=True)
+            run = {"run_id": "r1", "path": str(run_dir), "port": 2222}
+            args = mock.Mock(state_dir=str(state), source_commit=SOURCE_COMMIT,
+                             mode="full", tools=None, keep=False)
+            holder = open(run_dir / "run.lock", "a")
+            if hold_lock:
+                fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                with mock.patch.object(harness, "source_commit_check",
+                                       return_value=SOURCE_COMMIT), \
+                     mock.patch.object(harness, "snapshot_uploads"), \
+                     mock.patch.object(harness.vm, "Recorder"), \
+                     mock.patch.object(harness.vm, "fetch_image"), \
+                     mock.patch.object(harness.vm, "host_stamp", return_value={}), \
+                     mock.patch.object(harness.vm, "sha256_file", return_value="x"), \
+                     mock.patch.object(harness, "prepare_run", return_value=run), \
+                     mock.patch.object(harness.vm, "boot",
+                                       side_effect=RuntimeError("boot reached")) as boot, \
+                     mock.patch.object(harness.vm, "live_identity",
+                                       return_value=live), \
+                     mock.patch.object(harness.vm,
+                                       "_stop_owned_process") as stop, \
+                     mock.patch.object(harness.vm,
+                                       "stop_owned_process") as guarded:
+                    with self.assertRaises((RuntimeError, ValueError)) as ctx:
+                        harness.cmd_run(args)
+            finally:
+                holder.close()
+            return ctx.exception, boot, stop, guarded
+
+    def test_busy_run_lock_blocks_boot_and_cleanup(self):
+        exc, boot, stop, guarded = self._run(hold_lock=True)
+        self.assertIn("run is busy", str(exc))
+        boot.assert_not_called()
+        stop.assert_not_called()
+        guarded.assert_not_called()
+
+    def test_boot_failure_under_the_lock_still_cleans_up(self):
+        exc, boot, stop, guarded = self._run(hold_lock=False)
+        self.assertEqual(str(exc), "boot reached")
+        boot.assert_called_once()
+        # Partial-boot cleanup stays inside the boot critical section: the
+        # unguarded stop runs while the boot lock is still held, so another
+        # invocation cannot boot a replacement for it to kill first.
+        stop.assert_called_once()
+        stop_args, stop_kwargs = stop.call_args
+        self.assertEqual(len(stop_args), 1)
+        self.assertEqual(stop_kwargs, {"purge": False})
+        guarded.assert_not_called()
+
+    def test_live_run_refusal_does_not_stop_the_live_guest(self):
+        exc, boot, stop, guarded = self._run(hold_lock=False, live={"pid": 4242})
+        self.assertIn("already owns a live VM", str(exc))
+        boot.assert_not_called()
+        stop.assert_not_called()
+        guarded.assert_not_called()
+
+    def test_failed_run_after_a_successful_boot_stops_only_this_launch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = pathlib.Path(tmp)
+            run_dir = state / "runs" / "r1"
+            run_dir.mkdir(parents=True)
+            run = {"run_id": "r1", "path": str(run_dir), "port": 2222}
+            args = mock.Mock(state_dir=str(state), source_commit=SOURCE_COMMIT,
+                             mode="full", tools=None, keep=False)
+            with mock.patch.object(harness, "source_commit_check",
+                                   return_value=SOURCE_COMMIT), \
+                 mock.patch.object(harness, "snapshot_uploads"), \
+                 mock.patch.object(harness.vm, "Recorder"), \
+                 mock.patch.object(harness.vm, "fetch_image"), \
+                 mock.patch.object(harness.vm, "host_stamp", return_value={}), \
+                 mock.patch.object(harness.vm, "sha256_file", return_value="x"), \
+                 mock.patch.object(harness, "prepare_run", return_value=run), \
+                 mock.patch.object(harness.vm, "boot",
+                                   return_value={"pid": 4242, "starttime": "7"}), \
+                 mock.patch.object(harness.vm, "live_identity",
+                                   return_value=None), \
+                 mock.patch.object(harness.vm, "wait_ssh",
+                                   side_effect=RuntimeError("ssh never came up")), \
+                 mock.patch.object(harness.vm,
+                                   "_stop_owned_process") as unguarded, \
+                 mock.patch.object(harness.vm,
+                                   "stop_owned_process") as guarded:
+                with self.assertRaises(RuntimeError) as ctx:
+                    harness.cmd_run(args)
+        self.assertEqual(str(ctx.exception), "ssh never came up")
+        # The launch identity returned by the successful boot guards the
+        # cleanup stop, so a replacement VM another invocation booted after
+        # this launch would be left alone.
+        guarded.assert_called_once()
+        guarded_args, guarded_kwargs = guarded.call_args
+        self.assertEqual(guarded_args, (run,))
+        self.assertEqual(guarded_kwargs,
+                         {"purge": False,
+                          "launched": {"pid": 4242, "starttime": "7"}})
+        unguarded.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -175,7 +175,7 @@
 // verdict also POPULATES WorkerResult.error (bounded + secret-redacted,
 // issue #208). Only PRE-DISPATCH validation throws.
 import { randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { defaultSessionsDir } from '../sessions-dir.js';
@@ -1041,9 +1041,22 @@ export function nativeTranscriptPath(
   workspace: string | undefined,
 ): string | undefined {
   if (workspace === undefined || workspace === '') return undefined;
-  const key = workspace.replace(/[^A-Za-z0-9]/g, '-');
-  const candidate = join(homedir(), '.claude', 'projects', key, `${nativeSessionId}.jsonl`);
-  return existsSync(candidate) ? candidate : undefined;
+  // The CLI keys its transcript directory by its cwd, which can be the physical
+  // path (a symlinked temp root such as macOS /var -> /private/var) rather than
+  // the lexical one the run was given: look under both, lexical first.
+  const keys = [workspace];
+  try {
+    const physical = realpathSync(workspace);
+    if (physical !== workspace) keys.push(physical);
+  } catch {
+    /* an unresolvable workspace keeps only the lexical key */
+  }
+  for (const entry of keys) {
+    const key = entry.replace(/[^A-Za-z0-9]/g, '-');
+    const candidate = join(homedir(), '.claude', 'projects', key, `${nativeSessionId}.jsonl`);
+    if (existsSync(candidate)) return candidate;
+  }
+  return undefined;
 }
 
 /** ISO-8601 timestamp for session messages. */
@@ -1186,6 +1199,8 @@ export interface RunObservation {
   stderr: string[];
   /** Usage folded from assistant events — the fallback when no result usage. */
   assistantUsage: Usage | undefined;
+  /** `message.id`s whose usage was already folded: one message can arrive as several assistant events. */
+  assistantUsageMessageIds: Set<string>;
   /** The terminal result event, when it arrived. */
   result: ResultEvent | undefined;
   /** The child's settled close (exit code/signal/spawn error), when it closed — error-cause evidence (#208). */
@@ -1239,6 +1254,7 @@ function newObservation(): RunObservation {
     narration: [],
     stderr: [],
     assistantUsage: undefined,
+    assistantUsageMessageIds: new Set(),
     result: undefined,
     close: undefined,
     toolUseNameById: new Map(),
@@ -1290,6 +1306,11 @@ function asString(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
 }
 
+/** A native session id must be non-empty: an empty frame value never replaces an earlier id. */
+function asNonEmptyString(value: unknown): string | undefined {
+  return typeof value === 'string' && value !== '' ? value : undefined;
+}
+
 function asArray(value: unknown): unknown[] | undefined {
   return Array.isArray(value) ? value : undefined;
 }
@@ -1332,7 +1353,8 @@ export function handleStdoutLine(observation: RunObservation, line: string): voi
   switch (event['type']) {
     case 'system': {
       if (event['subtype'] === 'init') {
-        observation.cliSessionId = asString(event['session_id']) ?? observation.cliSessionId;
+        observation.cliSessionId =
+          asNonEmptyString(event['session_id']) ?? observation.cliSessionId;
         observation.servedModel = asString(event['model']) ?? observation.servedModel;
         if (!observation.initSeen) {
           observation.initSeen = true;
@@ -1363,8 +1385,14 @@ export function handleStdoutLine(observation: RunObservation, line: string): voi
         observation.narration.push(refusalNarrationMarker());
       }
       const usage = usageFromWire(message['usage']);
-      if (usage !== undefined) {
+      // Claude Code can emit one assistant event per content block, all sharing
+      // one `message.id` and repeating the message's usage: count it once.
+      const messageId = asString(message['id']);
+      const repeated =
+        messageId !== undefined && observation.assistantUsageMessageIds.has(messageId);
+      if (usage !== undefined && !repeated) {
         observation.assistantUsage = addUsage(observation.assistantUsage, usage);
+        if (messageId !== undefined) observation.assistantUsageMessageIds.add(messageId);
       }
       const content = asArray(message['content']) ?? [];
       for (const block of content) {
@@ -1434,7 +1462,7 @@ export function handleStdoutLine(observation: RunObservation, line: string): voi
     }
     case 'result': {
       observation.result = event;
-      observation.cliSessionId = asString(event['session_id']) ?? observation.cliSessionId;
+      observation.cliSessionId = asNonEmptyString(event['session_id']) ?? observation.cliSessionId;
       observation.servedModel = asString(event['model']) ?? observation.servedModel;
       // The result frame can carry the refusal stop reason too — observe it
       // wherever the substrate states it (the void is channel-agnostic).

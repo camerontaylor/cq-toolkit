@@ -5169,8 +5169,8 @@
           },
           "expect": {
             "ok": false,
-            "error": "TypeError",
-            "message": "cannot use 'list' as a set element (unhashable type: 'list')",
+            "error": "IntegrityError",
+            "message": "event does not match one schema variant",
             "value": {
               "fetch_calls": 1,
               "push_calls": 0,
@@ -5178,6 +5178,128 @@
               "acks": [],
               "pending": [
                 "2e64e55c50bbb3113af51848fdfb97ec21c6a271e5cd2c0fb8d55699bf44fc8f"
+              ]
+            }
+          }
+        },
+        {
+          "name": "stray-review-id-publishes",
+          "source": "review_ledger.GitLedger.publish",
+          "input": {
+            "ledger": [],
+            "pending": [
+              {
+                "schema": "cq.review-ledger/v1",
+                "event_type": "import-result",
+                "source_key": "import:stray-review-id",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "source": {
+                    "repo": "camerontaylor/cq-toolkit",
+                    "producer": "fixture",
+                    "type": "author-cli",
+                    "id": "stray-review-id",
+                    "authenticated": false
+                  },
+                  "source_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                  "result": "unverified",
+                  "reason": "fixture",
+                  "review_id": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                  "duplicate_id": null,
+                  "artifacts": [
+                    {
+                      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                      "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                    }
+                  ]
+                },
+                "id": "b825b7f18762ca881db5afacef898e01fbbc9b69d110e16b91de88142770001c"
+              }
+            ],
+            "direct": [],
+            "acked": [],
+            "failures": 0,
+            "accept_then_fail": false,
+            "concurrent": [],
+            "drop_on_fetch": [],
+            "refused_artifacts": []
+          },
+          "expect": {
+            "ok": true,
+            "value": {
+              "fetch_calls": 2,
+              "push_calls": 1,
+              "batches": [
+                [
+                  {
+                    "id": "b825b7f18762ca881db5afacef898e01fbbc9b69d110e16b91de88142770001c",
+                    "path": "records/2026/10/b825b7f18762ca881db5afacef898e01fbbc9b69d110e16b91de88142770001c.json",
+                    "bytes": 764,
+                    "sha256": "107cece28fad793294d6887e92da5fa1712ebcadb4cf294488367d19131facb8",
+                    "canonical": "{\"event_type\":\"import-result\",\"id\":\"b825b7f18762ca881db5afacef898e01fbbc9b69d110e16b91de88142770001c\",\"occurred_at\":\"2026-10-30T00:00:00Z\",\"payload\":{\"artifacts\":[{\"location\":\"/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"}],\"duplicate_id\":null,\"reason\":\"fixture\",\"result\":\"unverified\",\"review_id\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"source\":{\"authenticated\":false,\"id\":\"stray-review-id\",\"producer\":\"fixture\",\"repo\":\"camerontaylor/cq-toolkit\",\"type\":\"author-cli\"},\"source_digest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"schema\":\"cq.review-ledger/v1\",\"source_key\":\"import:stray-review-id\"}"
+                  }
+                ]
+              ],
+              "acks": [
+                "b825b7f18762ca881db5afacef898e01fbbc9b69d110e16b91de88142770001c"
+              ],
+              "pending": []
+            }
+          }
+        },
+        {
+          "name": "credited-import-missing-review-refuses",
+          "source": "review_ledger.GitLedger.publish",
+          "input": {
+            "ledger": [],
+            "pending": [
+              {
+                "schema": "cq.review-ledger/v1",
+                "event_type": "import-result",
+                "source_key": "import:credited-missing",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "source": {
+                    "repo": "camerontaylor/cq-toolkit",
+                    "producer": "fixture",
+                    "type": "author-cli",
+                    "id": "credited-missing",
+                    "authenticated": false
+                  },
+                  "source_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                  "result": "credited",
+                  "reason": "fixture",
+                  "review_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                  "duplicate_id": null,
+                  "artifacts": [
+                    {
+                      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                      "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                    }
+                  ]
+                },
+                "id": "9057060295871e6c82dabd771ad2e1aab3a3af37a2343f83157ba9aec527c8d3"
+              }
+            ],
+            "direct": [],
+            "acked": [],
+            "failures": 0,
+            "accept_then_fail": false,
+            "concurrent": [],
+            "drop_on_fetch": [],
+            "refused_artifacts": []
+          },
+          "expect": {
+            "ok": false,
+            "error": "IntegrityError",
+            "message": "outbox has missing/forked causal dependencies",
+            "value": {
+              "fetch_calls": 1,
+              "push_calls": 0,
+              "batches": [],
+              "acks": [],
+              "pending": [
+                "9057060295871e6c82dabd771ad2e1aab3a3af37a2343f83157ba9aec527c8d3"
               ]
             }
           }

@@ -106,9 +106,13 @@ an absolute `now` is an input, never an emission. `tick-admission.json` rows
 carry the queue, the usage observation, the `reserved` stamps and the three
 pacing knobs. `crq.admit_available` is replayed with its launch loop stubbed
 (each iteration journals one deterministic start) and with the backfill usage
-context stubbed, because `backfill_usage` is a later slice. The recorded value
+context stubbed (`usage-context.json` covers it). The recorded value
 is therefore the gate, `start_attempts`, `remaining`, the log lines and the
-usage/start projections the admission pass owns. `liveness.json` rows are
+usage/start projections the admission pass owns. `usage-context.json` rows
+use the same inputs but leave the real `backfill_runtime.usage_context` in, and
+also record `backfill_usage`, `backfill_reservations` and the queue key order,
+so the TypeScript `bindAdmit` is checked against what Python writes before its
+gate (refusals included). `liveness.json` rows are
 read with the lossless reader in TypeScript so a Python `float` pid (`42.0`)
 keeps its lexeme and is refused exactly as `isinstance(value, int)` refuses it.
 

@@ -126,6 +126,18 @@ export async function harvestBackfillCounted(
     const rest = new JsonObject(retained.entries.filter(([key]) => key !== 'id'));
     if (typeof id !== 'string' || id !== ledgerDigestOf(rest))
       throw new LedgerIntegrityError('retained review event id mismatch');
+    // The digest only protects the event's own id; the event must also name
+    // this run, item job and attempt, or a copied event would be reused.
+    const payload = retained.get('payload');
+    const source = payload instanceof JsonObject ? payload.get('source') : undefined;
+    if (
+      !(payload instanceof JsonObject) ||
+      payload.get('attempt_id') !== attempt ||
+      payload.get('job_id') !== item.get('job_id') ||
+      !(source instanceof JsonObject) ||
+      source.get('id') !== proof.runId
+    )
+      throw new LedgerIntegrityError('retained review event identity mismatch');
     value = retained;
   } else {
     let event: JsonObject;

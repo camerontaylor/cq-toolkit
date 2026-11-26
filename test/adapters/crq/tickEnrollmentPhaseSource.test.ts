@@ -111,8 +111,48 @@ describe('tick enrollment phase source', () => {
   it('a failing forge listing skips that repo with a log line only', async () => {
     const { effects } = build({ gh: async () => ({ code: 1, stderr: 'boom', stdout: '' }) });
     const result = await effects.primary(q({ items: [] }), false);
-    expect(result.log).toEqual(['pr discovery skipped o/main: forge listing unavailable']);
+    // Python's primary `enroll` (crq.py:3127) logs `enrollment skipped: <exc>`.
+    expect(result.log).toEqual(['enrollment skipped: forge listing unavailable']);
     expect(names(result.queue)).toEqual([]);
+  });
+
+  it('a failing forge listing for a configured repo keeps the pr_enroll wording', async () => {
+    const { effects } = build({ gh: async () => ({ code: 1, stderr: 'boom', stdout: '' }) });
+    const result = await effects.others(q({ items: [] }), false);
+    expect(result.log).toEqual(['pr discovery skipped o/lib: forge listing unavailable']);
+  });
+
+  describe('primary clone fetch', () => {
+    const fetches = async (primaryFetched: boolean | undefined) => {
+      const seen: string[] = [];
+      const { effects } = build({
+        ...(primaryFetched === undefined ? {} : { primaryFetched }),
+        git: (repo) => async (args) => {
+          if (args[0] === 'fetch') seen.push(`${repo.repo} ${args.slice(1).join(' ')}`);
+          return {
+            args,
+            code: 0,
+            stdout: text(args[0] === 'merge-base' ? BASE : ''),
+            stderr: '',
+          };
+        },
+      });
+      await runEnrollmentPhase(q({ items: [] }), false, effects);
+      return seen;
+    };
+
+    it('standalone, refreshes the primary clone itself (no earlier fetch phase)', async () => {
+      expect(await fetches(undefined)).toEqual([
+        'o/main --prune --quiet origin',
+        'o/lib --quiet origin +refs/heads/main:refs/remotes/origin/main',
+      ]);
+    });
+
+    it('after the tick fetch phase, does not fetch the primary again but still fetches others', async () => {
+      expect(await fetches(true)).toEqual([
+        'o/lib --quiet origin +refs/heads/main:refs/remotes/origin/main',
+      ]);
+    });
   });
 
   it('passes repo, range base and PR head to the facts read, and keeps dry runs write-free', async () => {

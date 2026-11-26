@@ -132,7 +132,12 @@ function dependencies(value: JsonValue): readonly (string | null)[] {
     case 'finding-event':
       return [field('review_id'), field('previous_event_id')];
     case 'import-result':
-      return [field('review_id'), field('duplicate_id')];
+      // Mirror validate_sequence(): a credited import links only its review and
+      // any other result only its duplicate_id, so a stray companion id absent
+      // from history cannot block publication.
+      return ledgerSubscript(payload, 'result') === 'credited'
+        ? [field('review_id')]
+        : [field('duplicate_id')];
     default:
       return [];
   }

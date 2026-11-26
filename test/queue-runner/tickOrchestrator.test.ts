@@ -80,6 +80,8 @@ function harness(over: Partial<TickPhases> = {}, queue: JsonObject = baseQueue()
     backfillInventoryMode: async () => (calls.push('backfillInventoryMode'), null),
     backfillInventory: async (q) => step('backfillInventory', q),
     discovery: async (q) => result('discovery', q, ['D']),
+    resetFixPrBacklog: async () => void calls.push('resetFixPrBacklog'),
+    refreshFixPrBacklog: async () => void calls.push('refreshFixPrBacklog'),
     harvestItems: async (q) => result('harvestItems', q, ['H']),
     reconcileCompleted: async (q) => step('reconcileCompleted', q),
     deliverIssues: async (q) => result('deliverIssues', q, ['I']),
@@ -99,7 +101,8 @@ function harness(over: Partial<TickPhases> = {}, queue: JsonObject = baseQueue()
     readSlotUsage: async (q) => (
       calls.push('readSlotUsage'),
       seen.set('readSlotUsage', seenN(q)),
-      { usage: 'U', reserved: ['r'] }
+      // The probe returns a new queue (Python's in-place vendor_observed mark).
+      { queue: bump(q), usage: 'U', reserved: ['r'] }
     ),
     admit: async (q, req) => (
       admitRequests.push({ only: req.only, dry: req.dry, log: [...req.log] }),
@@ -140,7 +143,10 @@ const FULL_ORDER = [
   'backfillPublish',
   'backfillInventoryMode',
   'discovery',
+  'resetFixPrBacklog',
+  'refreshFixPrBacklog',
   'harvestItems',
+  'resetFixPrBacklog',
   'reconcileCompleted',
   'deliverIssues',
   'deliverPrReviews',
@@ -187,15 +193,16 @@ describe('runTick ordering', () => {
       'readSlotUsage',
     ];
     threaded.forEach((name, index) => expect(h.seen.get(name), name).toBe(index));
-    expect(h.seen.get('admit')).toBe(13);
-    expect(h.seen.get('recordCoverage')).toBe(14);
-    expect(h.seen.get('save1')).toBe(15);
-    expect(h.seen.get('refreshSlotDeadline')).toBe(15);
-    expect(h.seen.get('writeStatus')).toBe(16);
-    expect(h.seen.get('writeHeartbeat')).toBe(16);
-    expect(h.seen.get('publishLocalReviewPr')).toBe(16);
-    expect(h.seen.get('recordClientHealth')).toBe(17);
-    expect(h.seen.get('save2')).toBe(18);
+    // readSlotUsage returns the probed queue (bumped), so admission sees it.
+    expect(h.seen.get('admit')).toBe(14);
+    expect(h.seen.get('recordCoverage')).toBe(15);
+    expect(h.seen.get('save1')).toBe(16);
+    expect(h.seen.get('refreshSlotDeadline')).toBe(16);
+    expect(h.seen.get('writeStatus')).toBe(17);
+    expect(h.seen.get('writeHeartbeat')).toBe(17);
+    expect(h.seen.get('publishLocalReviewPr')).toBe(17);
+    expect(h.seen.get('recordClientHealth')).toBe(18);
+    expect(h.seen.get('save2')).toBe(19);
     expect(log).toEqual(['D', 'H', 'I', 'R', 'C', 'F', 'X', 'E1', 'E2', 'A', 'K']);
   });
 
@@ -261,7 +268,9 @@ describe('runTick early exits and gating', () => {
       'runnerDisabled',
       'loadQueue',
       'fetch',
+      'resetFixPrBacklog',
       'harvestItems',
+      'resetFixPrBacklog',
       'enrollPrimary',
       'enrollOthers',
       'readSlotUsage',
@@ -288,7 +297,8 @@ describe('runTick early exits and gating', () => {
     expect(h.calls).not.toContain('discovery');
     expect(h.calls).toContain('backfillInventory');
     expect(h.coverage[0]?.blockedReason).toBeNull();
-    expect(h.health).toEqual([false]);
+    // Python passes `not only and <merged discovery enabled>`: '' is unrestricted.
+    expect(h.health).toEqual([true]);
   });
 
   it('runs inventory only for the integrated rollout and an unrestricted tick', async () => {
@@ -298,7 +308,7 @@ describe('runTick early exits and gating', () => {
       'backfillPublish',
       'backfillInventory',
       'discovery',
-      'harvestItems',
+      'resetFixPrBacklog',
     ]);
     const other = harness({ backfillInventoryMode: async () => 'shadow' });
     await runTick(LIVE, other.p);
@@ -475,7 +485,8 @@ describe('a phase error abandons the rest of the tick', () => {
     'loadQueue',
     'fetch',
     'discovery',
-    'harvestItems',
+    'resetFixPrBacklog',
+    'refreshFixPrBacklog',
     'reconcileCompleted',
     'deliverIssues',
     'deliverPrReviews',
@@ -511,6 +522,35 @@ describe('a phase error abandons the rest of the tick', () => {
     expect(h.calls.slice(0, expected.length)).toEqual(expected);
     // The throwing stub does not record itself, so the recorded calls stop at the cut.
     expect(h.calls).toEqual(expected);
+  });
+
+  it('a harvest failure still runs the trailing reset, then abandons the tick', async () => {
+    const h = harness({
+      harvestItems: async () => {
+        throw new Error('harvest failed');
+      },
+    });
+    await expect(runTick(LIVE, h.p)).rejects.toThrow('harvest failed');
+    const cut = FULL_ORDER.indexOf('harvestItems');
+    expect(h.calls).toEqual([...FULL_ORDER.slice(0, cut), 'resetFixPrBacklog']);
+    expect(h.saved).toEqual([]);
+  });
+
+  it('a dry tick resets around the harvest but never refreshes the backlog', async () => {
+    const h = harness();
+    await runTick({ ...LIVE, dry: true }, h.p);
+    expect(h.calls.filter((c) => c.endsWith('FixPrBacklog'))).toEqual([
+      'resetFixPrBacklog',
+      'resetFixPrBacklog',
+    ]);
+  });
+
+  it('refreshes the backlog from the queue the harvest will see', async () => {
+    const seen: JsonObject[] = [];
+    const h = harness({ refreshFixPrBacklog: async (q) => void seen.push(q) });
+    await runTick(LIVE, h.p);
+    expect(seen).toHaveLength(1);
+    expect(seenN(seen[0] as JsonObject)).toBe(h.seen.get('harvestItems'));
   });
 
   it('a failed delivery before the launch means no launch and no save', async () => {

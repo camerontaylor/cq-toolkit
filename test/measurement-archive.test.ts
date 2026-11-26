@@ -331,6 +331,25 @@ describe('M8a failure evidence', () => {
     expect(((await restoreMeasurementBundle(built.bundleDir)) as Restored).pointers).toEqual({});
   });
 
+  test('refuses sanitized evidence that redaction lengthens past the size cap', async () => {
+    const base = await workspace();
+    const root = join(base, 'root');
+    await mkdir(root);
+    // An eight-character environment secret becomes the ten-byte `[redacted]`.
+    vi.stubEnv('CQ_GROWS_TOKEN', 'abcd1234');
+    const head = 'abcd1234';
+    await writeFile(join(root, 'grows'), head + ' '.repeat(8 * 1024 * 1024 - head.length));
+    const built = (await buildMeasurementBundle({
+      runId: 'grows',
+      bundleRoot: join(base, 'bundles'),
+      gitCommonDir: join(base, 'common'),
+      roots: [{ name: 'fix', path: root, files: ['grows'] }],
+    })) as { bundleDir: string; manifest: Manifest };
+    const grown = entryOf(built.manifest, 'fix', 'grows');
+    expect(grown).toMatchObject({ state: 'unsupported' });
+    expect(JSON.stringify(grown)).toContain('sanitized evidence exceeds');
+  });
+
   test('rejects symlinks, caps size, records read failures and missing receipts; uses private modes', async () => {
     const base = await workspace();
     const root = join(base, 'root');
@@ -458,6 +477,70 @@ describe('M8a failure evidence', () => {
       expect(await fs.readdir(built.bundleDir)).toEqual(['manifest.json']);
     },
   );
+
+  test('restore refuses a stored file that grows past the cap after stat', async () => {
+    const base = await workspace();
+    const root = join(base, 'root');
+    await mkdir(root);
+    await writeFile(join(root, 'file'), 'small');
+    const built = (await buildMeasurementBundle({
+      runId: 'grows-after-stat',
+      bundleRoot: join(base, 'bundles'),
+      roots: [{ name: 'fix', path: root, files: ['file'] }],
+    })) as { bundleDir: string; manifest: Manifest };
+    const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+    // stat() sees the small file, then every read keeps returning data: filling a buffer
+    // sized from stat does not prove EOF, so the reader must keep going to the cap.
+    let bytesServed = 0;
+    vi.mocked(fs.open).mockImplementationOnce(async (path, flags, mode) => {
+      const real = await actual.open(path, flags, mode);
+      return {
+        stat: () => real.stat(),
+        close: () => real.close(),
+        read: (buffer: Buffer, offset: number, length: number) => {
+          bytesServed += length;
+          buffer.fill(1, offset, offset + length);
+          return Promise.resolve({ bytesRead: length, buffer });
+        },
+      } as unknown as Awaited<ReturnType<typeof actual.open>>;
+    });
+    const restored = (await restoreMeasurementBundle(built.bundleDir)) as Restored;
+    expect(restored.pointers).toEqual({});
+    expect(restored.unavailable[0]).toMatchObject({
+      state: 'unavailable',
+      reason: 'stored file exceeds the 8 MiB size cap',
+    });
+    // Reads stop at the cap plus one byte, never a whole extra chunk.
+    expect(bytesServed).toBe(8 * 1024 * 1024 + 1);
+  });
+
+  test('a rejected close of one stored file does not abort the restore', async () => {
+    const base = await workspace();
+    const root = join(base, 'root');
+    await mkdir(root);
+    await writeFile(join(root, 'a'), 'first');
+    await writeFile(join(root, 'b'), 'second');
+    const built = (await buildMeasurementBundle({
+      runId: 'close-rejects',
+      bundleRoot: join(base, 'bundles'),
+      roots: [{ name: 'fix', path: root, files: ['a', 'b'] }],
+    })) as { bundleDir: string; manifest: Manifest };
+    const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+    vi.mocked(fs.open).mockImplementationOnce(async (path, flags, mode) => {
+      const real = await actual.open(path, flags, mode);
+      return {
+        stat: () => real.stat(),
+        read: (...args: Parameters<typeof real.read>) => real.read(...args),
+        close: async () => {
+          await real.close();
+          throw new Error('close failed');
+        },
+      } as unknown as Awaited<ReturnType<typeof actual.open>>;
+    });
+    const restored = (await restoreMeasurementBundle(built.bundleDir)) as Restored;
+    expect(Object.keys(restored.pointers).length).toBe(2);
+    expect(restored.unavailable).toEqual([]);
+  });
 
   test('canonicalizes explicit root aliases but rejects symlinks below them', async () => {
     const base = await workspace();

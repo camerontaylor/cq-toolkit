@@ -142,6 +142,20 @@ export function utcFromMillis(milliseconds: number): UtcInstant {
   return new UtcInstant(BigInt(Math.trunc(milliseconds)) * 1000n);
 }
 
+/**
+ * `datetime.fromisoformat(value.replace('Z', '+00:00')).tzinfo is not None`
+ * for a value that parses: the separator is whatever single character sits at
+ * the position fixed by the date's shape, and the time part is tz-aware iff it
+ * carries a `+` or `-` offset. Call only after a successful parse.
+ */
+export function utcHasOffset(value: string): boolean {
+  const text = value.replaceAll('Z', '+00:00');
+  const separator = findDateTimeSeparator(text);
+  if (separator === -1) return false;
+  const timeText = text.slice(separator + (text.codePointAt(separator)! > 0xffff ? 2 : 1));
+  return findOffsetStart(timeText) !== -1;
+}
+
 function parseIsoLike(text: string): bigint | null {
   const separator = findDateTimeSeparator(text);
   const dateText = separator === -1 ? text : text.slice(0, separator);
@@ -152,6 +166,13 @@ function parseIsoLike(text: string): bigint | null {
   if (date === null) return null;
   const time = parseTime(timeText);
   if (time === null) return null;
+  // The 24:00 rollover can carry 9999-12-31 into year 10000. CPython rejects
+  // that while building the datetime, after the offset has been validated, with
+  // a ValueError (not the OverflowError `astimezone` raises for offsets).
+  const { year: localYear } = civilFromDays(date.days + time.dayOffset);
+  if (localYear > 9999) {
+    throw new UtcParseError(`year must be in 1..9999, not ${localYear}`);
+  }
   const localMicros =
     BigInt(date.days + time.dayOffset) * MICROS_PER_DAY +
     BigInt(time.hour) * 3_600n * MICROS_PER_SECOND +
@@ -275,12 +296,14 @@ function findOffsetStart(text: string): number {
 
 function parseClock(text: string): Omit<ParsedTime, 'offsetMicros'> | null {
   let match = /^(\d{2})(?::(\d{2})(?::(\d{2})(?:[.,](\d+))?)?)?$/.exec(text);
-  if (match === null) match = /^(\d{2})(\d{2})(?:(\d{2})(?:[.,](\d+))?)?$/.exec(text);
+  // CPython's compact form also reads digits after `hhmmss` as a fraction with
+  // no `.`/`,` (`12345678` is 12:34:56.78); a single extra digit is not one.
+  if (match === null) match = /^(\d{2})(\d{2})(?:(\d{2})(?:[.,](\d+)|(\d{2,}))?)?$/.exec(text);
   if (match === null) return null;
   const hour = Number(match[1]);
   const minute = Number(match[2] ?? '0');
   const second = Number(match[3] ?? '0');
-  const microsecond = parseFraction(match[4]);
+  const microsecond = parseFraction(match[4] ?? match[5]);
   if (hour === 24) {
     if (minute !== 0 || second !== 0 || microsecond !== 0) {
       throw new UtcParseError('minute, second, and microsecond must be 0 when hour is 24');
@@ -295,13 +318,19 @@ function parseClock(text: string): Omit<ParsedTime, 'offsetMicros'> | null {
 
 function parseOffset(text: string): bigint | null {
   if (text === '') return 0n;
-  const match = /^([+-])(\d{2})(?::?(\d{2})(?::?(\d{2})(?:[.,](\d+))?)?)?$/.exec(text);
+  // CPython fixes the separator style at the first offset component: after
+  // `hh` a `:` means every later component is colon-separated, anything else
+  // means none is. Mixed styles (`+01:0203`, `+0102:03`) are malformed. A
+  // compact offset reads digits after `hhmmss` as a bare fraction, like a clock.
+  const match =
+    /^([+-])(\d{2})(?::(\d{2})(?::(\d{2})(?:[.,](\d+))?)?)?$/.exec(text) ??
+    /^([+-])(\d{2})(?:(\d{2})(?:(\d{2})(?:[.,](\d+)|(\d{2,}))?)?)?$/.exec(text);
   if (match === null) return null;
   const sign = match[1] === '-' ? -1n : 1n;
   const hours = BigInt(match[2] as string);
   const minutes = BigInt(match[3] ?? '0');
   const seconds = BigInt(match[4] ?? '0');
-  const micros = BigInt(parseFraction(match[5]));
+  const micros = BigInt(parseFraction(match[5] ?? match[6]));
   const wholeSeconds = hours * 3_600n + minutes * 60n + seconds;
   // CPython >= 3.14.7 (gh-152079, commit 6f9c76d8d869) and 3.15+ return UTC only
   // when both the whole-second offset and its microseconds are zero;

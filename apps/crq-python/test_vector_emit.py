@@ -1,4 +1,5 @@
 """Reproducibility and Python-oracle tests for the group-P vector fixtures."""
+import contextlib
 import copy
 import base64
 import hashlib
@@ -227,6 +228,8 @@ def invoke(source, inputs):
         return crq.ident_pid(inputs["value"])
     if source == "crq.admit_available":
         return _admission_replay(inputs)
+    if source == "crq.admit_available+backfill_runtime.usage_context":
+        return _admission_replay(inputs, real_usage_context=True)
     raise AssertionError(f"no replay for {source}")
 
 
@@ -255,8 +258,12 @@ def _schedule_replay(source, inputs):
         return SCHEDULE_REPLAYS[source](inputs)
 
 
-def _admission_replay(inputs):
-    """Replay `crq.admit_available` with launch and backfill context stubbed."""
+def _admission_replay(inputs, real_usage_context=False):
+    """Replay `crq.admit_available` with launch stubbed.
+
+    The backfill usage context is stubbed unless `real_usage_context`, which
+    leaves `backfill_runtime.usage_context` in and also returns what it wrote.
+    """
     queue = copy.deepcopy(inputs["queue"])
     queue["starts"] = list(queue.get("starts", []))
     calls = []
@@ -270,13 +277,14 @@ def _admission_replay(inputs):
     config = {"max_starts_per_hour": inputs["max_starts_per_hour"],
               "max_starts_per_tick": inputs["max_starts_per_tick"],
               "max_inflight": inputs["max_inflight"]}
-    with patch.object(crq, "start_one", stub_start_one), \
-            patch.object(crq.backfill_runtime, "usage_context", lambda *a, **k: None), \
+    stubbed = (patch.object(crq.backfill_runtime, "usage_context", lambda *a, **k: None)
+               if not real_usage_context else contextlib.nullcontext())
+    with patch.object(crq, "start_one", stub_start_one), stubbed, \
             patch.multiple(crq, CONFIG=config,
                            now=lambda: queue_time.parse_utc(inputs["now"])):
         _, gate, remaining = crq.admit_available(
             queue, inputs["usage"], log, reserved=tuple(inputs["reserved"]))
-    return {
+    value = {
         "gate": gate,
         "remaining": remaining,
         "start_attempts": len(calls),
@@ -285,6 +293,11 @@ def _admission_replay(inputs):
         "usage": queue.get("usage"),
         "backfill_starts_at_observation": queue.get("backfill_starts_at_observation"),
     }
+    if real_usage_context:
+        value["backfill_usage"] = queue.get("backfill_usage")
+        value["backfill_reservations"] = queue.get("backfill_reservations")
+        value["queue_keys"] = list(queue)
+    return value
 
 
 class VectorFileTest(unittest.TestCase):
@@ -400,6 +413,7 @@ class VectorFileTest(unittest.TestCase):
                         "author_quota.run_state",
                         "crq.ident_pid",
                         "crq.admit_available",
+                        "crq.admit_available+backfill_runtime.usage_context",
                     })
                     key = (family, case["name"])
                     self.assertNotIn(key, seen, "duplicate case name in family")

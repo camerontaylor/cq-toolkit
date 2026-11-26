@@ -8,6 +8,8 @@
  * a remote scan or a persisted report.
  */
 import {
+  diffGitHeaderPath,
+  patchHeaderOperandPath,
   makeGitleaksDefaultsScanner,
   type DenylistRule,
   type GitleaksEffects,
@@ -53,8 +55,7 @@ function patchLines(patch: string): PatchLine[] {
   for (const rawLine of patch.split('\n')) {
     const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
     if (line.startsWith('diff --git')) {
-      const match = /^diff --git a\/(.*) b\/(.*)$/.exec(line);
-      path = match?.[2];
+      path = diffGitHeaderPath(line, 'repair patch');
       inHeader = true;
       continue;
     }
@@ -66,10 +67,7 @@ function patchLines(patch: string): PatchLine[] {
       if (line.startsWith('+++ ') || line.startsWith('--- ')) {
         const candidate = line.slice(4);
         if (candidate !== '/dev/null') {
-          path =
-            candidate.startsWith('a/') || candidate.startsWith('b/')
-              ? candidate.slice(2)
-              : candidate;
+          path = patchHeaderOperandPath(candidate, 'repair patch');
         }
       }
       continue;
@@ -174,7 +172,21 @@ export function makeRepairScan(input: {
   const available = input.gitleaksAvailable ?? (() => true);
   return {
     async scanDiff(request): Promise<RepairScanResult> {
-      const lines = patchLines(request.patch);
+      let lines: PatchLine[];
+      try {
+        lines = patchLines(request.patch);
+      } catch {
+        // An undecodable quoted path is unattributable: fail closed.
+        return {
+          clean: false,
+          report: {
+            denylistRules: rules.length,
+            denylistHits: 1,
+            gitleaks: 'not-run',
+            gitleaksHits: 0,
+          },
+        };
+      }
       const denylistHits = countDenylistHits(lines, rules);
       const path = lines[0]?.path ?? 'unknown';
       const verdict = await gitleaksVerdict({

@@ -142,7 +142,8 @@ def require(condition, message):
         raise RuntimeError(message)
 
 
-def _starttime(pid):
+def _stat_sample(pid):
+    """One /proc/<pid>/stat sample: process state and starttime together."""
     try:
         text = (pathlib.Path("/proc") / str(pid) / "stat").read_text()
     except OSError:
@@ -150,7 +151,9 @@ def _starttime(pid):
     # The comm field may contain spaces and parentheses; fields after the
     # final ')' begin at state (field 3), so starttime (field 22) is index 19.
     tail = text.rsplit(")", 1)[1].split()
-    return tail[19] if len(tail) > 19 else None
+    if len(tail) < 20:
+        return None
+    return {"state": tail[0], "starttime": tail[19]}
 
 
 def process_state(pid):
@@ -158,19 +161,29 @@ def process_state(pid):
     state = {"pid": pid, "alive": False, "cmdline": "", "starttime": None}
     if not isinstance(pid, int) or pid <= 0:
         return state
-    try:
-        raw = (pathlib.Path("/proc") / str(pid) / "cmdline").read_bytes()
-    except OSError:
+    # State and starttime come from one /proc/<pid>/stat sample. A successful
+    # /proc/<pid>/cmdline read does not prove liveness: Linux keeps the file
+    # readable with an empty command line for a zombie, so liveness is decided
+    # by the stat state and a zombie or dead process is never a surviving
+    # fixture process even though its /proc entry and start time remain.
+    sample = _stat_sample(pid)
+    if sample is None:
+        return state
+    state["starttime"] = sample["starttime"]
+    if sample["state"] in ("Z", "X", "x"):
         return state
     state["alive"] = True
-    state["cmdline"] = raw.replace(b"\0", b" ").decode("utf-8", "replace").strip()
-    state["starttime"] = _starttime(pid)
     try:
         state["pgid"] = os.getpgid(pid)
         state["sid"] = os.getsid(pid)
     except OSError:
         state["pgid"] = None
         state["sid"] = None
+    try:
+        raw = (pathlib.Path("/proc") / str(pid) / "cmdline").read_bytes()
+    except OSError:
+        return state
+    state["cmdline"] = raw.replace(b"\0", b" ").decode("utf-8", "replace").strip()
     return state
 
 
@@ -236,11 +249,14 @@ def stop_process(proc):
     before = process_state(proc.pid)
     if before["alive"]:
         proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5)
+    # Reap even when the child already exited: process_state does not count a
+    # zombie as alive, but an owned child that has not been waited on yet must
+    # still be reaped here. wait() returns immediately for an exited child.
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
     after = process_state(proc.pid)
     require(not after["alive"], "harness cleanup did not stop a seeded process")
     return {"before": before, "after": after, "terminated": True,
@@ -345,6 +361,53 @@ def restore_queue(saved):
 def remove_drain_runs():
     for run_id in DRAIN_RUN_IDS.values():
         shutil.rmtree(STATE / "runs" / run_id, ignore_errors=True)
+
+
+def run_cleanup_steps(actions, results=None):
+    """Run every cleanup action even when an earlier one raises.
+
+    Each action runs independently; the first error is re-raised only after
+    all actions have run, so a process cleanup failure stays visible but
+    cannot skip queue restoration or run-metadata cleanup. Results of actions
+    that succeeded are appended to ``results`` (when given) before the error
+    is re-raised, so a later failure does not drop them.
+    """
+    if results is None:
+        results = []
+    first = None
+    for action in actions:
+        try:
+            results.append(action())
+        except Exception as exc:
+            if first is None:
+                first = exc
+    if first is not None:
+        raise first
+    return results
+
+
+def finish_cleanup(cleanup, process_actions, restore_actions):
+    """Stop processes, then always restore the queue and run metadata.
+
+    Process-stop results go into ``cleanup``, including those of stops that
+    succeeded before another one failed; a stop failure is re-raised only
+    after the restore actions have run, and it wins over a restore failure.
+    """
+    first = None
+    try:
+        run_cleanup_steps(process_actions, cleanup)
+    except Exception as exc:
+        first = exc
+    try:
+        run_cleanup_steps(restore_actions)
+    except Exception as exc:
+        if first is None:
+            first = exc
+    if first is not None:
+        # The phase never reaches ``result["cleanup"]`` on failure; carry the
+        # retained stop results on the exception so main() can emit them.
+        first.cleanup_results = list(cleanup)
+        raise first
 
 
 def drain_observation():
@@ -552,18 +615,55 @@ def check_preserved_expected(expected_state, label):
             "record_count": len(records())}
 
 
+COMPLETIONS_READ_ATTEMPTS = 5
+COMPLETIONS_RETRY_SECONDS = 0.2
+
+
 def completions():
+    """Parse the completion log; retry while an unterminated final line may still be appending.
+
+    A line that fails to parse is only retried when it is the final line and the file lacks a
+    trailing newline (a write in flight). Anything else, or a persistent partial line, raises:
+    a partial line is never accepted as complete evidence.
+    """
     if not COMPLETIONS.exists():
         return []
-    entries = []
-    for number, line in enumerate(COMPLETIONS.read_text().splitlines(), 1):
-        if not line.strip():
-            continue
-        try:
-            entries.append(json.loads(line))
-        except ValueError as exc:
-            raise RuntimeError("completion log line %d is not JSON" % number) from exc
-    return entries
+    for attempt in range(COMPLETIONS_READ_ATTEMPTS):
+        text = COMPLETIONS.read_text()
+        lines = text.splitlines()
+        entries = []
+        partial_tail = False
+        for number, line in enumerate(lines, 1):
+            if not line.strip():
+                continue
+            try:
+                entries.append(json.loads(line))
+            except ValueError as exc:
+                if number == len(lines) and not text.endswith("\n"):
+                    partial_tail = True
+                    break
+                raise RuntimeError(
+                    "completion log line %d is not JSON" % number) from exc
+        if entries and text.strip() and not text.endswith("\n"):
+            # Valid JSON without its newline is still an unfinished append.
+            partial_tail = True
+        if not partial_tail:
+            return entries
+        if attempt + 1 < COMPLETIONS_READ_ATTEMPTS:
+            time.sleep(COMPLETIONS_RETRY_SECONDS)
+    raise RuntimeError("completion log line %d is not JSON" % len(lines))
+
+
+def wait_unit_exited(timeout=30):
+    """Wait until no fixture invocation is running, so the completion log is final."""
+    deadline = time.monotonic() + timeout
+    while True:
+        state = show(UNIT, ["ActiveState"]).get("ActiveState", "")
+        if state not in ("active", "activating", "deactivating", "reloading"):
+            return
+        require(time.monotonic() < deadline,
+                "fixture unit still running after %ds" % timeout)
+        time.sleep(0.2)
 
 
 def metadata_state():
@@ -683,7 +783,7 @@ def prepare_history():
         "prior_runtime": PYTHON_RUNTIME,
         "outcome": "completed",
         "at": "2026-01-01T00:00:00Z",
-        "snapshot": {"proof": "historical"},
+        "snapshot": {"proof": "historical", "runtime": PYTHON_RUNTIME},
         "state": {
             "prior_head": "0" * 40,
             "prior_config_sha256": None,
@@ -774,11 +874,24 @@ def completion_baseline(entries):
             "invocations": set(item.get("invocation") for item in entries)}
 
 
-def validate_completed(record, runtime, prior, baseline):
+def completion_logged(item, log_entries, unit=UNIT):
+    """Journal completion evidence must match a real fixture log entry."""
+    return any(isinstance(entry, dict)
+               and type(entry.get("sequence")) is int
+               and entry.get("sequence") == item.get("sequence")
+               and entry.get("invocation") == item.get("invocation")
+               and entry.get("unit") == unit
+               and entry.get("runtime") == item.get("runtime")
+               and entry.get("success") is True
+               for entry in log_entries)
+
+
+def validate_completed(record, runtime, prior, baseline, log_entries,
+                       unit=UNIT):
     require(record["outcome"] == "completed", "switch did not complete")
     require(record["phase"] == "activation_pending",
             "completed record has the wrong phase")
-    require(record["unit"] == UNIT and record["runtime"] == runtime,
+    require(record["unit"] == unit and record["runtime"] == runtime,
             "completed record runtime or unit mismatch")
     require(record["prior_runtime"] == prior,
             "completed record prior runtime mismatch")
@@ -796,9 +909,11 @@ def validate_completed(record, runtime, prior, baseline):
     require(len(set(invocations)) == 2, "completion invocations are not distinct")
     require(not set(invocations) & baseline["invocations"],
             "completion invocations were already recorded before the switch")
-    require(all(item.get("unit") == UNIT and item.get("runtime") == runtime
+    require(all(item.get("unit") == unit and item.get("runtime") == runtime
                 and item.get("success") is True for item in evidence),
             "completion evidence is not unit/runtime bound")
+    require(all(completion_logged(item, log_entries, unit) for item in evidence),
+            "completion evidence is absent from the fixture completion log")
     return {"sequences": sequences, "invocations": invocations}
 
 
@@ -819,10 +934,12 @@ def switch_phase(runtime):
     require(len(created) == 1, "switch did not create exactly one journal record")
     record_path = created[0]
     record = json.loads(record_path.read_text())
-    evidence = validate_completed(record, runtime, prior, completions_baseline)
     systemctl("stop", TIMER)
     systemctl("reset-failed", TIMER)
     time.sleep(0.5)
+    wait_unit_exited()
+    evidence = validate_completed(record, runtime, prior, completions_baseline,
+                                  completions())
     after = snapshot()
     check_preserved("switch")
     installed = load_adapter().GuestFixtureAdapter(
@@ -942,10 +1059,13 @@ def drain_refuse_phase(args):
                                         "after": unrelated_after}},
         }
     finally:
-        cleanup.append(stop_process(seeded["process"]))
-        cleanup.append(stop_process(unrelated))
-        restore_queue(saved_queue)
-        remove_drain_runs()
+        finish_cleanup(cleanup, [
+            lambda: stop_process(seeded["process"]),
+            lambda: stop_process(unrelated),
+        ], [
+            lambda: restore_queue(saved_queue),
+            remove_drain_runs,
+        ])
     require(state_hashes() == saved["state"],
             "drain refusal cleanup did not restore the baseline queue")
     result["cleanup"] = cleanup
@@ -990,14 +1110,16 @@ def drain_harvest_phase(args):
         require(len(node_records) == 1,
                 "harvest switch did not create exactly one record")
         node_record = json.loads(node_records[0].read_text())
-        node_completions = validate_completed(
-            node_record, NODE_RUNTIME, PYTHON_RUNTIME, node_baseline)
         # Match switch_phase's post-switch baseline: the proof adapter starts
         # the fixture timer on release, and the timer must not keep triggering
         # a oneshot service into the next phase's snapshot.
         systemctl("stop", TIMER)
         systemctl("reset-failed", TIMER)
         time.sleep(0.5)
+        wait_unit_exited()
+        node_completions = validate_completed(
+            node_record, NODE_RUNTIME, PYTHON_RUNTIME, node_baseline,
+            completions())
         require(sha256_file(STATE / "queue.json") == seeded_sha,
                 "harvest switch changed the seeded queue bytes")
         require(process_state(unrelated.pid)["alive"],
@@ -1015,11 +1137,13 @@ def drain_harvest_phase(args):
         require(len(python_records) == 1,
                 "harvest return switch did not create exactly one record")
         python_record = json.loads(python_records[0].read_text())
-        python_completions = validate_completed(
-            python_record, PYTHON_RUNTIME, NODE_RUNTIME, python_baseline)
         systemctl("stop", TIMER)
         systemctl("reset-failed", TIMER)
         time.sleep(0.5)
+        wait_unit_exited()
+        python_completions = validate_completed(
+            python_record, PYTHON_RUNTIME, NODE_RUNTIME, python_baseline,
+            completions())
         require(sha256_file(STATE / "queue.json") == seeded_sha,
                 "harvest return switch changed the seeded queue bytes")
         require(process_state(unrelated.pid)["alive"],
@@ -1058,9 +1182,12 @@ def drain_harvest_phase(args):
             "preserved": preserved,
         }
     finally:
-        cleanup.append(stop_process(unrelated))
-        restore_queue(saved_queue)
-        remove_drain_runs()
+        finish_cleanup(cleanup, [
+            lambda: stop_process(unrelated),
+        ], [
+            lambda: restore_queue(saved_queue),
+            remove_drain_runs,
+        ])
     require(state_hashes() == saved["state"],
             "harvest proof cleanup did not restore the baseline queue")
     result["cleanup"] = cleanup
@@ -1156,10 +1283,13 @@ def recover_drain_refuse_phase(args):
                                         "after": unrelated_after}},
         }
     finally:
-        cleanup.append(stop_process(seeded["process"]))
-        cleanup.append(stop_process(unrelated))
-        restore_queue(saved_queue)
-        remove_drain_runs()
+        finish_cleanup(cleanup, [
+            lambda: stop_process(seeded["process"]),
+            lambda: stop_process(unrelated),
+        ], [
+            lambda: restore_queue(saved_queue),
+            remove_drain_runs,
+        ])
     require(state_hashes() == saved["state"],
             "recovery drain proof cleanup did not restore the baseline queue")
     result["cleanup"] = cleanup
@@ -1209,8 +1339,8 @@ def recover_phase(args, kill=None, record_dir=RECORDS, label="recover"):
 
 def recover_kill_phase(args):
     payload = recover_phase(args, kill="drain")
-    require(payload["cli"]["rc"] not in (0, None),
-            "interrupted recovery unexpectedly returned success")
+    require(payload["cli"]["rc"] == -9,
+            "interrupted recovery was not terminated by SIGKILL at the drain hook")
     require(payload["record_after"]["sha256"] == payload["record_before"]["sha256"],
             "interrupted recovery changed the retained record")
     require(payload["record_after"]["outcome"] == "pending"
@@ -2453,7 +2583,13 @@ def activators_fence(args):
     require(external.get("completions_before_external") == completions_before,
             "a completion landed between the pre-switch log "
             "and the first pause sample")
-    require(any(REPAIR_UNIT in line for line in external.get("jobs", [])),
+    external_jobs = external.get("jobs_observation") or {}
+    external_jobs_result = external_jobs.get("command") or {}
+    require(not external_jobs_result.get("timeout")
+            and external_jobs_result.get("rc") == 0,
+            "queued target job observation failed during the pause")
+    require(any(line == queue_seed["job"]
+                for line in (external_jobs.get("lines") or [])),
             "queued target job was not retained through mask and reload")
     require(external.get("marker", {}).get("phase") == "after-mask-reload",
             "pause marker does not record the expected phase")
@@ -2512,14 +2648,9 @@ def activators_switch_back(args):
             "switch back record names another runtime")
     require(record.get("prior_runtime") == NODE_RUNTIME,
             "switch back record names another prior runtime")
-    completions = record.get("completions") or []
-    require(len(completions) == 2,
-            "switch back record does not retain two completions")
-    baseline = max((item.get("sequence", 0)
-                    for item in before["repair_completions"]), default=0)
-    require(all(type(item.get("sequence")) is int
-                and item["sequence"] > baseline for item in completions),
-            "switch back completions do not advance past the baseline")
+    validate_completed(record, PYTHON_RUNTIME, NODE_RUNTIME,
+                       completion_baseline(before["repair_completions"]),
+                       after["repair_completions"], unit=REPAIR_UNIT)
     expected_service = repair_adapter().render_unit(PYTHON_RUNTIME)
     require(after["repair_files"]["service"]["sha256"]
             == sha256_bytes(expected_service.encode()),
@@ -2820,8 +2951,11 @@ def main(argv=None):
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
     except Exception as exc:  # noqa: BLE001 - the harness must see the failure
-        print(json.dumps({"phase": args.phase, "error": type(exc).__name__,
-                          "detail": str(exc)[:1000]}, sort_keys=True))
+        failure = {"phase": args.phase, "error": type(exc).__name__,
+                   "detail": str(exc)[:1000]}
+        if hasattr(exc, "cleanup_results"):
+            failure["cleanup"] = exc.cleanup_results
+        print(json.dumps(failure, sort_keys=True))
         return 1
 
 

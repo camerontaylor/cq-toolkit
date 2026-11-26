@@ -112,6 +112,173 @@ describe('review scan evidence', () => {
     await expect(scanReviewDiff(input, f.effects)).rejects.toThrow('matcher unavailable');
     expect(f.report()).toBe('');
   });
+  it('decodes Git-quoted header paths before the path-scoped rule match', async () => {
+    let report = '';
+    const effects: ReviewScannerEffects = {
+      match: async ({ rules, lines }) => {
+        const hits: [number, number][] = [];
+        for (const [lineIndex, line] of lines.entries())
+          for (const [ruleIndex, rule] of rules.entries())
+            if (
+              (rule.path === null || new RegExp(rule.path, 'u').test(line.path)) &&
+              line.text.includes(rule.regex)
+            )
+              hits.push([lineIndex, ruleIndex]);
+        return hits;
+      },
+      gitleaks: async () => ({ kind: 'not-run' }),
+      writeReport: async (text) => {
+        report = text;
+      },
+    };
+    const scoped = `rules:\n  - id: 'class:scoped'\n    description: 'fixture'\n    regex: 'MARK'\n    path: '^src/'\n    sample: 'fixture'\nclean_probes:\n  - 'clean'\n`;
+    // Git quotes a pathname containing a tab and escapes the tab as `\t`.
+    const text = [
+      String.raw`diff --git "a/src/\tprobe.txt" "b/src/\tprobe.txt"`,
+      String.raw`--- "a/src/\tprobe.txt"`,
+      String.raw`+++ "b/src/\tprobe.txt"`,
+      '@@ -1 +1 @@',
+      '+MARK secret',
+    ].join('\n');
+    const result = await scanReviewDiff({ ...input, patternsText: scoped, diff: text }, effects);
+    expect(result.denylistHits).toBe(1);
+    expect(JSON.parse(report)).toMatchObject({
+      denylist_hits: [{ rule: 'class:scoped', file: 'src/\tprobe.txt', diff_line: 5 }],
+    });
+  });
+  it('strips only the one literal terminal tab Git appends to a label with spaces', async () => {
+    let report = '';
+    const effects: ReviewScannerEffects = {
+      match: async ({ rules, lines }) => {
+        const hits: [number, number][] = [];
+        for (const [lineIndex, line] of lines.entries())
+          for (const [ruleIndex, rule] of rules.entries())
+            if (
+              (rule.path === null || new RegExp(rule.path, 'u').test(line.path)) &&
+              line.text.includes(rule.regex)
+            )
+              hits.push([lineIndex, ruleIndex]);
+        return hits;
+      },
+      gitleaks: async () => ({ kind: 'not-run' }),
+      writeReport: async (text) => {
+        report = text;
+      },
+    };
+    const scoped = `rules:\n  - id: 'class:scoped'\n    description: 'fixture'\n    regex: 'MARK'\n    path: '^src/with space\\.txt$'\n    sample: 'fixture'\nclean_probes:\n  - 'clean'\n`;
+    const text = [
+      'diff --git a/src/with space.txt b/src/with space.txt',
+      '--- a/src/with space.txt\t',
+      '+++ b/src/with space.txt\t',
+      '@@ -1 +1 @@',
+      '+MARK secret',
+    ].join('\n');
+    const result = await scanReviewDiff({ ...input, patternsText: scoped, diff: text }, effects);
+    expect(result.denylistHits).toBe(1);
+    expect(JSON.parse(report)).toMatchObject({
+      denylist_hits: [{ file: 'src/with space.txt', diff_line: 5 }],
+    });
+  });
+  it('counts the empty logical line a trailing U+2028 leaves before its physical LF', async () => {
+    const f = fixture();
+    const text = [
+      'diff --git a/x b/x',
+      '--- a/x',
+      '+++ b/x',
+      '@@ -1 +1 @@',
+      '+one\u2028',
+      '+MARK0 x',
+    ].join('\n');
+    await scanReviewDiff({ ...input, diff: text }, f.effects);
+    // Python splitlines: 4 header lines, '+one', the empty line, then MARK0 on line 7.
+    expect(JSON.parse(f.report())).toMatchObject({
+      denylist_hits: [{ file: 'x', diff_line: 7 }],
+    });
+  });
+  it('never reads a logical fragment of hunk content as a diff header', async () => {
+    const f = fixture();
+    const text = [
+      'diff --git a/x b/x',
+      '--- a/x',
+      '+++ b/x',
+      '@@ -1 +1 @@',
+      '+one\u2028diff --git a/evil b/evil',
+      '+MARK0 x',
+    ].join('\n');
+    await scanReviewDiff({ ...input, diff: text }, f.effects);
+    expect(JSON.parse(f.report())).toMatchObject({
+      denylist_hits: [{ file: 'x', diff_line: 7 }],
+    });
+  });
+  it('keeps a literal U+2028 in a header path whole while hunk lines keep Python numbering', async () => {
+    let report = '';
+    const effects: ReviewScannerEffects = {
+      match: async ({ rules, lines }) => {
+        const hits: [number, number][] = [];
+        for (const [lineIndex, line] of lines.entries())
+          for (const [ruleIndex, rule] of rules.entries())
+            if (
+              (rule.path === null || new RegExp(rule.path, 'u').test(line.path)) &&
+              line.text.includes(rule.regex)
+            )
+              hits.push([lineIndex, ruleIndex]);
+        return hits;
+      },
+      gitleaks: async () => ({ kind: 'not-run' }),
+      writeReport: async (text) => {
+        report = text;
+      },
+    };
+    const scoped = `rules:\n  - id: 'class:scoped'\n    description: 'fixture'\n    regex: 'MARK'\n    path: '^src/a\\u2028b\\.txt$'\n    sample: 'fixture'\nclean_probes:\n  - 'clean'\n`;
+    const text = [
+      'diff --git a/src/a\u2028b.txt b/src/a\u2028b.txt',
+      '--- a/src/a\u2028b.txt',
+      '+++ b/src/a\u2028b.txt',
+      '@@ -1 +1 @@',
+      '+one\u2028two',
+      '+MARK secret',
+    ].join('\n');
+    const result = await scanReviewDiff({ ...input, patternsText: scoped, diff: text }, effects);
+    expect(result.denylistHits).toBe(1);
+    // Reported numbers keep Python splitlines: the three header lines and the hunk
+    // line each hold U+2028 and count as extra lines, so MARK is line 11.
+    expect(JSON.parse(report)).toMatchObject({
+      denylist_hits: [{ file: 'src/a\u2028b.txt', diff_line: 11 }],
+    });
+  });
+  it('keeps an astral literal inside a quoted header path as one code point', async () => {
+    let report = '';
+    const effects: ReviewScannerEffects = {
+      match: async ({ rules, lines }) => {
+        const hits: [number, number][] = [];
+        for (const [lineIndex, line] of lines.entries())
+          for (const [ruleIndex, rule] of rules.entries())
+            if (
+              (rule.path === null || new RegExp(rule.path, 'u').test(line.path)) &&
+              line.text.includes(rule.regex)
+            )
+              hits.push([lineIndex, ruleIndex]);
+        return hits;
+      },
+      gitleaks: async () => ({ kind: 'not-run' }),
+      writeReport: async (text) => {
+        report = text;
+      },
+    };
+    const scoped = `rules:\n  - id: 'class:scoped'\n    description: 'fixture'\n    regex: 'MARK'\n    path: '^src/\u{1F600}\\.txt$'\n    sample: 'fixture'\nclean_probes:\n  - 'clean'\n`;
+    const text = [
+      'diff --git "a/src/\u{1F600}.txt" "b/src/\u{1F600}.txt"',
+      '--- "a/src/\u{1F600}.txt"',
+      '+++ "b/src/\u{1F600}.txt"',
+      '@@ -1 +1 @@',
+      '+MARK secret',
+    ].join('\n');
+    const result = await scanReviewDiff({ ...input, patternsText: scoped, diff: text }, effects);
+    expect(result.denylistHits).toBe(1);
+    expect(JSON.parse(report)).toMatchObject({
+      denylist_hits: [{ file: 'src/\u{1F600}.txt' }],
+    });
+  });
   it('uses Python splitlines and the injected Unicode matcher', async () => {
     const f = fixture();
     f.effects.match = async ({ rules, lines }) => {

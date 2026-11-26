@@ -180,6 +180,14 @@ describe('crq tick: refusals', () => {
     await expect(planTick(bad.root, 'tick', [])).rejects.toThrow(/kind/);
   });
 
+  it('reads Python-style NaN and Infinity constants in config.json', async () => {
+    const holder = await makeRoot({ queue: { items: [] } });
+    const text = '{"repo": "acme/widgets", "clone": "c", "weight": NaN, "cap": -Infinity}';
+    await writeFile(join(holder.root, 'config.json'), text);
+    const plan = await planTick(holder.root, 'tick', []);
+    expect(value(plan).complete).toBe(false);
+  });
+
   it('refuses a config without the bindings tick needs', async () => {
     const holder = await makeRoot({ config: { repo: 'acme/widgets' }, queue: { items: [] } });
     await expect(planTick(holder.root, 'tick', [])).rejects.toThrow(/config\.clone/);

@@ -6,6 +6,9 @@ import { reserveAndSpawnReview, type ReviewLaunchEffects } from './reviewLaunch.
 /** An identified failure from the checkout operation, not a validation error. */
 export class ReviewCheckoutError extends Error {}
 
+/** A diff the scanner can never read (e.g. an undecodable path); retrying cannot help. */
+export class ReviewScanRefusal extends Error {}
+
 export interface ReviewScanDecision {
   readonly clean: boolean;
   readonly denylistHits: number;
@@ -112,7 +115,21 @@ export async function prepareOrdinaryReview(
   const runId = await effects.allocate(id);
   if (!runId.startsWith(`${id}-`) || !/^[A-Za-z0-9_-][A-Za-z0-9._-]*$/.test(runId))
     throw new Error('invalid allocated run identity');
-  const scan = await effects.scan({ runId, repo, base, head });
+  let scan: Awaited<ReturnType<ReviewPreparationEffects['scan']>>;
+  try {
+    scan = await effects.scan({ runId, repo, base, head });
+  } catch (error) {
+    if (!(error instanceof ReviewScanRefusal)) throw error;
+    const reason = `review scan refused the diff: ${error.message}`.slice(0, 300);
+    const nextItems = [...items];
+    nextItems[input.itemIndex] = withObjectKeys(item, [
+      ['state', 'blocked'],
+      ['last_error', reason],
+    ]);
+    const blockedQueue = withObjectKeys(queue, [['items', nextItems]]);
+    await effects.blocked(id, reason);
+    return { queue: blockedQueue, runId, outcome: 'blocked' };
+  }
   if (
     !scan ||
     typeof scan.clean !== 'boolean' ||

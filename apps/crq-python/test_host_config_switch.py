@@ -1,4 +1,4 @@
-"""Live render, switch, rollback and drift refusals on a detached clone.
+"""Live render, switch, rollback and preservation of host-edited config.
 
 Split provenance: apps/crq-python/test_host_config.py was split into
 test_host_config_overlay.py, test_host_config_policy.py, test_host_config_render.py,
@@ -71,23 +71,23 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
         self.assertEqual(self.command('rev-parse', 'HEAD').strip(), self.before)
         self.assertEqual((self.runner / 'config.json').read_bytes(), current)
 
-    def test_drift_refuses_before_restoring_or_switching_no_private_values(self):
+    def test_switch_backs_up_host_edited_config_before_installing_target(self):
         self.rendered()
         config = json.loads((self.runner / 'config.json').read_text())
         config['quiet_minutes'] = 32
         (self.runner / 'config.json').write_bytes(host.encode(config))
         before = (self.runner / 'config.json').read_bytes()
         with mock.patch.object(host, 'run', side_effect=self.stopped):
-            with self.assertRaisesRegex(ValueError, 'quiet_minutes'):
-                host.switch(self.root, self.overlay, self.raw, self.target, self.tag)
-        self.assertEqual(self.command('rev-parse', 'HEAD').strip(), self.before)
-        self.assertEqual((self.runner / 'config.json').read_bytes(), before)
-        self.assertFalse((self.base / 'records').exists())
+            host.switch(self.root, self.overlay, self.raw, self.target, self.tag)
+        self.assertEqual(self.command('rev-parse', 'HEAD').strip(), self.target)
+        self.assertEqual(json.loads((self.runner / 'config.json').read_text())['quiet_minutes'], 31)
+        backups = list((self.base / 'records').glob('config-before-switch-*'))
+        self.assertEqual([path.read_bytes() for path in backups], [before])
+        self.assertEqual(backups[0].stat().st_mode & 0o777, 0o600)
 
     def test_switch_upgrades_a_legacy_source_with_the_transition_overlay(self):
-        # The deployed source predates the alerts rename. switch() renders that
-        # source under the new overlay before checkout, so its host values must
-        # still be reproducible byte-for-byte or the drift fence blocks upgrade.
+        # This source predates the alerts rename. The transition overlay
+        # carries its alert recipient into the target config.
         new_config = json.loads((self.runner / 'config.json').read_text())
         new_config['quiet_minutes'] = 31
         new_bytes = host.encode(new_config)

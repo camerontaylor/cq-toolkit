@@ -37,9 +37,12 @@ import { fileArtifactStore } from './findingStore.js';
 import { AccountingGitError, GitAccountingRepository } from './backfillAccounting.js';
 import { gitSubjectRepository, SubjectGitError } from './backfillSubjects.js';
 import { collectRequired, fetchRequiredPr, RequiredForgeError } from './backfillRequired.js';
-import { prepareInventory } from './backfillPreparation.js';
+import { prepareInventory, type InventoryPreparationOptions } from './backfillPreparation.js';
 import { createBackfillTransactionEffects } from './backfillTransactionSource.js';
-import { inventoryTransaction } from '../../ops/crq/internal/backfillTransaction.js';
+import {
+  inventoryTransaction,
+  type PreparedInventory,
+} from '../../ops/crq/internal/backfillTransaction.js';
 import { GitLedger, LedgerTransportError } from './ledgerGit.js';
 import { runGitIn } from './publishSource.js';
 
@@ -50,6 +53,16 @@ async function readOptional(path: string): Promise<string | null> {
   } catch (error) {
     // Only absence is "not yet"; EACCES/EIO must surface rather than read as a
     // disabled configuration.
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+/** {@link readOptional}, undecoded. */
+async function readOptionalBytes(path: string): Promise<Uint8Array | null> {
+  try {
+    return await readFile(path);
+  } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
     throw error;
   }
@@ -90,11 +103,30 @@ function fileBackfillStore(durableRoot: string): BackfillArtifactStore {
 }
 
 /** The route's effects, bound to one state root. */
-export function fileBackfillInventoryEffects(stateRoot: string): BackfillInventoryEffects {
+export function fileBackfillInventoryEffects(
+  stateRoot: string,
+  options: { readonly cloneRoot?: string } = {},
+): BackfillInventoryEffects {
+  const { cloneRoot } = options;
   return {
     readQueue: () => readFile(join(stateRoot, 'queue.json'), 'utf8'),
     readRollout: () => readOptional(join(stateRoot, 'backfill-rollout.json')),
-    readBaseline: () => readOptional(join(stateRoot, 'backfill', 'baseline.json')),
+    // Bytes, not text: `ledger.loads` refuses invalid UTF-8 that a utf8 decode
+    // would already have replaced.
+    readBaseline: () => readOptionalBytes(join(stateRoot, 'backfill', 'baseline.json')),
+    // S4: with a clone the replay accounts a pinned baseline offline against its
+    // local objects (no fetch); without one the route refuses a baseline.
+    accounting: () => {
+      if (cloneRoot === undefined) return null;
+      const repository = new GitAccountingRepository({
+        repo: cloneRoot,
+        runGit: runGitIn(cloneRoot),
+      });
+      // The instance serves exactly one replay; begin its invocation so the
+      // immutable-object caches are on (the full route does the same).
+      repository.beginInvocation();
+      return repository;
+    },
     readTriage: () => readTriageRows(stateRoot),
     artifacts: (durableArtifactRoot: string) => fileBackfillStore(durableArtifactRoot),
     writeRanked: (bytes: Uint8Array) =>
@@ -102,6 +134,120 @@ export function fileBackfillInventoryEffects(stateRoot: string): BackfillInvento
     writeReport: (bytes: Uint8Array) =>
       atomicWrite(join(stateRoot, 'backfill', 'latest-report.json'), bytes),
   };
+}
+
+/**
+ * One off-lock inventory preparation over a clone: acquire the pinned inputs, capture,
+ * rank and construct. The operator route runs it between two short tick.lock holds;
+ * the tick's in-lock inventory runs it inside the lock it already holds.
+ */
+export async function prepareBackfillInventory(
+  options: { readonly stateRoot: string; readonly cloneRoot: string },
+  queue: JsonObject,
+  enqueue: boolean,
+  prepareOptions?: InventoryPreparationOptions,
+): Promise<PreparedInventory> {
+  const clone = options.cloneRoot;
+  // Python's backfill_runtime.ROOT is the toolkit installation, not the
+  // runner's working directory. This layout is the same in src and dist.
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
+  const runGit = runGitIn(clone);
+  const accounting = new GitAccountingRepository({ repo: clone, runGit });
+  const subjects = gitSubjectRepository({ runGit, accounting });
+  const rolloutText = await readOptional(join(options.stateRoot, 'backfill-rollout.json'));
+  if (rolloutText === null)
+    throw new Error('operator rollout configuration required for inventory publication');
+  const config = rolloutSettings(ledgerLoads(Buffer.from(rolloutText)));
+  if (enqueue && !config.enabled)
+    throw new Error('operator rollout must be enabled before inventory enqueue');
+  const store = fileArtifactStore(config.durableArtifactRoot);
+  const reference = (value: unknown): BackfillArtifactReference => {
+    if (!isJsonRecord(value)) throw new Error('artifact reference is malformed');
+    const sha256 = recordGet(value, 'sha256');
+    const location = recordGet(value, 'location');
+    if (typeof sha256 !== 'string' || typeof location !== 'string')
+      throw new Error('artifact reference is malformed');
+    return { sha256, location };
+  };
+  const artifacts = {
+    put: store.put,
+    verify: async (value: unknown) => store.verify(reference(value)),
+    async read(value: unknown) {
+      const ref = reference(value);
+      await store.verify(ref);
+      return ledgerLoads(await readFile(ref.location));
+    },
+  };
+  return prepareInventory(
+    queue,
+    enqueue,
+    {
+      accounting,
+      subjects,
+      artifacts,
+      now: () => new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+      enqueue: (q, p, at) => {
+        const value = fromPlainJson(p);
+        if (!(value instanceof JsonObject)) throw new Error('partition must be an object');
+        return enqueueJob(q, value, at);
+      },
+      baseline: async () => {
+        const text = await readOptional(join(options.stateRoot, 'backfill', 'baseline.json'));
+        return text === null ? null : ledgerLoads(Buffer.from(text));
+      },
+      triage: async () =>
+        (await readTriageRows(options.stateRoot)).map((row) => ({
+          file: row.file,
+          value: ledgerLoads(row.bytes),
+        })),
+      async acquire() {
+        const policy = async (name: string) =>
+          ledgerLoads(await readFile(join(root, 'policy', `review-${name}.json`)));
+        const tiers = await policy('tiers');
+        const limits = await policy('limits');
+        const required = await policy('required-list');
+        const fetch = await runGit([
+          'fetch',
+          '--no-tags',
+          '--no-write-fetch-head',
+          'origin',
+          'refs/heads/main:refs/remotes/origin/main',
+        ]);
+        if (fetch.code !== 0) throw new AccountingGitError(fetch.args, fetch.code, fetch.stderr);
+        const resolved = await runGit(['rev-parse', 'origin/main^{commit}']);
+        if (resolved.code !== 0)
+          throw new AccountingGitError(resolved.args, resolved.code, resolved.stderr);
+        const target = await accounting.resolve(new TextDecoder().decode(resolved.stdout).trim());
+        const ledger = await new GitLedger({ repo: clone, runGit }).fetch();
+        const collected = await collectRequired({
+          repo: accounting,
+          runGit,
+          target,
+          required,
+          artifacts: store,
+          fetchPr: fetchRequiredPr,
+        });
+        const members = Object.fromEntries(
+          Object.entries(collected.members).map(([key, member]) => {
+            if (!isJsonRecord(member)) throw new Error('invalid required member');
+            return [key, member];
+          }),
+        );
+        return {
+          target,
+          ledgerHead: ledger.head,
+          events: ledger.values,
+          required,
+          tiers,
+          limits,
+          requiredPaths: collected.requiredPaths,
+          members,
+          protectedBytes: await readFile(join(root, 'policy', 'protected-paths.json')),
+        };
+      },
+    },
+    prepareOptions,
+  );
 }
 
 /** `crq backfill …`: the operator-live entry over a resolved state root. */
@@ -183,115 +329,23 @@ export async function runBackfillUnit(
     };
   }
   if (options.cloneRoot === undefined || options.runnerRoot === undefined)
-    return runBackfillInventory(argv.slice(1), fileBackfillInventoryEffects(options.stateRoot));
+    return runBackfillInventory(
+      argv.slice(1),
+      fileBackfillInventoryEffects(
+        options.stateRoot,
+        options.cloneRoot === undefined ? {} : { cloneRoot: options.cloneRoot },
+      ),
+    );
   const args = argv.slice(1);
   if (args.some((arg) => arg !== '--report-only') || args.length > 1)
     return { artifact: { status: 'failed', error: 'invalid inventory arguments' }, exitCode: 2 };
   const reportOnly = args.length === 1;
+  const cloneRoot = options.cloneRoot;
   try {
-    const clone = options.cloneRoot;
-    // Python's backfill_runtime.ROOT is the toolkit installation, not the
-    // runner's working directory. This layout is the same in src and dist.
-    const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
-    const runGit = runGitIn(clone);
-    const accounting = new GitAccountingRepository({ repo: clone, runGit });
-    const subjects = gitSubjectRepository({ runGit, accounting });
     const effects = createBackfillTransactionEffects({
       stateRoot: options.stateRoot,
-      async prepare(queue, enqueue) {
-        const rolloutText = await readOptional(join(options.stateRoot, 'backfill-rollout.json'));
-        if (rolloutText === null)
-          throw new Error('operator rollout configuration required for inventory publication');
-        const config = rolloutSettings(ledgerLoads(Buffer.from(rolloutText)));
-        if (enqueue && !config.enabled)
-          throw new Error('operator rollout must be enabled before inventory enqueue');
-        const store = fileArtifactStore(config.durableArtifactRoot);
-        const reference = (value: unknown): BackfillArtifactReference => {
-          if (!isJsonRecord(value)) throw new Error('artifact reference is malformed');
-          const sha256 = recordGet(value, 'sha256');
-          const location = recordGet(value, 'location');
-          if (typeof sha256 !== 'string' || typeof location !== 'string')
-            throw new Error('artifact reference is malformed');
-          return { sha256, location };
-        };
-        const artifacts = {
-          put: store.put,
-          verify: async (value: unknown) => store.verify(reference(value)),
-          async read(value: unknown) {
-            const ref = reference(value);
-            await store.verify(ref);
-            return ledgerLoads(await readFile(ref.location));
-          },
-        };
-        return prepareInventory(queue, enqueue, {
-          accounting,
-          subjects,
-          artifacts,
-          now: () => new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
-          enqueue: (q, p, at) => {
-            const value = fromPlainJson(p);
-            if (!(value instanceof JsonObject)) throw new Error('partition must be an object');
-            return enqueueJob(q, value, at);
-          },
-          baseline: async () => {
-            const text = await readOptional(join(options.stateRoot, 'backfill', 'baseline.json'));
-            return text === null ? null : ledgerLoads(Buffer.from(text));
-          },
-          triage: async () =>
-            (await readTriageRows(options.stateRoot)).map((row) => ({
-              file: row.file,
-              value: ledgerLoads(row.bytes),
-            })),
-          async acquire() {
-            const policy = async (name: string) =>
-              ledgerLoads(await readFile(join(root, 'policy', `review-${name}.json`)));
-            const tiers = await policy('tiers');
-            const limits = await policy('limits');
-            const required = await policy('required-list');
-            const fetch = await runGit([
-              'fetch',
-              '--no-tags',
-              '--no-write-fetch-head',
-              'origin',
-              'refs/heads/main:refs/remotes/origin/main',
-            ]);
-            if (fetch.code !== 0)
-              throw new AccountingGitError(fetch.args, fetch.code, fetch.stderr);
-            const resolved = await runGit(['rev-parse', 'origin/main^{commit}']);
-            if (resolved.code !== 0)
-              throw new AccountingGitError(resolved.args, resolved.code, resolved.stderr);
-            const target = await accounting.resolve(
-              new TextDecoder().decode(resolved.stdout).trim(),
-            );
-            const ledger = await new GitLedger({ repo: clone, runGit }).fetch();
-            const collected = await collectRequired({
-              repo: accounting,
-              runGit,
-              target,
-              required,
-              artifacts: store,
-              fetchPr: fetchRequiredPr,
-            });
-            const members = Object.fromEntries(
-              Object.entries(collected.members).map(([key, member]) => {
-                if (!isJsonRecord(member)) throw new Error('invalid required member');
-                return [key, member];
-              }),
-            );
-            return {
-              target,
-              ledgerHead: ledger.head,
-              events: ledger.values,
-              required,
-              tiers,
-              limits,
-              requiredPaths: collected.requiredPaths,
-              members,
-              protectedBytes: await readFile(join(root, 'policy', 'protected-paths.json')),
-            };
-          },
-        });
-      },
+      prepare: (queue, enqueue) =>
+        prepareBackfillInventory({ stateRoot: options.stateRoot, cloneRoot }, queue, enqueue),
     });
     const value = await inventoryTransaction(effects, { reportOnly });
     return { artifact: { status: 'ok', value }, exitCode: 0 };

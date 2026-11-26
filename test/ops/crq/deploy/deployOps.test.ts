@@ -155,9 +155,8 @@ describe('rootCheck', () => {
     await expect(
       rootCheck(base({ ...ok, 'rev-parse --show-toplevel': '/d/sub\n' }), '/d', overlay),
     ).rejects.toThrow('full monorepo checkout');
-    await expect(
-      rootCheck(base({ ...ok, 'rev-parse --abbrev-ref HEAD': 'main\n' }), '/d', overlay),
-    ).rejects.toThrow('must be detached');
+    // A clone on a branch is deployable: switchCheckout detaches it.
+    await rootCheck(base({ ...ok, 'rev-parse --abbrev-ref HEAD': 'main\n' }), '/d', overlay);
     await rootCheck(
       base(ok, (p) => (p === '/link' ? '/d' : p)),
       '/link',
@@ -417,14 +416,25 @@ describe('switchCheckout', () => {
     await expect(switchCheckout(bad.fx, '/d', OVERLAY, T)).rejects.toThrow(/repair/);
     expect(bad.log).not.toContain('systemctl');
   });
-  test('drift refuses before any record or checkout', async () => {
-    const s = sw({}, { live: bytes('{"clone":"/other"}\n') });
+  test('a drifted live config is not refused; its bytes are recorded and reinstalled on failure', async () => {
+    const drifted = bytes('{"clone":"/other"}\n');
+    const s = sw({}, { live: drifted, failCheckout: true });
     wireStatus(s);
-    await expect(switchCheckout(s.fx, '/d', OVERLAY, T)).rejects.toThrow(
-      'config drift; refusing switch',
+    await expect(switchCheckout(s.fx, '/d', OVERLAY, T)).rejects.toBeInstanceOf(Error);
+    expect(s.log.some((l) => l.startsWith('record switch-before'))).toBe(true);
+    expect(s.writes.at(-1)?.[1]).toBe('{"clone":"/other"}\n');
+  });
+  test('a rollback to a recorded prior SHA skips verify_target and restores the measured bytes', async () => {
+    const prior = 'b'.repeat(40);
+    const measured = bytes('{"clone":"/measured"}\n');
+    const s = sw(
+      { [`cat-file -e ${prior}^{commit}`]: '', [`checkout --detach ${prior}`]: '' },
+      { live: bytes('{"clone":"/live"}\n') },
     );
-    expect(s.log.some((l) => l.startsWith('record'))).toBe(false);
-    expect(s.log.at(-1)).toBe('lock-');
+    wireStatus(s);
+    await switchCheckout(s.fx, '/d', OVERLAY, prior, null, measured);
+    expect(s.log.some((l) => l.includes('merge-base'))).toBe(false);
+    expect(s.writes.at(-1)?.[1]).toBe('{"clone":"/measured"}\n');
   });
   test('refuses foreign changes before recording', async () => {
     const s = sw({}, { live: await currentBytes(), status: [` M ${CFG}\n M other\n`] });
@@ -465,8 +475,8 @@ describe('switchCheckout', () => {
     );
   });
   test('rootCheck runs first', async () => {
-    const s = sw({ 'rev-parse --abbrev-ref HEAD': 'main\n' });
-    await expect(switchCheckout(s.fx, '/d', OVERLAY, T)).rejects.toThrow('must be detached');
+    const s = sw({ 'rev-parse --show-toplevel': '/d/sub\n' });
+    await expect(switchCheckout(s.fx, '/d', OVERLAY, T)).rejects.toThrow('full monorepo checkout');
     expect(s.log.every((l) => !l.includes('merge-base'))).toBe(true);
   });
 });

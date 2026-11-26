@@ -152,7 +152,8 @@ def decision(repo, row, tip, report):
 
 
 def phase(inbox, repo, tip, judge, transport, at, *, maximum=6, seconds=600, dry_run=False):
-    """Dry-run never recovers events, changes rows, or calls the transport."""
+    """Dry-run never recovers events, changes rows, or calls the judge or the
+    transport; it reports judgment_candidates instead."""
     deadline = time.monotonic() + seconds
     repo.begin_invocation()
     if not dry_run:
@@ -221,6 +222,7 @@ def phase(inbox, repo, tip, judge, transport, at, *, maximum=6, seconds=600, dry
     stopped = None
     stopped_report = {}
     context_errors = []
+    judgment_candidates = []
     for row in candidates:
         if judged + investigation_admissions >= maximum:
             break
@@ -245,6 +247,15 @@ def phase(inbox, repo, tip, judge, transport, at, *, maximum=6, seconds=600, dry
                     continue
             except (OSError, ValueError, KeyError):
                 continue
+        if dry_run:
+            # A dry run reports the candidates that would need judgment; it
+            # never calls the live judge, writes scan artifacts, or spends.
+            # Honour the deadline after context preparation, as the live path does.
+            if time.monotonic() >= deadline:
+                stopped = 'deadline'; break
+            judgment_candidates.append(row['finding']['id'])
+            judged += 1
+            continue
         try:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -307,4 +318,5 @@ def phase(inbox, repo, tip, judge, transport, at, *, maximum=6, seconds=600, dry
     return {'total': len(rows), 'judged': judged, 'unjudged': len(candidates) - judged,
             'counts': dict(collections.Counter(o['action'] for o in outcomes)),
             'delivered': delivered, 'delivery_deferred': delivery_deferred, 'context_errors': context_errors,
-            'stop_report': stopped_report, 'stopped': stopped, 'dry_run': dry_run, 'outcomes': outcomes}
+            'stop_report': stopped_report, 'stopped': stopped, 'dry_run': dry_run,
+            'judgment_candidates': judgment_candidates, 'outcomes': outcomes}

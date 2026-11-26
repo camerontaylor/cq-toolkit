@@ -47,7 +47,7 @@ import backfill_jobs
 import admission_history
 import local_review_runtime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 ROOT = Path(__file__).resolve().parent
 RUNNER_ROOT = ROOT.parents[1]
@@ -372,6 +372,169 @@ UNIVERSAL_SCAN_CLASSES = frozenset({"class:token-ssh-plumbing", "class:route-key
                                     "class:key-material-env", "class:inline-secret-assignments"})
 
 
+# Repo-owned exemptions for known-fake secret fixtures (e.g. an upstream's own
+# redaction tests). The file is read from the BASE commit only, so a PR can
+# never exempt its own additions. Only the generic shapes are exemptible:
+# denylist inline-secret-assignments and gitleaks generic-api-key. Every other
+# denylist class (private keys, route/env key material) and every
+# provider-specific gitleaks rule stays blocking, as does any line that a
+# provider-specific rule flags, wherever the exemption path points.
+SCAN_EXEMPTIONS_PATH = ".crq/scan-exemptions.toml"
+EXEMPTIBLE_RULES = frozenset({"class:inline-secret-assignments", "generic-api-key"})
+
+
+MAX_GLOBSTARS = 2  # more '**' fails the file closed (kept as a policy cap)
+
+
+class _Glob:
+    """Glob matcher with ``re.Pattern.match`` semantics, in O(len(path) * tokens).
+
+    ``*`` is ``[^/]*``, ``?`` is ``[^/]``, ``**`` is ``.*`` and a run of
+    ``**/`` is an optional ``(?:.*/)?``, as before. A compiled regex backtracks
+    polynomially in the number of ``*`` in one segment (ten ``*`` took ~16 s
+    on a 60-character path), so the pattern is matched as an NFA instead: the
+    cost no longer depends on how many wildcards a base-side file declares.
+    """
+
+    def __init__(self, pattern: str) -> None:
+        toks: List[Tuple[str, str]] = []
+        i = 0
+        while i < len(pattern):
+            if pattern.startswith("**/", i):
+                # Consecutive "**/" segments match the same paths as one.
+                while pattern.startswith("**/", i):
+                    i += 3
+                toks.append(("opt", ""))  # epsilon: enter ``.*/`` or skip it
+                toks.append(("dstar", ""))
+                toks.append(("lit", "/"))
+            elif pattern.startswith("**", i):
+                toks.append(("dstar", ""))
+                i += 2
+            elif pattern[i] == "*":
+                # Adjacent single stars match the same paths as one.
+                if not toks or toks[-1][0] != "star":
+                    toks.append(("star", ""))
+                i += 1
+            elif pattern[i] == "?":
+                toks.append(("any1", ""))
+                i += 1
+            else:
+                toks.append(("lit", pattern[i]))
+                i += 1
+        self._toks = toks
+        self.pattern = pattern
+
+    def _closure(self, states: Set[int]) -> Set[int]:
+        toks, out, todo = self._toks, set(states), list(states)
+        while todo:
+            n = todo.pop()
+            if n >= len(toks):
+                continue
+            kind = toks[n][0]
+            nxt = []
+            if kind in ("star", "dstar", "opt"):
+                nxt.append(n + 1)
+            if kind == "opt":
+                nxt.append(n + 3)
+            for m in nxt:
+                if m not in out:
+                    out.add(m)
+                    todo.append(m)
+        return out
+
+    def match(self, path: str) -> bool:
+        toks = self._toks
+        states = self._closure({0})
+        for ch in path:
+            nxt: Set[int] = set()
+            for n in states:
+                if n >= len(toks):
+                    continue
+                kind, lit = toks[n]
+                if kind == "lit":
+                    if ch == lit:
+                        nxt.add(n + 1)
+                elif kind == "any1":
+                    if ch != "/":
+                        nxt.add(n + 1)
+                elif kind == "star":
+                    if ch != "/":
+                        nxt.add(n)
+                elif kind == "dstar" and ch != "\n":  # loop over ``.``
+                    nxt.add(n)
+            if not nxt:
+                return False
+            states = self._closure(nxt)
+        return len(toks) in states
+
+
+def _glob_regex(pattern: str) -> "_Glob":
+    if pattern.count("**") > MAX_GLOBSTARS:
+        raise ValueError(f"path has more than {MAX_GLOBSTARS} '**': {pattern}")
+    return _Glob(pattern)
+
+
+def load_scan_exemptions(base: Optional[str], clone: Optional[Path] = None) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """Read .crq/scan-exemptions.toml from the BASE commit. Returns (entries, error).
+
+    Absent file or no base -> no exemptions. A malformed file or entry, or an
+    entry naming a non-exemptible rule, yields no exemptions at all (fail
+    closed: the scan then behaves exactly as without the feature)."""
+    if not base:
+        return [], None
+    spec = f"{base}:{SCAN_EXEMPTIONS_PATH}"
+    # cat-file -s prints nothing to stdout when the path is absent on the base.
+    if not git("cat-file", "-s", spec, check=False, cwd=clone).isdigit():
+        return [], None
+    try:
+        # Inside the try: a non-UTF-8 blob raises UnicodeDecodeError while
+        # decoding git's output, which must fail closed like a parse error.
+        text = git("cat-file", "blob", spec, check=False, cwd=clone)
+        import tomllib
+        doc = tomllib.loads(text)
+        entries = []
+        for e in doc.get("exempt", []):
+            path, rule, reason = e.get("path"), e.get("rule"), e.get("reason")
+            if not all(isinstance(v, str) and v.strip() for v in (path, rule, reason)):
+                raise ValueError("entry needs non-empty string path, rule, reason")
+            if rule not in EXEMPTIBLE_RULES:
+                raise ValueError(f"rule is not exemptible: {rule}")
+            entries.append({"path": path, "rule": rule, "reason": reason, "rx": _glob_regex(path)})
+        return entries, None
+    except Exception as exc:  # noqa: BLE001 - any parse failure fails closed
+        return [], f"{SCAN_EXEMPTIONS_PATH}: {exc}"
+
+
+def exemption_base(item: Dict[str, Any], clone: Optional[Path] = None) -> Optional[str]:
+    """The commit whose exemption file governs a projected (push/merged-current)
+    scan. Never the projection's own base: that is the reviewed tip minus only
+    the selected paths, so any out-of-scope change (repo include/exclude, split
+    overflow) would keep its reviewed copy of the exemption file as policy.
+    Push: the range's pre-push base. Merged-current: the merge's first parent.
+    None (no exemptions) when that commit cannot be resolved."""
+    subject = item.get("subject") or {}
+    if item.get("kind") == push_current.KIND:
+        spec = subject.get("base")
+    elif item.get("kind") == review_receipt.KIND and subject.get("merge_sha"):
+        spec = subject["merge_sha"] + "^1"
+    else:
+        return None
+    if not isinstance(spec, str) or not spec:
+        return None
+    # On failure rev-parse echoes the spec itself; only a full object id counts.
+    sha = git("rev-parse", spec, check=False, cwd=clone)
+    return sha if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha) else None
+
+
+def _exempt(exemptions, rule, path) -> Optional[str]:
+    if rule not in EXEMPTIBLE_RULES or not path:
+        return None
+    for e in exemptions or ():
+        if e["rule"] == rule and e["rx"].match(path):
+            return e["reason"]
+    return None
+
+
 def _unquote(v: str) -> str:
     v = v.strip()
     if v.startswith("'") and v.endswith("'"):
@@ -425,16 +588,21 @@ def secret_scan(base: str, head: str, out: Path, *, classes: Optional[frozenset]
                 clone: Optional[Path] = None) -> Tuple[bool, Dict[str, Any]]:
     """Scan added AND removed lines of base..head. Never records matched content."""
     diff = git("diff", "--no-color", "--no-ext-diff", "--unified=0", base, head, cwd=clone)
-    return secret_scan_diff(diff, out, base=base, head=head, classes=classes)
+    exemptions, exemption_error = load_scan_exemptions(base, clone)
+    return secret_scan_diff(diff, out, base=base, head=head, classes=classes,
+                            exemptions=exemptions, exemption_error=exemption_error)
 
 
 def secret_scan_diff(diff: str, out: Path, *, base=None, head=None,
-                     classes: Optional[frozenset] = None) -> Tuple[bool, Dict[str, Any]]:
+                     classes: Optional[frozenset] = None, exemptions=None,
+                     exemption_error: Optional[str] = None) -> Tuple[bool, Dict[str, Any]]:
     """Use identical denylist/gitleaks policy for prepared source evidence."""
     rules = denylist_rules(classes)
     compiled = [(r["id"], re.compile(r["regex"]), re.compile(r["path"]) if "path" in r else None) for r in rules]
     allow = [re.compile(p) for p in ALLOWLIST_PATHS]
     hits: List[Dict[str, Any]] = []
+    exempted: List[Dict[str, Any]] = []
+    line_paths: Dict[int, str] = {}
     path = None
     in_header = False  # ---/+++ are headers only between "diff --git" and the first "@@"
     for n, line in enumerate(diff.splitlines(), 1):
@@ -456,14 +624,21 @@ def secret_scan_diff(diff: str, out: Path, *, base=None, head=None,
             continue
         if any(a.search(path) for a in allow):
             continue
+        line_paths[n] = path
         content = line[1:]
         for rid, rx, prx in compiled:
             if prx is not None and not prx.search(path):
                 continue
             if rx.search(content):
-                hits.append({"rule": rid, "file": path, "diff_line": n})
+                hit = {"rule": rid, "file": path, "diff_line": n}
+                reason = _exempt(exemptions, rid, path)
+                if reason is not None:
+                    exempted.append({**hit, "reason": reason})
+                else:
+                    hits.append(hit)
     # gitleaks default rules over the same patch (redacted, report to file).
     gl_hits: List[Dict[str, Any]] = []
+    gl_exempted: List[Dict[str, Any]] = []
     gl_status = "not-run"
     if shutil.which("gitleaks"):
         with tempfile.TemporaryDirectory() as td:
@@ -473,12 +648,29 @@ def secret_scan_diff(diff: str, out: Path, *, base=None, head=None,
                     check=False, input_text=diff)
             gl_status = f"exit {p.returncode}"
             if p.returncode == 0 and rep.exists():
-                for f in json.loads(rep.read_text() or "[]"):
-                    gl_hits.append({"rule": f.get("RuleID"), "diff_line": f.get("StartLine")})
+                findings = json.loads(rep.read_text() or "[]")
+                # A provider-specific rule on a line vetoes exempting any other
+                # finding on that line.
+                strict = {f.get("StartLine") for f in findings if f.get("RuleID") not in EXEMPTIBLE_RULES}
+                for f in findings:
+                    ln = f.get("StartLine")
+                    hit = {"rule": f.get("RuleID"), "diff_line": ln}
+                    fpath = line_paths.get(ln)
+                    if fpath:
+                        hit["file"] = fpath
+                    reason = None if ln in strict else _exempt(exemptions, hit["rule"], fpath)
+                    if reason is not None:
+                        gl_exempted.append({**hit, "reason": reason})
+                    else:
+                        gl_hits.append(hit)
             elif p.returncode != 0:
                 gl_hits.append({"rule": "gitleaks-error", "diff_line": None})
     result = {"base": base, "head": head, "denylist_rules": len(rules), "denylist_hits": hits,
               "gitleaks": gl_status, "gitleaks_hits": gl_hits, "diff_bytes": len(diff)}
+    if exempted or gl_exempted or exemption_error:
+        result["exempted"] = {"denylist": exempted, "gitleaks": gl_exempted}
+        if exemption_error:
+            result["exemption_error"] = exemption_error
     out.write_text(json.dumps(result, indent=2) + "\n")
     return (not hits and not gl_hits), result
 
@@ -1893,15 +2085,23 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
         # set as push items. These reviews scan the raw base..head range — not a
         # projection — so the else branch below threads clone/classes instead.
         cfg = repo_registry.by_repo(REPOS, item_repo(item))
-        if cfg is None:
+        if cfg is None and item["kind"] == local_review_runtime.KIND:
+            # A manual review of an unconfigured repository runs in its
+            # on-demand clone with the universal secret-shape set only.
+            repo_clone = local_review_runtime.transport.clone_for(sys.modules[__name__], item_repo(item))
+            scan_classes = UNIVERSAL_SCAN_CLASSES
+        elif cfg is None:
             raise RuntimeError(f"{item['kind']} item names an unconfigured repo: {item_repo(item)}")
-        repo_clone = Path(cfg["clone"])
-        scan_classes = UNIVERSAL_SCAN_CLASSES | set(cfg["scan_extra_classes"])
+        else:
+            repo_clone = Path(cfg["clone"])
+            scan_classes = UNIVERSAL_SCAN_CLASSES | set(cfg["scan_extra_classes"])
     if item["kind"] in (review_receipt.KIND, push_current.KIND):
         patch = git("diff", "--text", "--no-textconv", "--no-ext-diff", "--no-renames", "--no-color",
                     "--unified=0", plan["base"], plan["head"], cwd=repo_clone)
+        exemptions, exemption_error = load_scan_exemptions(exemption_base(item, repo_clone), repo_clone)
         ok, scan = secret_scan_diff(patch, rdir / "secret-scan.json", base=plan["base"], head=plan["head"],
-                                    classes=scan_classes)
+                                    classes=scan_classes, exemptions=exemptions,
+                                    exemption_error=exemption_error)
     else:
         ok, scan = secret_scan(plan["base"], plan["head"], rdir / "secret-scan.json",
                                classes=scan_classes, clone=repo_clone)
@@ -2525,9 +2725,12 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
         try:
             try:
                 clone = local_review_runtime.transport.clone_for(sys.modules[__name__], item_repo(item))
+                if not clone.is_dir():
+                    raise ValueError("review clone absent")
             except ValueError:
                 # Resolve the owning git directory before removing a worktree
-                # whose repo was removed from REPOS. Never use the primary clone.
+                # whose repo was removed from REPOS (its manual-review clone
+                # path then does not exist). Never use the primary clone.
                 clone = Path(git("rev-parse", "--path-format=absolute", "--git-common-dir",
                                  cwd=Path(meta["worktree"])))
             remove_worktree(Path(meta["worktree"]), meta["wt_branch"], clone=clone)
@@ -3384,24 +3587,38 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
         # State persists before admission so a crash cannot re-enroll a range.
         log += push_current.discover(sys.modules[__name__], q, dry)
     starts_before = len(q.get("starts", []))
+    # The backfill fix-PR count belongs to this tick's harvest pass alone: it is
+    # cleared before the read and after the pass, so a publication outside the
+    # pass never sees another tick's count (an unread count holds creation).
+    repair_tick.reset_fix_pr_backlog()
     repair_tick.begin_tick(sys.modules[__name__])
-    for item in list(live_items(q)):
-        if not dry and item.get("kind") == local_review_runtime.KIND and item.get("publication_pending"):
-            local_review_runtime.republish(sys.modules[__name__], q, item)
-        if item["state"] == "reviewing":
-            msg = harvest_review(q, item, dry)
-            if msg:
-                log.append(msg)
-        if item["state"] == "addressing":
-            if not dry:
-                item["state"] = "repair_failed"
-                item["last_error"] = "legacy addressing retained for manual reconciliation; no new dispatch"
-        if not dry and item.get("repair_runs"):
-            try:
-                log.extend(repair_tick.harvest(sys.modules[__name__], q, item))
-            except Exception as exc:
-                key = "repair_error" if item["kind"] == review_receipt.KIND else "last_error"
-                item[key] = "repair harvest failed: " + str(exc)[:300]
+    if not dry and repair_tick.backfill_repair_present(q):
+        # Before the first publish: the hard cap on backfill fix PRs reads this
+        # and the drain reads the file it writes. One forge request under its
+        # own allowance, like reconcile below; a tick with no backfill repair
+        # work makes no call.
+        with forge_window(ForgeBudget(requests=1, seconds=30)):
+            repair_tick.refresh_fix_pr_backlog(sys.modules[__name__], q)
+    try:
+        for item in list(live_items(q)):
+            if not dry and item.get("kind") == local_review_runtime.KIND and item.get("publication_pending"):
+                local_review_runtime.republish(sys.modules[__name__], q, item)
+            if item["state"] == "reviewing":
+                msg = harvest_review(q, item, dry)
+                if msg:
+                    log.append(msg)
+            if item["state"] == "addressing":
+                if not dry:
+                    item["state"] = "repair_failed"
+                    item["last_error"] = "legacy addressing retained for manual reconciliation; no new dispatch"
+            if not dry and item.get("repair_runs"):
+                try:
+                    log.extend(repair_tick.harvest(sys.modules[__name__], q, item))
+                except Exception as exc:
+                    key = "repair_error" if item["kind"] == review_receipt.KIND else "last_error"
+                    item[key] = "repair harvest failed: " + str(exc)[:300]
+    finally:
+        repair_tick.reset_fix_pr_backlog()
     if not dry:
         # Findings-issue retries (the review is terminal; only the issue upload
         # can still be outstanding) run after the harvest pass and are capped, so

@@ -1,0 +1,143 @@
+/**
+ * File-backed reads for the repair harvest (repair_tick.py:422-584): the inbox
+ * job, the result artifact and `Path.resolve()`. Inactive: nothing imports
+ * this outside tests. Verification, worktrees, the finding ledger and
+ * publication stay injected; they have no TS wiring yet.
+ */
+import { lstat, readFile, readlink, stat } from 'node:fs/promises';
+import { join } from 'node:path';
+
+import { parseJsonValue, pythonNonFinite, toPlainJson } from '../../policy/crq/jsonValue.js';
+import { PyError } from '../../queue-runner/pyErrors.js';
+import type { RepairHarvestEffects } from '../../queue-runner/repairHarvest.js';
+import { checkRepairJobId } from './repairPreparation.js';
+
+export interface FileRepairHarvestInput {
+  /** `c.STATE`. */
+  readonly stateRoot: string;
+  /** `c.WT_ROOT`. */
+  readonly worktreeRoot: string;
+}
+
+export type FileRepairHarvestReads = Pick<
+  RepairHarvestEffects,
+  'readJob' | 'resultExists' | 'readResult' | 'resolvePath' | 'worktreeRoot'
+>;
+
+/**
+ * `ignoreBOM: true` keeps a leading byte-order mark in the text, so the parser
+ * refuses it as Python's `read_text()` + `json.loads` does; the default would
+ * strip it and accept a file Python rejects.
+ */
+const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+
+/**
+ * A failed read is an `OSError`; a decode or parse failure is a `ValueError`.
+ * `json.loads` accepts `NaN`/`Infinity`/`-Infinity`, which `json.dump` writes
+ * for a non-finite float, so a document carrying one is valid, not malformed.
+ */
+async function readJson(path: string): Promise<unknown> {
+  let bytes: Uint8Array;
+  try {
+    bytes = await readFile(path);
+  } catch (e) {
+    throw new PyError('OSError', e instanceof Error ? e.message : String(e));
+  }
+  try {
+    return toPlainJson(parseJsonValue(decoder.decode(bytes), { parseConstant: pythonNonFinite }), {
+      bigints: true,
+    });
+  } catch (e) {
+    throw new PyError('ValueError', e instanceof Error ? e.message : String(e));
+  }
+}
+
+/** Marks "the symlink pushed below this has been resolved"; no path component can be NUL. */
+const SYMLINK_RESOLVED = '\0resolved';
+
+/**
+ * CPython 3.14 `posixpath.realpath(strict=False)`, which `Path.resolve()`
+ * calls. Components resolve in filesystem order, so a `..` after a symlink
+ * climbs from the link's target, not from the link's own parent. A component
+ * that cannot be inspected (missing, not a directory, a symlink loop) is kept
+ * and the rest of the path resolves lexically. An embedded NUL is the one
+ * error Python does not swallow.
+ */
+async function pyRealpath(filename: string): Promise<string> {
+  if (filename.includes('\0'))
+    throw new PyError('ValueError', 'lstat: embedded null character in path');
+  const rest = filename.split('/').reverse();
+  let partCount = rest.length;
+  let path = filename.startsWith('/') ? '/' : process.cwd();
+  // symlink path -> fully resolved target, or null while it is being resolved
+  const seen = new Map<string, string | null>();
+  while (partCount > 0) {
+    const name = rest.pop();
+    if (name === undefined) break;
+    if (name === SYMLINK_RESOLVED) {
+      seen.set(rest.pop() ?? '', path);
+      continue;
+    }
+    partCount -= 1;
+    if (name === '' || name === '.') continue;
+    if (name === '..') {
+      const slash = path.lastIndexOf('/');
+      path = path.slice(0, slash) || '/';
+      continue;
+    }
+    const next = path === '/' ? `/${name}` : `${path}/${name}`;
+    let target: string;
+    try {
+      if (!(await lstat(next)).isSymbolicLink()) {
+        path = next;
+        continue;
+      }
+      if (seen.has(next)) {
+        const resolved = seen.get(next) ?? null;
+        path = resolved ?? next;
+        continue;
+      }
+      target = await readlink(next);
+    } catch {
+      path = next;
+      continue;
+    }
+    if (target.startsWith('/')) path = '/';
+    seen.set(next, null);
+    rest.push(next, SYMLINK_RESOLVED);
+    const parts = target.split('/').reverse();
+    rest.push(...parts);
+    partCount += parts.length;
+  }
+  return path;
+}
+
+/** `bounded.job_path`: a non-grammar job id is a `ValueError` before any read. */
+function requireJobId(jobId: string): void {
+  if (!checkRepairJobId(jobId)) throw new PyError('ValueError', 'expected one exact CRQ job id');
+}
+
+export function fileRepairHarvestReads(input: FileRepairHarvestInput): FileRepairHarvestReads {
+  const repair = (...parts: string[]): string => join(input.stateRoot, 'repair', ...parts);
+  return {
+    worktreeRoot: input.worktreeRoot,
+    readJob: (jobId) => {
+      requireJobId(jobId);
+      return readJson(repair('inbox', `${jobId}.json`));
+    },
+    readResult: (jobId) => {
+      requireJobId(jobId);
+      return readJson(repair(jobId, 'result.json'));
+    },
+    /** `Path.exists()` swallows the invalid-id `ValueError` as a miss. */
+    resultExists: (jobId) => {
+      if (!checkRepairJobId(jobId)) return Promise.resolve(false);
+      return stat(repair(jobId, 'result.json')).then(
+        () => true,
+        () => false,
+      );
+    },
+    /** `Path.resolve()`: CPython 3.14 `posixpath.realpath(strict=False)`. */
+    resolvePath: pyRealpath,
+  };
+}

@@ -319,25 +319,88 @@ class DeployTests(DeployFixture, unittest.TestCase):
         self.assertFalse(self.marker().exists())
         self.assertEqual(self.head(), unmerged)
 
-    def test_unrollbackable_prior_refuses_before_admission(self):
-        # Only the target was tested for merged-main ancestry, so a live prior
-        # SHA that is not merged to origin/main passed preflight and then
-        # failed the helper's same check inside the rollback switch, after the
-        # target was installed. The prior SHA must be refused up front, before
-        # admission and any switch.
+    def local_only_prior(self):
         self.command("commit", "--allow-empty", "-qm", "local only")
         local = self.head()
         self.assertNotEqual(
             subprocess.run(["git", "-C", str(self.root), "merge-base",
                             "--is-ancestor", local,
                             "refs/remotes/origin/main"]).returncode, 0)
-        run = self.build(target_sha=self.target)
-        with self.assertRaisesRegex(rb.Refused, "rollback target check"):
-            run.run()
+        return local
+
+    def test_older_target_helper_refuses_before_admission(self):
+        local = self.local_only_prior()
+        live = (self.runner / "config.json").read_bytes()
+        with mock.patch.object(host, "switch", lambda root, overlay, raw, target, tag=None: None):
+            run = self.build(target_sha=self.target)
+            with self.assertRaisesRegex(rb.Refused, "rollback_config support"):
+                run.run()
         self.assertEqual(self.head(), local)
+        self.assertEqual((self.runner / "config.json").read_bytes(), live)
         self.assertEqual(self.units.stopped, [])
-        self.assertEqual(self.units.started, [])
         self.assertFalse(self.marker().exists())
+
+    def test_local_only_prior_is_not_refused_and_deploys(self):
+        # The live prior SHA may be a local merge that is not on origin/main
+        # (a ceres deploy of main from a local wip merge). Only the target is
+        # verified as a deploy target; a prior that fails the target rule must
+        # not refuse admission.
+        local = self.local_only_prior()
+        run = self.build(target_sha=self.target)
+        document = run.run()
+        self.assertEqual(document["outcome"], "completed")
+        self.assertEqual(self.head(), self.target)
+
+    def test_local_only_prior_still_rolls_back_by_recorded_sha(self):
+        local = self.local_only_prior()
+        live = (self.runner / "config.json").read_bytes()
+        run = self.build(target_sha=self.target,
+                         health=lambda: {"healthy": False,
+                                         "reason": "no advancing tick"})
+        document = run.run()
+        self.assertEqual(document["outcome"], "rolled_back")
+        self.assertEqual(self.head(), local)
+        self.assertEqual((self.runner / "config.json").read_bytes(), live)
+
+    def test_clone_on_a_branch_is_not_refused(self):
+        # The 2026-11-21 operator found the clone on `main` refused; the
+        # switch checks the target out detached, so a branch is deployable.
+        self.command("checkout", "-q", "-B", "main", self.prior)
+        self.assertEqual(
+            self.command("rev-parse", "--abbrev-ref", "HEAD").strip(), "main")
+        run = self.build(target_sha=self.target)
+        document = run.run()
+        self.assertEqual(document["outcome"], "completed")
+        self.assertEqual(self.head(), self.target)
+        self.assertEqual(
+            self.command("rev-parse", "--abbrev-ref", "HEAD").strip(), "HEAD")
+
+    def edit_live_config(self):
+        live = json.loads((self.runner / "config.json").read_text())
+        live["repair"]["enabled"] = True
+        data = host.encode(live)
+        (self.runner / "config.json").write_bytes(data)
+        return data
+
+    def test_drifted_live_config_is_backed_up_not_refused(self):
+        # A host edit (repair.enabled) makes the live config differ from the
+        # overlay's render of HEAD. That is not a refusal: the bytes are
+        # backed up before the switch and rollback reinstalls them verbatim.
+        edited = self.edit_live_config()
+        run = self.build(target_sha=self.target)
+        self.assertEqual(run.run()["outcome"], "completed")
+        backups = list(Path(self.overlay["record_dir"])
+                       .glob("config-before-switch-*"))
+        self.assertEqual([path.read_bytes() for path in backups], [edited])
+
+    def test_drifted_live_config_is_restored_exactly_on_rollback(self):
+        edited = self.edit_live_config()
+        run = self.build(target_sha=self.target,
+                         health=lambda: {"healthy": False,
+                                         "reason": "no advancing tick"})
+        self.assertEqual(run.run()["outcome"], "rolled_back")
+        self.assertEqual(self.head(), self.prior)
+        self.assertEqual((self.runner / "config.json").read_bytes(), edited)
 
     def test_foreign_marker_refuses_and_touches_no_unit(self):
         self.marker().write_text("someone else's hold\n")
@@ -363,6 +426,155 @@ class DeployTests(DeployFixture, unittest.TestCase):
         record = self.record(run)
         self.assertEqual(record["outcome"], "recovery_required")
         self.assertEqual(record["original_triggers"], self.original)
+
+    def test_drain_expiry_survives_a_failed_diagnostic_write(self):
+        # The drain expires against the real controller poll and drain.json
+        # cannot be written (disk full). The I/O error must not replace the
+        # FailStop: an escaping error would be an ordinary refusal whose
+        # pre-switch restore restarts the triggers and releases admission
+        # while live work may still be running against this checkout.
+        (self.runner / "state/queue.json").write_text(
+            '{"items": [{"id": "q1", "run": {"run_id": 7}}], "starts": []}\n')
+        real_write = rb.durable_write
+
+        def failing_write(path, payload):
+            if Path(path).name == "drain.json":
+                raise OSError("disk full")
+            return real_write(path, payload)
+
+        run = self.build()
+        run.drain_fn = None
+        with mock.patch.object(rb, "durable_write", side_effect=failing_write):
+            with self.assertRaises(rb.RecoveryRequired) as caught:
+                run.run()
+        self.assertIn("drain expired", str(caught.exception))
+        self.assertTrue(self.marker().exists())
+        self.assertEqual(self.units.started, [])
+        self.assertTrue(all(self.units.state(unit) in ("inactive", "failed")
+                            for unit in TRIGGERS))
+        self.assertEqual(self.head(), self.prior)
+        self.assertFalse((Path(run.run_dir) / "drain.json").exists())
+        record = self.record(run)
+        self.assertEqual(record["outcome"], "recovery_required")
+        self.assertEqual(record["original_triggers"], self.original)
+
+    def test_drain_expiry_survives_failed_diagnostic_write_and_narration(self):
+        (self.runner / "state/queue.json").write_text(
+            '{"items": [{"id": "q1", "run": {"run_id": 7}}], "starts": []}\n')
+        real_write = rb.durable_write
+
+        def failing_write(path, payload):
+            if Path(path).name == "drain.json":
+                raise OSError("disk full")
+            return real_write(path, payload)
+
+        real_narrate = rb.narrate
+
+        def failing_narrate(message):
+            if "drain.json" in message:
+                raise OSError(28, "No space left")
+            return real_narrate(message)
+
+        run = self.build()
+        run.drain_fn = None
+        with mock.patch.object(rb, "durable_write", side_effect=failing_write), \
+                mock.patch.object(rb, "narrate", side_effect=failing_narrate):
+            with self.assertRaises(rb.RecoveryRequired) as caught:
+                run.run()
+        self.assertIn("drain expired", str(caught.exception))
+        self.assertTrue(self.marker().exists())
+        self.assertEqual(self.units.started, [])
+
+    def test_drain_deadline_rejects_success_observed_after_expiry(self):
+        # With --drain-deadline-s 10 --drain-interval-s 600, a blocked first
+        # poll must not buy a 600s wait past the deadline, and a queue that
+        # settles only after the deadline must not be accepted: expiry fails
+        # closed even on a clean answer, and the hold stays.
+        (self.runner / "state/queue.json").write_text(
+            '{"items": [{"id": "q1", "run": {"run_id": 7}}], "starts": []}\n')
+        real_check = dc.drain_check
+
+        def settles_late(effects, liveness):
+            if self.clock() >= 10:
+                return {"drained": True, "blocked": []}
+            return real_check(effects, liveness)
+
+        run = self.build(drain_interval_s=600)
+        run.drain_fn = None
+        with mock.patch.object(dc, "drain_check", side_effect=settles_late):
+            with self.assertRaises(rb.RecoveryRequired) as caught:
+                run.run()
+        self.assertIn("drain expired", str(caught.exception))
+        # The sleep was capped at the remaining deadline, not the 600s
+        # interval: the late poll lands exactly at the deadline.
+        self.assertEqual(self.now[0], 10.0)
+        record = json.loads(
+            (Path(run.run_dir) / "drain.json").read_text())
+        self.assertFalse(record["drained"])
+        # The late clean answer is named so an operator does not read the
+        # final poll's empty blocked list as "still blocked".
+        self.assertTrue(record["drained_after_deadline"])
+        self.assertIn("only after the deadline", str(caught.exception))
+        self.assertNotIn("[]", str(caught.exception))
+        self.assertTrue(self.marker().exists())
+        self.assertEqual(self.units.started, [])
+        self.assertEqual(self.head(), self.prior)
+        self.assertEqual(self.record(run)["outcome"], "recovery_required")
+
+    def test_drain_deadline_crossed_between_clock_reads_never_sleeps_negative(self):
+        # The deadline can pass between two clock reads (a descheduled
+        # process). The loop must read the clock once per iteration so the
+        # remaining time is never negative: production time.sleep raises
+        # ValueError on a negative value, which would escape FailStop.
+        (self.runner / "state/queue.json").write_text(
+            '{"items": [{"id": "q1", "run": {"run_id": 7}}], "starts": []}\n')
+        real_check = dc.drain_check
+        armed = []
+
+        def stepped_clock():
+            # Before the first poll the clock is the fixture clock, so the
+            # deadline is base + 10. After it, reads step 5s then 11s past
+            # base: inside the deadline, then beyond it.
+            if not armed:
+                return self.now[0]
+            if len(armed) > 1:
+                return armed[0] + 11.0
+            armed.append(armed[0])
+            return armed[0] + 5.0
+
+        def arming_check(effects, liveness):
+            if not armed:
+                armed.append(self.now[0])
+            return real_check(effects, liveness)
+
+        def strict_sleep(seconds):
+            if seconds < 0:
+                raise ValueError("sleep length must be non-negative")
+
+        run = self.build(drain_interval_s=600)
+        run.drain_fn = None
+        run.clock = stepped_clock
+        run.sleep = strict_sleep
+        with mock.patch.object(dc, "drain_check", side_effect=arming_check):
+            with self.assertRaises(rb.RecoveryRequired) as caught:
+                run.run()
+        self.assertIn("drain expired", str(caught.exception))
+        self.assertTrue(self.marker().exists())
+        self.assertEqual(self.units.started, [])
+
+    def test_drain_first_poll_success_stays_immediate(self):
+        # A queue already drained succeeds on the first poll even when the
+        # interval is longer than the deadline: no sleep precedes the verdict.
+        (self.runner / "state/queue.json").write_text(
+            '{"items": [], "starts": []}\n')
+        run = self.build(drain_interval_s=600)
+        run.drain_fn = None
+        document = run.run()
+        self.assertEqual(document["outcome"], "completed")
+        self.assertEqual(self.now[0], 0.0)
+        record = json.loads(
+            (Path(run.run_dir) / "drain.json").read_text())
+        self.assertTrue(record["drained"])
 
     def test_incompatible_queue_refuses_before_hold(self):
         state = self.runner / "state/queue.json"
@@ -426,7 +638,7 @@ class DeployTests(DeployFixture, unittest.TestCase):
             def root_check(self, root, overlay):
                 return host.root_check(root, overlay)
 
-            def switch(self, *args, **kwargs):
+            def switch(self, *args, rollback_config=None):
                 (fixture.runtime / "dist/cli.js").write_text("// replaced\n")
                 raise ValueError("helper refused the switch")
 
@@ -614,6 +826,28 @@ class DeployTests(DeployFixture, unittest.TestCase):
                             for unit in TRIGGERS))
         self.assertEqual(self.record(run)["outcome"], "recovery_required")
 
+    def test_missing_cq_bin_entry_refuses_at_preflight(self):
+        # A pointer whose entry is already missing must be rejected before
+        # the admission hold: after the switch the same refusal would also
+        # fail the rollback's runtime check, leaving nothing to restart.
+        (self.runtime / "dist/cli.js").unlink()
+        run = self.build()
+        with self.assertRaisesRegex(rb.Refused, "points at a missing entry"):
+            run.run()
+        self.assertEqual(self.head(), self.prior)
+        self.assertFalse(self.marker().exists())
+        self.assertEqual(self.units.stopped, [])
+
+    def test_cq_bin_entry_deleted_after_measure_still_refuses(self):
+        # The later checks stay: deleting the measured entry after preflight
+        # must refuse the restart (and any rollback restart) exactly like a
+        # content change does.
+        run = self.build()
+        run.cq_bin = rb.measure_cq_bin(self.original_config)
+        (self.runtime / "dist/cli.js").unlink()
+        with self.assertRaisesRegex(rb.Refused, "points at a missing entry"):
+            run.runtime_pointer_check()
+
     def test_moved_cq_bin_pointer_is_refused_before_restart(self):
         # The pointer is measured from the live config and the target render
         # cannot move it (the overlay names it), so this is the belt-and-braces
@@ -641,8 +875,8 @@ class DeployTests(DeployFixture, unittest.TestCase):
         real_switch = host.switch
         calls = {"n": 0}
 
-        def mutating_switch(root, overlay, raw, target, tag=None):
-            result = real_switch(root, overlay, raw, target, tag)
+        def mutating_switch(root, overlay, raw, target, tag=None, rollback_config=None):
+            result = real_switch(root, overlay, raw, target, tag, rollback_config=rollback_config)
             calls["n"] += 1
             if calls["n"] == 1:
                 (self.runner / "state/queue.json").write_text(
@@ -666,8 +900,8 @@ class DeployTests(DeployFixture, unittest.TestCase):
         real_switch = host.switch
         calls = {"n": 0}
 
-        def replacing_switch(root, overlay, raw, target, tag=None):
-            result = real_switch(root, overlay, raw, target, tag)
+        def replacing_switch(root, overlay, raw, target, tag=None, rollback_config=None):
+            result = real_switch(root, overlay, raw, target, tag, rollback_config=rollback_config)
             calls["n"] += 1
             if calls["n"] == 1:
                 (self.runtime / "dist/cli.js").write_text("// replaced\n")
@@ -712,7 +946,7 @@ class DeployTests(DeployFixture, unittest.TestCase):
             def root_check(self, root, overlay):
                 return host.root_check(root, overlay)
 
-            def switch(self, *args, **kwargs):
+            def switch(self, *args, rollback_config=None):
                 raise ValueError("helper refused the switch")
 
         run = self.build(helper=BrokenSwitch())
@@ -727,8 +961,8 @@ class DeployTests(DeployFixture, unittest.TestCase):
     def test_health_failure_keeps_hold_when_rollback_is_disabled(self):
         real_switch = host.switch
 
-        def dirtying_switch(root, overlay, raw, target, tag=None):
-            result = real_switch(root, overlay, raw, target, tag)
+        def dirtying_switch(root, overlay, raw, target, tag=None, rollback_config=None):
+            result = real_switch(root, overlay, raw, target, tag, rollback_config=rollback_config)
             (self.runner / "state/queue.json").write_text(
                 '{"schema_version": 3, "items": []}\n')
             return result
@@ -793,6 +1027,37 @@ class DeployTests(DeployFixture, unittest.TestCase):
         self.assertEqual(code, 1)
         document = json.loads(output.getvalue())
         self.assertEqual(document["error"]["kind"], "interrupted")
+
+    def recovery_required_error(self, record):
+        class Failing:
+            def __init__(self, args):
+                self.args = args
+
+            def run(self):
+                raise rb.RecoveryRequired("x", record)
+
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            code = rb.main(
+                ["deploy", "--root", str(self.root),
+                 "--overlay", str(self.overlay_path),
+                 "--record-dir", str(self.record_dir)],
+                run_factory=Failing)
+        self.assertEqual(code, 3)
+        return json.loads(output.getvalue())["error"]
+
+    def test_main_embeds_the_record_only_when_it_could_not_be_persisted(self):
+        # deploy.json was not written, so the JSON error is the only artifact
+        # holding the record; embed it with the structured storage error.
+        error = self.recovery_required_error(
+            {"run_dir": "/run", "outcome": "recovery_required",
+             "persistence_error": "disk full"})
+        self.assertEqual(error["kind"], "recovery_required")
+        self.assertEqual(error["recovery_record"]["persistence_error"],
+                         "disk full")
+        # An ordinary recovery record is on disk already: no embed.
+        error = self.recovery_required_error(
+            {"run_dir": "/run", "outcome": "recovery_required"})
+        self.assertNotIn("recovery_record", error)
 
     def test_argument_errors_are_one_json_document(self):
         with contextlib.redirect_stdout(io.StringIO()) as output, \
@@ -884,6 +1149,17 @@ class HoldPersistenceTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="crq-hold-")
         self.addCleanup(self.temp.cleanup)
         self.hold = rb.Hold(Path(self.temp.name))
+
+    def test_ownership_distinguishes_unreadable_from_not_owned(self):
+        self.hold.acquire()
+        self.assertIs(self.hold.ownership(), True)
+        with mock.patch.object(Path, "read_bytes", side_effect=PermissionError(13, "denied")):
+            self.assertIsNone(self.hold.ownership())
+            self.assertFalse(self.hold.owns())
+        self.hold.path.write_bytes(b"foreign\n")
+        self.assertIs(self.hold.ownership(), False)
+        self.hold.path.unlink()
+        self.assertIs(self.hold.ownership(), False)
 
     def test_fragment_token_demands_recovery_and_keeps_the_marker(self):
         # Only a fragment of the token lands before storage gives up, so the

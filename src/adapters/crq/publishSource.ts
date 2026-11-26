@@ -82,7 +82,7 @@ const SCRUBBED_ENV = [
   'GIT_CONFIG_PARAMETERS',
 ] as const;
 
-function gitEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
+export function gitEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
   // Same allowlist class as `src/adapters/git/ratchetGit.ts` (cq/no-process-env
   // off): the publisher child-env builder inherits the ambient environment,
   // scrubs redirections and pins the hardened switches.

@@ -172,8 +172,8 @@ probe: 'absent' | 'old', found? (the too-old version) }`; grep/glob are
   WITHHELD from the surface and `advisories` carries exactly
   `"search tools unavailable: ripgrep not found"` or
   `"search tools unavailable: ripgrep older than minimum 15.2.0"`.
-- A run whose ToolPolicy does not request grep never probes and records
-  nothing (the distinguishable not-configured state).
+- A run whose tool selection contains neither grep nor glob never probes and
+  records nothing (the distinguishable not-configured state).
 
 Boundary caveat (named in the harness tools header): the harness containment
 is lexical and the `run` tool is the SYMLINK-PLANTING VECTOR — an allowlisted

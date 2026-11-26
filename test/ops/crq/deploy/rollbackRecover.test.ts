@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import {
   FailStop,
@@ -470,7 +470,10 @@ describe('rollbackToPrior', () => {
   }
   test('runs the full rollback in order and records it', async () => {
     const f = switched();
+    const switchCheckout = vi.fn(f.deps.switchCheckout);
+    f.deps.switchCheckout = switchCheckout;
     await rec(f).rollbackToPrior('boom');
+    expect(switchCheckout).toHaveBeenCalledWith(PRIOR, enc('cfg-orig'));
     expect(f.log).toEqual([
       `compat:fx:${PRIOR}`,
       `compat:fx:${PRIOR}`,

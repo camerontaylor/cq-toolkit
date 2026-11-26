@@ -103,10 +103,14 @@ jobs:
           # would print "Binary files differ" and hide content, and textconv or
           # an external diff driver would rewrite it. Force raw text diffs.
           DIFF_OPTS="--text --no-textconv --no-ext-diff"
-          gitleaks git --no-banner --redact --config "$GITLEAKS_CONFIG" --log-opts="$RANGE --diff-merges=remerge $DIFF_OPTS" .
+          # The scanned revision also controls its own `gitleaks:allow` comments
+          # and .gitleaksignore (always read from the source dir); neither may
+          # suppress a finding in a required check.
+          rm -f .gitleaksignore
+          gitleaks git --no-banner --redact --ignore-gitleaks-allow --config "$GITLEAKS_CONFIG" --log-opts="$RANGE --diff-merges=remerge $DIFF_OPTS" .
           octopus=$(git rev-list --min-parents=3 "$RANGE")
           for commit in $octopus; do
-            gitleaks git --no-banner --redact --config "$GITLEAKS_CONFIG" --log-opts="-1 $commit --diff-merges=first-parent $DIFF_OPTS" .
+            gitleaks git --no-banner --redact --ignore-gitleaks-allow --config "$GITLEAKS_CONFIG" --log-opts="-1 $commit --diff-merges=first-parent $DIFF_OPTS" .
           done
       - name: Scan commit messages
         env:
@@ -114,4 +118,4 @@ jobs:
         run: |
           set -euo pipefail
           git log --format='--- commit %h%n%B' "$RANGE" \
-            | gitleaks stdin --no-banner --redact --config "$GITLEAKS_CONFIG"
+            | gitleaks stdin --no-banner --redact --ignore-gitleaks-allow --config "$GITLEAKS_CONFIG"

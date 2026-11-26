@@ -2951,7 +2951,7 @@ export function buildTools(
         exitCode,
         killed,
         output: capped.output,
-        truncated: capped.truncated || outcome.overflowed,
+        truncated: capped.truncated || outcome.overflowed || outcome.incomplete === true,
       };
     };
     tools.push({
@@ -3014,6 +3014,7 @@ export function buildTools(
               ? runCfg.maxOutputChars * 4 + 65_536
               : UNCAPPED_RETENTION_BYTES,
           ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+          ...(runCfg.killGraceMs !== undefined ? { killGraceMs: runCfg.killGraceMs } : {}),
           ...(opts?.signal !== undefined ? { signal: opts.signal } : {}),
         };
         const raw = command.trim().split(/\s+/);

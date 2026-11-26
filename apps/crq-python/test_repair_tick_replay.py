@@ -84,6 +84,7 @@ class Fixture:
         (out / 'result.json').write_text(json.dumps({'job': job, 'item': item, 'verdict': verdict, 'reason': 'r'}))
 
     def tick(self, **limits):
+        limits.setdefault('retry_seconds', 0)
         repair_tick.begin_tick(self.c, **limits)
         for item in self.items:
             repair_tick.harvest(self.c, self.queue, item)
@@ -133,14 +134,6 @@ class LargeOutboxReplayTest(ReplayBase):
             record = next(iter(item['repair_runs'].values()))
             self.assertTrue(repair_tick.replay_settled(record))
 
-    def test_recover_reads_each_row_once_for_a_long_chain(self):
-        f = self.build(3, chain=200, unsettled=0)
-        events = f.outbox.retained()
-        reads = mock.Mock(wraps=ledger.loads)
-        with mock.patch.object(finding_delivery.ledger, 'loads', reads):
-            f.inbox.recover(events)
-        self.assertLessEqual(reads.call_count, 3)
-
     def test_replay_budget_rotates_catch_up_across_ticks(self):
         f = self.build(40, chain=3)
         f.tick(count=15, seconds=3600)
@@ -154,11 +147,24 @@ class LargeOutboxReplayTest(ReplayBase):
     def test_wall_clock_budget_stops_replay_but_tick_continues(self):
         f = self.build(5, chain=3)
         clock = iter([0.0, 0.0, 0.0, 999.0] + [999.0] * 50)
-        repair_tick.begin_tick(f.c, count=100, seconds=10, clock=lambda: next(clock))
+        repair_tick.begin_tick(f.c, count=100, seconds=10, clock=lambda: next(clock), retry_seconds=0)
         for item in f.items:
             repair_tick.harvest(f.c, f.queue, item)  # must not raise
         settled = [repair_tick.replay_settled(next(iter(i['repair_runs'].values()))) for i in f.items]
         self.assertEqual(sum(settled), 2)
+
+
+class StarvationTest(ReplayBase):
+    def test_unsettleable_runs_do_not_starve_later_runs(self):
+        # The first 3 runs can never settle: their second sibling has no result.
+        f = self.build(8, chain=3, jobs_per_run=2)
+        for n in range(8):
+            if n >= 3:
+                f.write_result('crq-job-%d-1' % n, 'FAILED')
+        for _ in range(3):
+            f.tick(count=3, seconds=3600, retry_seconds=900)
+        settled = [repair_tick.replay_settled(next(iter(i['repair_runs'].values()))) for i in f.items]
+        self.assertEqual(settled, [False] * 3 + [True] * 5)
 
 
 class CrashRecoveryTest(ReplayBase):

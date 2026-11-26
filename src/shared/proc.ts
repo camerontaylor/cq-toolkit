@@ -238,6 +238,7 @@ export function buildChildEnv(
   parentEnv: Readonly<Record<string, string | undefined>>,
   overrides?: Readonly<Record<string, string>>,
   extraAllowlist: readonly string[] = [],
+  platform: NodeJS.Platform = process.platform,
 ): Record<string, string> {
   for (const name of extraAllowlist) {
     if (!ENV_NAME.test(name)) {
@@ -262,7 +263,18 @@ export function buildChildEnv(
     child[name] = value;
   }
   if (overrides !== undefined) {
-    for (const [name, value] of Object.entries(overrides)) child[name] = value;
+    for (const [name, value] of Object.entries(overrides)) {
+      // Windows env names are case-insensitive and Node picks the first
+      // spelling it finds, so an override `Path` must replace an inherited
+      // `PATH` rather than sit beside it. POSIX names stay case-sensitive.
+      if (platform === 'win32') {
+        const lower = name.toLowerCase();
+        for (const existing of Object.keys(child)) {
+          if (existing !== name && existing.toLowerCase() === lower) delete child[existing];
+        }
+      }
+      child[name] = value;
+    }
   }
   // Direct op parent correlation (measurement M5b1): translate the
   // enclosing Paseo agent id into the derived `paseo:<id>` parent-work
@@ -273,7 +285,14 @@ export function buildChildEnv(
   // CQ_PARENT_WORK_ID is the higher precedence tier and is NOT clobbered;
   // the composition is best-effort: no agent id in the parent env means
   // no link, exactly as before.
-  if (child['CQ_PARENT_WORK_ID'] === undefined || child['CQ_PARENT_WORK_ID'].trim() === '') {
+  // On Windows env names are case-insensitive, so an explicit override spelled
+  // `cq_parent_work_id` is the explicit link and must not be shadowed by a
+  // derived one under the canonical spelling.
+  const explicitParent =
+    platform === 'win32'
+      ? Object.entries(child).find(([k]) => k.toUpperCase() === 'CQ_PARENT_WORK_ID')?.[1]
+      : child['CQ_PARENT_WORK_ID'];
+  if (explicitParent === undefined || explicitParent.trim() === '') {
     const paseoParent = paseoParentLinkFromAgentId(parentEnv['PASEO_AGENT_ID']);
     if (paseoParent !== undefined) child['CQ_PARENT_WORK_ID'] = paseoParent;
   }

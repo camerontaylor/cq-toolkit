@@ -5,6 +5,7 @@ import { readFile } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import type { OpResult } from '../kernel/types.js';
 import { runRepairPrepare } from '../adapters/crq/repairPreparation.js';
+import { runRepairCli } from '../adapters/crq/repairCli.js';
 import { runPublishUnit } from '../adapters/crq/publishSource.js';
 import {
   AUTHOR_DEADLINE_MS,
@@ -14,10 +15,16 @@ import {
   REVIEW_DEADLINE_MS,
   runReviewCapabilityMain,
 } from '../adapters/crq/reviewCapabilityMain.js';
-import { runStatusWriter } from '../adapters/crq/statusWriter.js';
+import { runReviewChildMain } from '../adapters/crq/reviewChildMain.js';
+import { runStatusWriter, runSummaryWriter } from '../adapters/crq/statusWriter.js';
 import { runBackfillUnit } from '../adapters/crq/backfillSource.js';
 import { pythonJsonText } from '../policy/crq/pythonJson.js';
 import { runReconcileMergedUnit } from '../adapters/crq/reconcileSource.js';
+import {
+  type Capability,
+  dispatchedRefusal,
+  runCapabilityDispatcher,
+} from '../adapters/crq/capabilityDispatcher.js';
 import { MAX_REQUEST_BYTES, runQueueCapabilityMain } from '../adapters/crq/queueCapabilityMain.js';
 import { REVIEW_MAX_BYTES } from '../ops/crq/reviewCapability.js';
 import { AUTHOR_MAX_SNAPSHOT_BYTES } from '../policy/crq/authorWire.js';
@@ -41,54 +48,103 @@ async function readFrame(limit: number = MAX_REQUEST_BYTES + 1): Promise<Uint8Ar
 
 const root = process.cwd();
 const [command, ...rest] = process.argv.slice(2);
-if (command === 'queue-capability') {
+/** The three forced-command capabilities, shared by their direct routes and `dispatch`. */
+const stdio = {
+  env: (name: string) => process.env[name],
+  stdout: (bytes: Uint8Array) => {
+    process.stdout.write(bytes);
+  },
+  stderr: (message: string) => {
+    process.stderr.write(`${message}\n`);
+  },
+};
+const serveQueue = (
+  argv: readonly string[],
+  stderr: (message: string) => void = stdio.stderr,
+): Promise<number> =>
   // The forced-command route: policy and identity come from the environment,
   // the request frame from stdin, and nothing else is accepted.
-  process.exitCode = await runQueueCapabilityMain({
-    argv: rest,
-    env: (name) => process.env[name],
+  runQueueCapabilityMain({
+    ...stdio,
+    stderr,
+    argv,
     readStdin: readFrame,
-    stdout: (bytes) => {
-      process.stdout.write(bytes);
-    },
-    stderr: (message) => {
-      process.stderr.write(`${message}\n`);
-    },
     // The deadline must end the process, not just the race: a pending stdin
     // read or a held queue lock would otherwise outlive the refusal.
     terminate: () => process.exit(2),
     root,
   });
-} else if (command === 'review-capability') {
-  process.exitCode = await runReviewCapabilityMain({
-    argv: rest,
-    env: (name) => process.env[name],
+const serveReview = (
+  argv: readonly string[],
+  stderr: (message: string) => void = stdio.stderr,
+): Promise<number> =>
+  runReviewCapabilityMain({
+    ...stdio,
+    stderr,
+    argv,
     readStdin: () => readFrame(REVIEW_MAX_BYTES + 1),
-    stdout: (bytes) => {
-      process.stdout.write(bytes);
-    },
-    stderr: (message) => {
-      process.stderr.write(`${message}\n`);
-    },
     terminate: (code = 2) => process.exit(code),
     root,
     deadlineMs: REVIEW_DEADLINE_MS,
   });
-} else if (command === 'author-capability') {
-  process.exitCode = await runAuthorCapabilityMain({
-    argv: rest,
-    env: (name) => process.env[name],
+const serveAuthor = (
+  argv: readonly string[],
+  stderr: (message: string) => void = stdio.stderr,
+): Promise<number> =>
+  runAuthorCapabilityMain({
+    ...stdio,
+    stderr,
+    argv,
     readStdin: () => readFrame(AUTHOR_MAX_SNAPSHOT_BYTES + 1),
-    stdout: (bytes) => {
-      process.stdout.write(bytes);
-    },
-    stderr: (message) => {
-      process.stderr.write(`${message}\n`);
-    },
     terminate: () => process.exit(2),
     root,
     deadlineMs: AUTHOR_DEADLINE_MS,
   });
+
+/** Under `dispatch` every refusal line is the one the Python dispatcher prints. */
+const rewritten = (capability: Capability) => (): void => {
+  stdio.stderr(dispatchedRefusal(capability));
+};
+
+if (command === 'queue-capability') {
+  process.exitCode = await serveQueue(rest);
+} else if (command === 'review-capability') {
+  process.exitCode = await serveReview(rest);
+} else if (command === 'author-capability') {
+  process.exitCode = await serveAuthor(rest);
+} else if (command === 'dispatch') {
+  // `capability_dispatcher.py`: the one SSH forced command. The request text
+  // selects an exact capability and nothing else.
+  process.exitCode = await runCapabilityDispatcher({
+    argv: rest,
+    env: stdio.env,
+    stderr: stdio.stderr,
+    handlers: {
+      'author-v1': () => serveAuthor([], rewritten('author-v1')),
+      'queue-v1': () => serveQueue([], rewritten('queue-v1')),
+      'review-v1': () => serveReview([], rewritten('review-v1')),
+    },
+  });
+} else if (command === '_review') {
+  // INTERNAL (`crq.py _review <run_id>`, `cmd_review_child`): the detached child
+  // `launch` spawns. Deliberately not in LIVE_UNIT_COMMANDS or LIVE_OPERATOR_COMMANDS:
+  // no unit, adapter or operator selects it, and it prints nothing to stdout
+  // (the spawner redirects both streams to `runner.log`).
+  process.exitCode = await runReviewChildMain({
+    argv: rest,
+    root,
+    stateRoot: await publisherStateRoot(root),
+    env: process.env,
+    stderr: stdio.stderr,
+  });
+} else if (command === 'repair') {
+  // `crq_repair.py`'s CLI: it owns its argv and its one Python-shaped JSON
+  // document. Admission (usage, the #1716 runner-disabled refusal, config and
+  // selector refusals) is ported; the drain is not, so `repair` is not a live
+  // unit command and crq-repair.service stays on Python.
+  const result = await runRepairCli(rest, { root, stderr: stdio.stderr });
+  process.stdout.write(result.stdout);
+  process.exitCode = result.exitCode;
 } else {
   const stateHome = process.env.XDG_STATE_HOME;
   const gitleaksPath = process.env.PATH;
@@ -156,19 +212,20 @@ if (command === 'queue-capability') {
           stateRoot: targets.stateRoot,
         });
       }
-      if (liveCommand === 'status') {
+      if (liveCommand === 'status' || liveCommand === 'summary') {
         const parsed = parseStatusArgv(args);
-        if (!parsed.ok) return usageArtifact('status', parsed.message);
+        if (!parsed.ok) return usageArtifact(liveCommand, parsed.message);
         // The queue-runner binary's stdout is exactly one JSON document for
         // every command; the operator-readable markdown travels in the
         // artifact's `value` field, not the stdout channel. The writer's
         // refusal text rides the same artifact (the `error` field), so this
         // route keeps stderr empty under doctrine I1.
-        let statusMarkdown = '';
+        let statusText = '';
         let statusError = '';
-        const exitCode = await runStatusWriter(statusRoots(parsed.stateRoot), {
+        const writer = liveCommand === 'summary' ? runSummaryWriter : runStatusWriter;
+        const exitCode = await writer(statusRoots(parsed.stateRoot), {
           write: (text) => {
-            statusMarkdown = text;
+            statusText = text;
           },
           error: (text) => {
             statusError = text;
@@ -177,10 +234,14 @@ if (command === 'queue-capability') {
         return {
           artifact:
             exitCode === 0
-              ? { status: 'ok' as const, value: { markdown: statusMarkdown } }
+              ? {
+                  status: 'ok' as const,
+                  value:
+                    liveCommand === 'summary' ? { path: statusText } : { markdown: statusText },
+                }
               : {
                   status: 'failed' as const,
-                  error: statusError.trimEnd() || 'status write failed',
+                  error: statusError.trimEnd() || `${liveCommand} write failed`,
                 },
           exitCode,
         };

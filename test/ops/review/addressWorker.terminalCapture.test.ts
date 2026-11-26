@@ -144,3 +144,40 @@ test('a capture release failure after commit does not restore, retain or retry',
     await f.cleanup();
   }
 });
+
+test('every candidate worktree add is preceded by its own terminal preflight', async () => {
+  const events: string[] = [];
+  const f = await fixture(undefined, '', {
+    gitHook: async (args, run) => {
+      if (args.includes('worktree') && args.includes('add')) events.push('add');
+      return run(args);
+    },
+  });
+  const originalPreflight = addressOwnership.addressTerminalPreflight;
+  const preflight = vi
+    .spyOn(addressOwnership, 'addressTerminalPreflight')
+    .mockImplementation((binding, root) => {
+      events.push('preflight');
+      return originalPreflight(binding, root);
+    });
+  try {
+    await withAddressOwnership(
+      { repoRoot: f.repo.root, git: f.engineDeps.git, source: 'local', production: false },
+      async (lease) => {
+        const binding = addressOwnership.addressTerminalWorkerBinding(lease);
+        await addressOwnership.checkpointAddressTerminalWorker(binding, f.repo.root, f.initial);
+        const engine = makeAddressWorker({ ...f.engineDeps, terminalBinding: binding });
+        const result = await engine.fix(finding(), 1);
+        expect(result.commit, result.reason).toBeTruthy();
+      },
+    );
+    // Baseline and accepted-fix candidates: two adds, each right after a preflight.
+    expect(events.filter((e) => e === 'add').length).toBeGreaterThanOrEqual(2);
+    events.forEach((e, i) => {
+      if (e === 'add') expect(events[i - 1], events.join(',')).toBe('preflight');
+    });
+  } finally {
+    preflight.mockRestore();
+    await f.cleanup();
+  }
+});

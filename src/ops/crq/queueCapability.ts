@@ -252,6 +252,11 @@ async function execute(
       return finish(await inventoryResult(request, queue, principal, effects));
     }
 
+    // Python `setdefault`s this key before any other write, so it precedes
+    // `merged_current_requests` in the stored document; match that byte order.
+    if (!queue.has('queue_client_requests')) {
+      queue = withObjectKeys(queue, [['queue_client_requests', new JsonObject([])]]);
+    }
     const binding = request.binding as QueueBinding;
     const requestId = request.requestId;
     const readEntries = (): JsonObject => {

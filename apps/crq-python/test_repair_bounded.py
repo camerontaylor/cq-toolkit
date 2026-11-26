@@ -1,6 +1,7 @@
 """Narrow isolated one-job/preparation/snapshot tests. No models or live state."""
 import contextlib
 import copy
+import fcntl
 import io
 import importlib.util
 import json
@@ -327,7 +328,7 @@ class BoundedRepairTest(unittest.TestCase):
     def test_service_disabled_or_partial_selector_never_dispatch(self):
         atomic(self.root / 'config.json', self.config)
         with mock.patch.object(service, 'ROOT', self.root), \
-             mock.patch.object(service, 'process_item') as dispatch, mock.patch.object(service, 'drain') as drain:
+             mock.patch.object(service, 'process_item') as dispatch, mock.patch.object(service, 'drain', return_value=None) as drain:
             service.main([])
             for authorization in (None, '', '  ', True):
                 self.config['repair'].update(enabled=True, spend_authorization=authorization)
@@ -342,7 +343,7 @@ class BoundedRepairTest(unittest.TestCase):
     def test_service_without_selector_drains(self):
         self.config['repair'].update(enabled=True, spend_authorization='offline-test-fixture-only')
         atomic(self.root / 'config.json', self.config)
-        with mock.patch.object(service, 'ROOT', self.root), mock.patch.object(service, 'drain') as drain:
+        with mock.patch.object(service, 'ROOT', self.root), mock.patch.object(service, 'drain', return_value=None) as drain:
             service.main([])
         drain.assert_called_once_with(self.config)
 
@@ -526,6 +527,8 @@ class BoundedRepairTest(unittest.TestCase):
                      'review_id': 'e' * 64, 'previous_event_id': None})
         atomic(self.root / 'state/repair' / sibling_id / 'result.json',
                {'job': sibling_id, 'item': job['item'], 'verdict': 'FIXED', 'commits': ['a' * 40],
+                # Sibling results are validated like harvest's: bind them to the job.
+                **{k: sibling.get(k) for k in ('source_sha', 'finding_sha256', 'origin_job')},
                 'attempts': [{'rung': 'A0'}], 'repair_base': record['base'],
                 'worktree': str(self.root / 'wt/crq-repair-pr1-merged')})
         atomic(self.root / 'state/repair' / job_id / 'result.json',
@@ -628,6 +631,8 @@ class BoundedRepairTest(unittest.TestCase):
                      'review_id': 'e' * 64, 'previous_event_id': None})
         atomic(self.root / 'state/repair' / sibling_id / 'result.json',
                {'job': sibling_id, 'item': job['item'], 'verdict': 'FIXED', 'commits': ['a' * 40],
+                # Sibling results are validated like harvest's: bind them to the job.
+                **{k: sibling.get(k) for k in ('source_sha', 'finding_sha256', 'origin_job')},
                 'attempts': [{'rung': 'A0'}], 'repair_base': record['base'],
                 'worktree': str(self.root / 'wt/crq-repair-pr1-merged')})
         # The first job's artifact is defective, so the run can never publish.
@@ -650,6 +655,46 @@ class BoundedRepairTest(unittest.TestCase):
         self.assertEqual(sibling[0].args[1], sibling_id)
         self.assertEqual(sibling[0].args[2], 'needs-human')
         self.assertIn('not published', sibling[0].args[3])
+
+    def test_terminal_failure_does_not_record_an_unbound_sibling_decision(self):
+        job_id, job = self.prepare()
+        item = self.queue['items'][0]
+        record = item['repair_runs'][job['run']]
+        sibling_id = 'crq-run1-F2'
+        sibling = copy.deepcopy(job)
+        sibling.update(job=sibling_id, canonical_finding_id='d' * 64)
+        atomic(bounded.job_path(self.root, sibling_id), sibling)
+        record['jobs'] = [job_id, sibling_id]
+        row = self.root / 'state/backfill/findings/triage' / ('d' * 64 + '.json')
+        atomic(row, {'status': 'delivered', 'receipt': {'repair_task': sibling_id},
+                     'review_id': 'e' * 64, 'previous_event_id': None})
+        atomic(self.root / 'state/repair' / sibling_id / 'result.json',
+               {'job': sibling_id, 'item': job['item'], 'verdict': 'FIXED', 'commits': ['a' * 40],
+                # Sibling results are validated like harvest's: bind them to the job.
+                'source_sha': 'f' * 40, 'finding_sha256': sibling['finding_sha256'], 'origin_job': sibling['origin_job'],
+                'attempts': [{'rung': 'A0'}], 'repair_base': record['base'],
+                'worktree': str(self.root / 'wt/crq-repair-pr1-merged')})
+        # The first job's artifact is defective, so the run can never publish.
+        atomic(self.root / 'state/repair' / job_id / 'result.json',
+               {'job': job_id, 'item': job['item'], 'verdict': 'FIXED', 'commits': [],
+                'source_sha': job['source_sha'], 'finding_sha256': job['finding_sha256'],
+                'origin_job': OLD, 'repair_base': record['base']})
+        self.c.iso = lambda: '2026-11-12T00:00:00Z'
+        import finding_delivery
+        import review_ledger as ledger
+        out = ledger.Outbox(self.root / 'outbox', ledger.ArtifactStore(self.root / 'durable'))
+        inbox = finding_delivery.Inbox(self.root / 'state/backfill/findings', out)
+        with mock.patch.object(inbox, 'repair_outcome', wraps=inbox.repair_outcome) as outcome, \
+             mock.patch.object(repair_tick, 'finding_inbox', return_value=inbox):
+            repair_tick.harvest(self.c, self.queue, item)
+        self.assertEqual(record['state'], 'failed')
+        # A mismatched artifact records a failure outcome, never its FIXED decision.
+        self.assertEqual(json.loads(row.read_text())['status'], 'needs-retriage')
+        sibling = [call for call in outcome.call_args_list if call.args[0] == 'd' * 64]
+        self.assertEqual(len(sibling), 1)
+        self.assertEqual(sibling[0].args[1], sibling_id)
+        self.assertEqual(sibling[0].args[2], 'needs-retriage')
+        self.assertIn('sibling source/evidence binding mismatch', sibling[0].args[3])
 
     def test_bad_fixed_attempts_fail_once_across_ticks(self):
         for attempts in (None, [], [{}], [{'rung': 'A3'}], 'invalid'):
@@ -853,12 +898,14 @@ class BoundedRepairTest(unittest.TestCase):
         self.assertEqual((artifact['status'], artifact['job']), ('no-result', job_id))
 
     def test_every_cli_exit_emits_exactly_one_json_artifact(self):
-        def artifact(argv):
+        def artifact(argv, code=None):
             out = io.StringIO()
             with mock.patch.object(service, 'ROOT', self.root), \
                  mock.patch.object(service, 'runner_disabled', return_value=False), \
                  contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
-                service.main(argv)
+                exit_code = service.main(argv)
+            if code is not None:
+                self.assertEqual(exit_code, code, argv)
             return json.loads(out.getvalue())['status']
         self.config['repair'].update(enabled=False)
         atomic(self.root / 'config.json', self.config)
@@ -870,8 +917,47 @@ class BoundedRepairTest(unittest.TestCase):
         self.assertEqual(artifact(['--recover-job', 'x', '--job', OLD]), 'refused')
         # Mode validation precedes the dry run: recovery never combines with it.
         self.assertEqual(artifact(['--recover-job', 'x', '--triage-dry-run']), 'refused')
-        # A dry run with no triage state writes nothing itself, so it reports that.
+        # A dry run never ignores a complete job selector.
+        self.assertEqual(artifact(['--triage-dry-run', '--job', OLD, '--source-sha', SOURCE,
+                                   '--finding-sha256', self.evidence['finding_sha256']], code=2),
+                         'refused')
+        # An empty recovery selector is still supplied: it conflicts with a dry run
+        # (exit 2) and alone refuses instead of draining the inbox.
+        self.assertEqual(artifact(['--triage-dry-run', '--recover-job', ''], code=2), 'refused')
+        self.assertEqual(artifact(['--recover-job', '', '--job', OLD], code=2), 'refused')
+        self.assertEqual(artifact(['--recover-job', ''], code=2), 'refused')
+        # A dry run with no triage state reports that; it still takes (and
+        # releases) the service lock, creating state/repair and the lock file.
         self.assertEqual(artifact(['--triage-dry-run']), 'no-triage')
+
+    def test_triage_dry_run_takes_the_service_lock_before_previewing(self):
+        self.config['repair'].update(enabled=True, spend_authorization='offline-test-fixture-only')
+        atomic(self.root / 'config.json', self.config)
+        lock_path = self.root / 'state/repair/service.lock'
+
+        def dry_run():
+            out = io.StringIO()
+            with mock.patch.object(service, 'ROOT', self.root), \
+                 mock.patch.object(service, 'runner_disabled', return_value=False), \
+                 mock.patch.object(service, 'triage_phase', return_value={'status': 'previewed'}) as phase, \
+                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                code = service.main(['--triage-dry-run'])
+            return code, json.loads(out.getvalue()), phase
+
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open('a') as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            code, artifact, phase = dry_run()
+        # Another pass owns the lock: busy, exit 0, and no paid judgment preview.
+        self.assertEqual((code, artifact['status']), (0, 'busy'))
+        phase.assert_not_called()
+        # The refused call left the lock free: the next dry run previews.
+        code, artifact, phase = dry_run()
+        self.assertEqual((code, artifact), (0, {'status': 'previewed'}))
+        phase.assert_called_once()
+        # ... and releases it afterwards.
+        with lock_path.open('a') as probe:
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
     def test_argument_failure_emits_one_json_usage_artifact_and_returns_2(self):
         # An argparse failure (`--job` without a value) must not exit before the
@@ -880,13 +966,29 @@ class BoundedRepairTest(unittest.TestCase):
         atomic(self.root / 'config.json', self.config)
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.object(service, 'ROOT', self.root), \
-             mock.patch.object(service, 'drain') as drain, \
+             mock.patch.object(service, 'drain', return_value=None) as drain, \
              contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = service.main(['--job'])
         self.assertEqual(code, 2)
         drain.assert_not_called()
-        self.assertEqual(json.loads(out.getvalue())['status'], 'usage-error')
+        error = json.loads(out.getvalue())['error']
+        self.assertEqual((error['kind'], error['exitCode']), ('usage', 2))
         self.assertIn('--job', err.getvalue())
+
+    def test_operational_exception_is_one_error_artifact_with_exit_1(self):
+        # An exception out of run() (e.g. the ValueError select_job raises for a
+        # wrong digest) must exit 1 with exactly one JSON artifact, not a traceback.
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(service, 'run', side_effect=ValueError('bad digest')), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = service.main([])
+        self.assertEqual(code, 1)
+        error = json.loads(out.getvalue())['error']
+        self.assertEqual((error['kind'], error['message'], error['exitCode']), ('failed', 'bad digest', 1))
+        # The journal is the only diagnostic channel: the traceback stays on stderr.
+        self.assertIn('Traceback (most recent call last)', err.getvalue())
+        self.assertIn('ValueError: bad digest', err.getvalue())
+        self.assertEqual(len(out.getvalue().strip().splitlines()), 1)
 
 
 if __name__ == '__main__':

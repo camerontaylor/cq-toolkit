@@ -95,7 +95,7 @@ alert leaves back onto a pre-Phase-0.1 target's `promotion` block so a rollback
 still delivers alerts.
 An overlay written for a pre-Phase-0.1 deployment may keep its
 `promotion.record_url_template`, `promotion.alert_agent_*` and
-`promotion.signer.spool.*` leaves. They let `switch` reproduce the live source
+`promotion.signer.spool.*` leaves. They let `legacy_check` reproduce the live source
 config byte-for-byte for its drift check; the new config keeps the alert
 recipient and ignores the retired template and spool values. Remove them after
 the source has switched.
@@ -116,7 +116,8 @@ it must peel to that SHA. This tool does not create tags.
 Targets must descend from import C (`f748fd43`); earlier rollback needs the
 separate, recorded old-runner rollback below. Targets must also provide relocated
 unit templates: every service/path template must contain `@CRQ_ROOT@`. Import-era
-targets with legacy unit paths are refused before checkout. Keep the checkout detached.
+targets with legacy unit paths are refused before checkout. The checkout need not be
+detached beforehand (a clone left on `main` is fine); the switch checks the target out detached.
 
 The helper reads `HEAD:apps/crq-python/config.json`, never the generated working
 copy. The rendered bytes retain the existing indent-2 JSON plus newline format.
@@ -177,6 +178,148 @@ No spool probes are authorized by this document. Any new probe requires separate
 recorded owner authorization. Retain the heartbeat endpoint confirmation from the
 old handover as evidence, without inventing new live evidence.
 
+## Owner procedure for any template-changing target
+
+`deploy-runbook.py` refuses a target whose rendered `crq-*` unit templates
+differ from the live checkout's. The sequence below covers an in-place change
+of target. A first root move is itself template-changing but keeps its own
+section above, which adds the read-only legacy-config and `.bak` hashes, the
+old tick lock held through the state snapshot and transfer, the state copy to
+the new deployment root with the old checkout kept inert, the legacy overlay,
+`.bak` removal and `dispatch_after_min` steps; do not run a first root move
+from this general sequence.
+
+1. Serialize the whole procedure first, before any measurement: hold both
+   fencing locks with a nonblocking `flock`, stopping if either is busy —
+   `apps/crq-python/state/deploy.lock`, which any concurrent whole deploy
+   holds from before its own first measurement through its released health
+   window, and the shared `apps/crq-python/state/controller.lock`, which
+   every controller transaction (checkout deploy or rollback, a `--unit`
+   switch, recovery) holds through `Effects.controller_lock` while reading
+   neither `deploy.lock` nor the admission marker; without both claims a
+   concurrent deploy or controller transaction can move the checkout or
+   swap installed units under this procedure. Create the controller lock
+   mode 0600 and keep it 0600 (the live binding refuses a group- or
+   world-writable lock). Keep both locks through step 3's prepare, step
+   5's health observation and any rollback, and release neither when step
+   5 removes the runner-disabled marker. Release the locks after acceptance
+   or a completed rollback. If either lock or a pre-mutation check refuses,
+   release any locks acquired and leave any marker owned by another handover
+   in place. Then hold admission,
+   before stopping anything: claim the
+   `apps/crq-python/state/runner-disabled` marker with `O_EXCL` (for
+   example `( set -o noclobber; printf 'held for owner handover\n' >
+   apps/crq-python/state/runner-disabled )`), and stop if it already
+   exists, because another handover holds it. Stopping timers does not
+   stop admission: a finishing review starts the tick itself
+   (`crq.py` `cmd_review_child`, an unconditional
+   `systemctl --user --no-block start crq-tick.service`), and `tick()`,
+   `slot()`, `scheduled_slot()` and `cmd_measure()` are gated only by
+   this marker. Without it, a review ending during the drain restarts
+   the tick, which can admit replacement work, and step 2's `switch`
+   then refuses the active `crq-tick.service`. `prepare` writes the
+   marker only at its end, after its own `inactive()` check, so it cannot
+   hold admission here; `deploy-runbook.py` likewise claims it before
+   `stop_triggers()`. Keep the marker in place through step 4; step 3's
+   `prepare` replaces its bytes with its own inert marker, and step 5's
+   removal releases this claim. Then stop every installed or loaded
+   `crq-*.timer` and `crq-*.path` and the records service: the tick and watchdog timers, and where present
+   `crq-slot.timer`, `crq-publisher.path`, `crq-publisher.timer`,
+   `crq-repair.timer`, `crq-repair.path` and `crq-backfill.timer`.
+   `prepare` and `switch` refuse any active or loaded `crq-*` unit
+   (`prepare-host.py` `inactive()`), including the repair and backfill
+   triggers on hosts that enabled them, and the slot timer would keep
+   admitting reviews during the drain. Note which of these were active;
+   step 5 and any rollback restore exactly that set. Then wait for every
+   `crq-*.service` (tick, watchdog, slot, publisher, repair, backfill) to
+   reach inactive or failed, with no queued `crq-*` job, and drain owned
+   reviews.
+2. Before moving the checkout, run the rollback-compatibility check
+   `deploy-runbook.py` enforces before its switch and this manual path
+   otherwise bypasses: the controller's `compatibility_record` judged by
+   `rollback_compatible` (`ops/deploy-controller.py`, with
+   `Effects(root, private-record-dir)`), for the live HEAD — the prior
+   SHA a rollback would return to. A queue carrying any explicit
+   `schema_version` marker (any value), any `author_*` key the prior
+   target's committed source never names, an unreadable queue, or a
+   missing, unchecked or malformed record refuses the switch exactly as
+   the runbook refuses: reconcile the queue with the owner first, and
+   never proceed past a refusal by hand. Then move the checkout onto
+   the target, through the audited helper fence the runbook itself
+   drives (`prepare-host.py switch`; the manual helper path below
+   documents the same fence):
+   `switch --sha FULL40TARGETSHA [--tag crq-runner/YYYYMMDD-N]`. It
+   verifies the target without fetching, refuses active units,
+   holds the tick lock, backs up the live config bytes (as installed, with
+   no comparison against a render of HEAD) into the private record
+   directory, checks out the target detached and atomically writes the
+   target's rendered config. It installs no unit files and starts
+   and enables nothing.
+3. Save copies of the prior installed unit definitions privately before
+   anything else here: the prepare run below replaces the installed
+   files, and the prior bytes cannot be recovered from the replaced
+   install. Then run `prepare --tag crq-runner/YYYYMMDD-N --units-output
+   "$HOME/.config/systemd/user"`. Prepare renders from HEAD, so this is
+   the step that applies the template delta. Its `--tag` is required
+   (`prepare-host.py` `add_argument('--tag', required=True)`) and must peel
+   to the target HEAD, so a target deployed by SHA alone must first be given
+   an annotated `crq-runner/YYYYMMDD-N` tag by the owner (this tool does not
+   create tags); a tagless target cannot use this ceremony. Supply the same
+   tag to step 2's `switch` so the two agree. It refuses active units, verifies the rendered
+   units with `systemd-analyze --user verify`, records hashes, writes
+   the inert `state/runner-disabled` marker and the rendered config,
+   and reloads the user manager. It starts and enables nothing. If the
+   target removes a template, prepare refuses the leftover installed
+   file outside the rendered set; keep it with the saved prior
+   definitions, remove it, and re-run prepare.
+4. Compare the installed target definitions with the saved prior
+   definitions from step 3 — never rely on the replaced files — and keep
+   the saved definitions for rollback; the runbook cannot restore them.
+   Rollback is those saved definitions plus the same helper `switch`
+   back to the prior SHA; no automatic rollback runs here. To roll
+   back, including after a failed health check in step 5 (which starts
+   the units), keep using both step 1 locks already held. Repeat only
+   admission and drain: keep the marker if it is still held, or claim it
+   again with step 1's exclusive create if step 5 released it. Then stop every `crq-*.timer`/`.path` and the
+   records service again (including the repair and backfill triggers if
+   they were active), because the helper refuses active units; wait for
+   every `crq-*.service` to reach inactive or failed, and drain owned
+   reviews; then run the step 2 compatibility check again,
+   judged against the prior SHA — the rollback target that must be able
+   to read the queue — and refuse the rollback when it is no longer
+   clean: the runbook's rollback treats a queue shape the prior target
+   cannot provably read as operator recovery, and this manual path must
+   not bypass that refusal. Only after the check passes, run the same
+   helper `switch` back to the prior SHA. The manual helper and the
+   controller rollback require a verified prior target on `origin/main`.
+   For a local-only prior, the runbook’s automatic rollback restores the
+   prior SHA and measured config bytes verbatim. After a successful manual
+   switch, remove any target-only
+   `crq-*` unit the target installed that is absent from the saved
+   prior set; restore the complete saved prior unit set into
+   `$HOME/.config/systemd/user`; run
+   `systemctl --user daemon-reload`; and only then restart as in
+   step 5, restoring the units that were active before step 1.
+5. Verify and approve the recorded evidence (rendered config, unit
+   hashes, Git status), then remove the inert marker — releasing only
+   the admission claim, never either step 1 lock — and start the
+   tick/watchdog timers and records service (and every other
+   `crq-*.timer`/`.path` noted active in step 1, such as `crq-slot.timer`,
+   `crq-publisher.path`/`.timer`, `crq-repair.timer`/`.path` and
+   `crq-backfill.timer`) — but start only units the target still renders:
+   derive the owner-approved activation set from the step 4 template
+   comparison, skipping any unit the target removed and explicitly
+   enabling and starting any replacement for a renamed timer or path
+   (prepare enables nothing); keep the original step 1 set for
+   rollback; accept only after
+   `last_tick` advances for two consecutive slots in the heartbeat
+   and summary, and only then release both step 1 locks. Do not
+   finish this target by re-running
+   `deploy-runbook.py`: it refuses a target that is already the
+   checked-out HEAD, and until the checkout moves, installing unit
+   files changes neither Git tree, so the template-delta check refuses
+   the same commit again — installing units resolves neither refusal.
+
 ## Controller wrapper (Q7, #395) — proposed, offline-tested only
 
 `ops/deploy-controller.py` wraps (never replaces) the helper's `switch` with
@@ -225,8 +368,8 @@ python3 /srv/crq-deploy/apps/crq-python/ops/deploy-controller.py --root /srv/crq
 Ordering and guarantees:
 
 1. **Preflight** — full 40-hex target SHA, annotated `crq-runner/` tag peeling
-   to it; prior HEAD/config digests retained; reachability, drift and
-   stopped-unit checks are the helper's own (they run inside its `switch`).
+   to it; prior HEAD/config digests retained; reachability and stopped-unit
+   checks are the helper's own (they run inside its `switch`).
    The owner must provision a durable, private mode-0700 record directory before
    invoking the controller. The controller never creates it or missing ancestors;
    absence, wrong type/mode and ambiguous prior annotated tags refuse before
@@ -245,7 +388,7 @@ Ordering and guarantees:
    no record and no change. The controller's own tag check is also a full
    match now. Only then is the durable recovery intent written (the
    `deploy_pending`/`rollback_pending` record described below), and the
-   helper's `switch` runs unchanged, under its tick lock and drift fence. An
+   helper's `switch` runs unchanged, under its tick lock. An
    interruption during validation therefore leaves no intent to replace or
    clear; one after the write is replaced by its recorded outcome.
 4. **Preservation** — `state/queue.json` (items, starts, author_requests,
@@ -459,9 +602,9 @@ The sequence:
 
 1. **Resolve the target.** Fetch `origin/main` and require a full SHA
    contained in `refs/remotes/origin/main`. A tag is optional. The target's
-   own `prepare-host.py` must accept a tagless switch; a historical target
-   whose helper still requires a tag is refused before the hold, because its
-   automatic rollback could never pass `None`.
+   own `prepare-host.py` must support both a tagless switch and exact-byte
+   rollback through `rollback_config`. The runbook checks both before
+   claiming the hold.
 2. **Measure before touching anything.** Record the live `repair.cq_bin`
    pointer, its entry bytes and mode, and hash `state/queue.json` plus the
    completion heartbeat. Require the controller's rollback-compatibility
@@ -559,11 +702,11 @@ python3 /retained/prepare-host.py --overlay /private/host.json switch --sha FULL
 
 The helper verifies the target is contained in `origin/main` without fetching;
 an optional tag must peel to it. Under one
-nonblocking tick lock it rechecks stopped units, renders CURRENT SHA + overlay
-into a temporary file, and compares every byte with live config. Drift reports
-field names only and refuses before restore/checkout. Resolve drift by an approved
-overlay/repository change and a recorded render, never by editing live JSON.
-It refuses other dirty/untracked files; restores tracked config; requires a clean
+nonblocking tick lock it rechecks stopped units and backs up the live config
+bytes to the private record directory (`config-before-switch-*`, mode 0600); it
+does not refuse a live config that differs from the render of CURRENT SHA +
+overlay (for example a host `repair.enabled` edit): the next render replaces it
+and the backup is reinstalled if the switch fails. It refuses other dirty/untracked files; restores tracked config; requires a clean
 Git status; checks out detached; records and atomically re-renders target config;
 and requires status to show only:
 

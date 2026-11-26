@@ -33,6 +33,7 @@ import type { Op } from '../../kernel/types.js';
 import { messageOf } from '../../shared/messageOf.js';
 import type { CheckRunnerInput } from '../gates/checkRunner.js';
 import type { CqConfig } from './cqConfig.js';
+import { stripJsonc } from '../ratchet/internal/definitions.js';
 import {
   CqConfigSchema,
   CQ_CONFIG_FILE,
@@ -101,26 +102,66 @@ function eslintTrigger(dir: string): string | undefined {
   return undefined;
 }
 
+/**
+ * Whether the root tsconfig is solution-style: an empty literal `files` and a
+ * non-empty `references`. The text is parsed as JSONC (comments, trailing
+ * commas), as TypeScript does. Anything unreadable counts as an ordinary
+ * config. `include` and `extends` are deliberately not inspected: the root is
+ * checked together with its references by `tsc --build`, so sources the root
+ * inherits through `extends` are still covered.
+ */
+function isSolutionRoot(dir: string): boolean {
+  try {
+    const config = JSON.parse(stripJsonc(readFileSync(join(dir, 'tsconfig.json'), 'utf8'))) as {
+      files?: unknown;
+      references?: unknown;
+    };
+    return (
+      Array.isArray(config.files) &&
+      config.files.length === 0 &&
+      Array.isArray(config.references) &&
+      config.references.some((ref) => typeof (ref as { path?: unknown } | null)?.path === 'string')
+    );
+  } catch {
+    return false;
+  }
+}
+
 /** Detect the supported checks for `dir` (pure over the file system's current state). */
-export function detectChecks(dir: string): { checks: CheckRunnerInput[]; detected: string[] } {
+export function detectChecks(dir: string): {
+  checks: CheckRunnerInput[];
+  detected: string[];
+} {
   const checks: CheckRunnerInput[] = [];
   const detected: string[] = [];
   if (existsSync(join(dir, 'tsconfig.json'))) {
+    // A solution-style root ({"files": [], "references": [...]}) has no source
+    // files of its own: plain `tsc` would check nothing, and `--noEmit -p` per
+    // project fails on composite references (TS6305/TS6310). `tsc --build`
+    // checks the references in dependency order plus whatever the root itself
+    // selects. It emits build outputs (and .tsbuildinfo), as `tsc -b` does.
+    const solution = isSolutionRoot(dir);
     checks.push({
       adapter: 'tsc-lines',
       command: {
         command: toolCommand(dir, 'tsc'),
-        args: ['--noEmit', '--pretty', 'false'],
+        args: solution ? ['--build', '--pretty', 'false'] : ['--noEmit', '--pretty', 'false'],
         cwd: '.',
       },
     });
-    detected.push('tsc-lines: tsconfig.json');
+    detected.push(
+      solution ? 'tsc-lines: tsconfig.json (solution; tsc --build)' : 'tsc-lines: tsconfig.json',
+    );
   }
   const eslint = eslintTrigger(dir);
   if (eslint !== undefined) {
     checks.push({
       adapter: 'eslint-json',
-      command: { command: toolCommand(dir, 'eslint'), args: ['--format', 'json', '.'], cwd: '.' },
+      command: {
+        command: toolCommand(dir, 'eslint'),
+        args: ['--format', 'json', '.'],
+        cwd: '.',
+      },
     });
     detected.push(`eslint-json: ${eslint}`);
   }

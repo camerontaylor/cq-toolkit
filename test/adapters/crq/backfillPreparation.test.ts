@@ -124,3 +124,98 @@ describe('inventory preparation', () => {
     expect(mocks.construct).not.toHaveBeenCalled();
   });
 });
+
+describe('inventory retire and enqueue cap', () => {
+  const row = (id: string, extra: string): string =>
+    `{"id":"${id}","kind":"backfill","state":"pending","created_at":"2026-01-01T00:00:00Z",${extra}}`;
+  const queueOf = (...rows: string[]): JsonObject => doc(`{"items":[${rows.join(',')}]}`);
+  const state = (queue: JsonObject, id: string): JsonObject => {
+    const found = (queue.get('items') as JsonObject[]).find((i) => i.get('id') === id);
+    if (found === undefined) throw new Error(`missing ${id}`);
+    return found;
+  };
+
+  /** The default fixture enqueue replaces the items; these tests need the seeded ones to survive. */
+  const keepItems = (f: ReturnType<typeof fixture>): void => {
+    f.effects.enqueue = (queue) => ({ queue, item: doc('{"id":"job"}') });
+  };
+
+  it('retires before capture: stale pins, but not the current pin or execution owners', async () => {
+    const f = fixture();
+    const queue = queueOf(
+      row('old', '"target":"older"'),
+      row('keep', '"target":"tip"'),
+      row('live', '"target":"older","vendor_state":"live"'),
+      '{"id":"other","kind":"review","state":"pending","target":"older"}',
+    );
+    const result = await prepareInventory(queue, true, f.effects, { retire: true });
+    const captured = mocks.capture.mock.calls[0]?.[0] as { queue: JsonObject };
+    expect(state(captured.queue, 'old').get('state')).toBe('skipped');
+    expect(state(captured.queue, 'old').get('last_error')).toBe('superseded by inventory tip');
+    for (const id of ['keep', 'live', 'other'])
+      expect(state(captured.queue, id).get('state')).toBe('pending');
+    expect(result.retired).toEqual([{ id: 'old', at: '2026-01-01T00:00:00Z' }]);
+    expect(state(queue, 'old').get('state')).toBe('pending');
+  });
+  it('retires a current-pin job that is past the age bound as expired', async () => {
+    const f = fixture();
+    keepItems(f);
+    f.effects.now = () => '2026-01-03T00:00:00Z';
+    const result = await prepareInventory(
+      queueOf(row('stale', '"target":"tip"')),
+      true,
+      f.effects,
+      {
+        retire: true,
+      },
+    );
+    expect(state(result.queue, 'stale').get('last_error')).toBe('expired: pending more than 24 h');
+    expect(result.retired).toEqual([{ id: 'stale', at: '2026-01-03T00:00:00Z' }]);
+  });
+  it('applies neither rule without options, and never retires in report-only mode', async () => {
+    const f = fixture();
+    keepItems(f);
+    const queue = queueOf(row('old', '"target":"older"'));
+    const plain = await prepareInventory(queue, true, f.effects);
+    expect(plain.retired).toBeUndefined();
+    expect(state(plain.queue, 'old').get('state')).toBe('pending');
+    const reportOnly = await prepareInventory(queue, false, f.effects, { retire: true });
+    expect(reportOnly.retired).toBeUndefined();
+  });
+  it('stops enqueueing at the limit, counting pending jobs already at the target', async () => {
+    const f = fixture();
+    mocks.replay.mockResolvedValue({
+      candidates: [{ prs: [7] }, { prs: [7] }, { prs: [7] }],
+      paths: [],
+    });
+    mocks.construct.mockResolvedValue({ partitions: [{ kind: 'path', tier: 'high' }], debt: [] });
+    let n = 0;
+    f.effects.enqueue = (queue, _partition) => {
+      const item = doc(
+        `{"id":"new${String(n++)}","state":"pending","target":"tip","kind":"backfill"}`,
+      );
+      const rows = queue.get('items') as JsonObject[];
+      return { queue: withObjectKeys(queue, [['items', [...rows, item]]]), item };
+    };
+    const seeded = queueOf(row('p1', '"target":"tip"'));
+    const result = await prepareInventory(seeded, true, f.effects, { enqueueLimit: 3 });
+    expect(result.eventItems).toEqual(['new0', 'new1']);
+    const uncapped = await prepareInventory(seeded, true, f.effects);
+    expect(uncapped.eventItems).toHaveLength(3);
+  });
+  it('does not count a deduplicated or non-pending enqueue toward the limit', async () => {
+    const f = fixture();
+    mocks.replay.mockResolvedValue({
+      candidates: [{ prs: [7] }, { prs: [7] }, { prs: [7] }],
+      paths: [],
+    });
+    mocks.construct.mockResolvedValue({ partitions: [{ kind: 'path', tier: 'high' }], debt: [] });
+    // Every enqueue returns an existing item and leaves the queue unchanged.
+    f.effects.enqueue = (queue) => ({
+      queue,
+      item: doc('{"id":"dup","state":"pending","target":"tip"}'),
+    });
+    const result = await prepareInventory(queueOf(), true, f.effects, { enqueueLimit: 1 });
+    expect(result.eventItems).toEqual(['dup', 'dup', 'dup']);
+  });
+});

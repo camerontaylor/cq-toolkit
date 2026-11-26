@@ -7,6 +7,7 @@
 import { JsonNumber, JsonObject, type JsonValue } from '../../../policy/crq/jsonValue.js';
 import {
   LedgerIntegrityError,
+  LedgerKeyError,
   LedgerTypeError,
   ledgerTimestamp,
 } from '../../../policy/crq/ledger.js';
@@ -85,12 +86,19 @@ export function usageContext(
   for (const value of items) {
     const item = object(value, 'item');
     const attempt = item.get('attempt_id');
+    // Python `attempt_id in dict` hashes the key: a list or object is a TypeError.
+    if (Array.isArray(attempt) || attempt instanceof JsonObject)
+      throw new LedgerTypeError('attempt_id is unhashable');
     if (typeof attempt !== 'string' || !holds.has(attempt)) continue;
     const rawRun = item.get('run');
     const run = pyTruthy(rawRun) ? object(rawRun, 'run') : empty();
     const started = run.get('started_at') ?? null;
     if (reserved.some((value) => pythonValueEqual(value, started))) represented++;
   }
+  // Python reads `usage["remaining"]` (a KeyError when absent). For an empty
+  // object `usage_context` itself is quiet, but `admit_available` raises the
+  // same KeyError on its next line, so the end result is identical.
+  if (usage !== null && !usage.has('remaining')) throw new LedgerKeyError('remaining');
   const remaining = usage === null ? 0n : integer(usage.get('remaining'), 'remaining');
   const adjusted = remaining - BigInt(Math.max(0, reserved.length - represented));
   const observation = new JsonObject([

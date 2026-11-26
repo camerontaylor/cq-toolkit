@@ -130,6 +130,84 @@ describe('repair scan adapter allowlist and denylist', () => {
     expect(docs.report.denylistHits).toBe(0);
   });
 
+  test('Git-quoted paths are decoded before path rules apply; undecodable ones fail closed', async () => {
+    const scoped = makeRepairScan({
+      rules: [{ id: 'scoped', description: 'test', regex: SECRET, path: '^src/\u00e9' }],
+      gitleaksEffects: fakeGitleaks({}),
+      gitleaksAvailable: () => false,
+    });
+    const quoted =
+      'diff --git "a/src/\\303\\251.ts" "b/src/\\303\\251.ts"\n' +
+      '--- "a/src/\\303\\251.ts"\n' +
+      '+++ "b/src/\\303\\251.ts"\n' +
+      '@@ -0,0 +1 @@\n' +
+      `+${SECRET}\n`;
+    const hit = await scoped.scanDiff({
+      patch: quoted,
+      name: 'scan.json',
+      base: null,
+      head: SOURCE,
+    });
+    expect(hit.report.denylistHits).toBe(1);
+    const bad = await scoped.scanDiff({
+      patch: quoted.replaceAll('\\303\\251', '\\777'),
+      name: 'scan.json',
+      base: null,
+      head: SOURCE,
+    });
+    expect(bad.clean).toBe(false);
+  });
+
+  test('a git-quoted header path is decoded before path rules apply', async () => {
+    const scoped = makeRepairScan({
+      rules: [{ id: 'scoped', description: 'test', regex: SECRET, path: '^src/' }],
+      gitleaksEffects: fakeGitleaks({}),
+      gitleaksAvailable: () => false,
+    });
+    const patch =
+      'diff --git "a/src/a\\tb.ts" "b/src/a\\tb.ts"\n' +
+      '--- "a/src/a\\tb.ts"\n' +
+      '+++ "b/src/a\\tb.ts"\n' +
+      '@@ -0,0 +1 @@\n' +
+      `+${SECRET}\n`;
+    const result = await scoped.scanDiff({ patch, name: 'scan.json', base: null, head: SOURCE });
+    expect(result.report.denylistHits).toBe(1);
+  });
+
+  test('an unquoted space-name header keeps its git tab delimiter out of the path', async () => {
+    const scoped = makeRepairScan({
+      rules: [{ id: 'scoped', description: 'test', regex: SECRET, path: '[.]env$' }],
+      gitleaksEffects: fakeGitleaks({}),
+      gitleaksAvailable: () => false,
+    });
+    // Real git output: a literal tab trails an unquoted name containing a space.
+    const patch =
+      'diff --git a/space name.env b/space name.env\n' +
+      '--- a/space name.env\t\n' +
+      '+++ b/space name.env\t\n' +
+      '@@ -0,0 +1 @@\n' +
+      `+${SECRET}\n`;
+    const result = await scoped.scanDiff({ patch, name: 'scan.json', base: null, head: SOURCE });
+    expect(result.report.denylistHits).toBe(1);
+  });
+
+  test('a C-quoted space-name header keeps its git tab delimiter out of the path', async () => {
+    const scoped = makeRepairScan({
+      rules: [{ id: 'scoped', description: 'test', regex: SECRET, path: '[.]env$' }],
+      gitleaksEffects: fakeGitleaks({}),
+      gitleaksAvailable: () => false,
+    });
+    // Git quotes a non-ASCII name and still appends a raw tab when it has a space.
+    const patch =
+      'diff --git "a/sp\\303\\251 name.env" "b/sp\\303\\251 name.env"\n' +
+      '--- "a/sp\\303\\251 name.env"\t\n' +
+      '+++ "b/sp\\303\\251 name.env"\t\n' +
+      '@@ -0,0 +1 @@\n' +
+      `+${SECRET}\n`;
+    const result = await scoped.scanDiff({ patch, name: 'scan.json', base: null, head: SOURCE });
+    expect(result.report.denylistHits).toBe(1);
+  });
+
   test('removed and added lines are scanned; context and headers are not', async () => {
     const patch =
       'diff --git a/src/lock.ts b/src/lock.ts\n' +

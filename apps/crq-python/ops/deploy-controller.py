@@ -123,6 +123,17 @@ def _load_live_binding(path: Path | None = None):
 
 
 LOCK_NAME = "controller.lock"
+# The runner's own tick lock (crq.py LOCK = STATE / "tick.lock"): every tick,
+# slot and repair pass takes it, so holding it serializes a unit transaction
+# with all queue dispatch.
+TICK_LOCK_NAME = "tick.lock"
+# Ticks and slots routinely hold tick.lock for a minute or more, up to most of
+# the 12-minute cadence; crq_repair waits out the same bound before skipping.
+# A still-busy lock refuses the transaction before any mutation or journal
+# write instead of racing a tick through the fence. The refusal is retryable
+# (Refused, exit 2, nothing mutated); the bound is deliberately shorter than
+# the cadence so controller.lock is not held for a whole tick period.
+TICK_LOCK_WAIT_SECONDS = 300.0
 JOURNAL_SCHEMA = 1
 
 TAG_RE = re.compile(r"crq-runner/[0-9]{8}-[0-9]+")
@@ -362,6 +373,49 @@ class Effects:
             # controller owns (a former 0664 umask artefact) to 0600.
             os.chmod(path, 0o600)
             yield
+
+    # -- tick lock --------------------------------------------------------
+    @contextlib.contextmanager
+    def tick_lock(self):
+        """Hold the runner's own tick lock across one unit transaction.
+
+        The stop/drain fence observes the queue at one instant and its
+        systemd fence covers only the switched unit and its activators;
+        nothing else here serializes with the tick runner, which holds
+        ``tick.lock`` only for its own run. Every tick, slot and repair pass
+        takes this same flock, so holding it excludes new queue dispatch
+        from the fence's queue observation through activation (and through
+        a rollback re-fence). The wait is bounded — ticks hold the lock for
+        minutes — and a still-busy lock refuses before any mutation or
+        journal write.
+        """
+        import fcntl
+
+        self.state_dir().mkdir(parents=True, exist_ok=True)
+        path = self.state_dir() / TICK_LOCK_NAME
+        # O_APPEND, never a truncating open: a concurrent tick's lock file
+        # must not lose bytes while this controller opens it.
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
+        deadline = time.monotonic() + TICK_LOCK_WAIT_SECONDS
+        try:
+            while True:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise Refused("tick lock busy: the runner holds "
+                                      + TICK_LOCK_NAME
+                                      + "; unit transaction refused before "
+                                      "any mutation") from None
+                    time.sleep(min(0.25, remaining))
+            try:
+                yield
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
 
     # -- journal ----------------------------------------------------------
     def record_preflight(self) -> None:
@@ -1518,13 +1572,20 @@ def deploy_plan(effects: Effects, helper_module, target: str, tag: str,
             raise Refused("queue-owned reviews alive/ambiguous; drain through the "
                           "documented author-recovery path first: "
                           + json.dumps(drain["blocked"])[:400])
+        # Preflight's preserved digests can predate a final tick that published
+        # the queue and heartbeat before this fence, so the preservation
+        # baseline is captured only now: units are stopped and drained, which
+        # is what proves nothing further writes (the rollback path captures
+        # its state after the same fence). The post-helper comparison below
+        # still catches any write during the switch itself.
+        state = {**pre["state"], **preserved_digests(effects)}
         overlay, raw = helper_module.load_overlay(overlay_path)
         helper_precheck(helper_module, effects.root, overlay, target, tag)
-        with mutation_record(effects, "deploy", pre["state"], target, tag, prior_tag,
+        with mutation_record(effects, "deploy", state, target, tag, prior_tag,
                              helper_sha256) as tx:
             helper_module.switch(effects.root, overlay, raw, target, tag)
             tx["phase"] = "preservation"
-            post = preservation_check(effects, pre["state"])
+            post = preservation_check(effects, state)
             plan["steps"].append({"step": "preservation", **post})
             tx["phase"] = "compatibility"
             record = compatibility_record(effects, pre["state"]["prior_head"])
@@ -1628,6 +1689,12 @@ def recover_unit(effects, adapter, path, *, adapter_factory=None):
         if adapter is None:
             raise Refused("no unit recovery adapter")
         adapter.validate_snapshot(record["unit"], record["snapshot"])
+        # Same dispatch window as switch_unit: hold the runner's tick lock
+        # across the fence's queue observation and the restore, release it
+        # before restore_activation. A busy lock refuses before any rewrite.
+        tick_fence = contextlib.ExitStack()
+        if unit_issues_queue_work(record["unit"]):
+            tick_fence.enter_context(effects.tick_lock())
         try:
             failed_phase = record.get("failed_phase", record["phase"])
             # Recovery does not infer a fence from the journal. It re-establishes
@@ -1655,12 +1722,15 @@ def recover_unit(effects, adapter, path, *, adapter_factory=None):
             if rebased_from is not None:
                 record["rebaselined_from"] = rebased_from
             effects.journal_replace(path, record)
+            tick_fence.close()
             adapter.restore_activation(record["unit"], record["snapshot"])
             completed = {**record, "outcome": "rolled_back"}
             effects.journal_replace(path, completed)
         except (Exception, KeyboardInterrupt) as exc:
             raise RecoveryRequired({**record, "record_path": str(path),
                                     "reason": type(exc).__name__ + ": " + str(exc)[:400]}) from exc
+        finally:
+            tick_fence.close()
         return completed
 
 
@@ -1797,7 +1867,8 @@ def _unit_switch_identity(record):
         and _unit_runtime(record.get("runtime"))
         and _unit_runtime(record.get("prior_runtime"))
         and record["runtime"] != record["prior_runtime"]
-        and "snapshot" in record
+        and isinstance(record.get("snapshot"), dict)
+        and record["snapshot"].get("runtime") == record["prior_runtime"]
         and (state is None or isinstance(state, dict))
         and phase in _PHASES
         and ((phase == "snapshot" and state is None)
@@ -1914,8 +1985,13 @@ def refuse_unfinished_transactions(effects, exclude=None):
     A pending or unresolved checkout transaction blocks unit switch/recovery,
     and a pending or unresolved unit transaction blocks checkout deploy/
     rollback. ``exclude`` names exactly the record the caller is about to
-    recover, so a legitimate recovery does not block itself. Completed,
-    refused/no-change and completed/rolled-back unit history does not block.
+    recover, so a legitimate recovery does not block itself. Completed and
+    refused/no-change checkout history, and completed/rolled-back unit history,
+    do not block when they match their producer shape (for units, a
+    ``snapshot`` whose ``runtime`` equals ``prior_runtime``); a unit record has
+    no ``refused_no_change`` outcome and is refused as invalid; terminal history that fails that identity raises
+    ``Refused`` from ``_classify_record`` and blocks until the named record is
+    reconciled.
     A ``recovery_required`` record is never resolved from stored digests: those
     do not cover unit metadata, activation or live work. It remains unfinished
     (or unsupported legacy when its producer identity is incomplete). The guard
@@ -1942,9 +2018,17 @@ def switch_unit(effects, adapter, unit, runtime):
 
     Adapter preflight must establish artifact identity, provider availability and
     the current pointer without mutation. Its stop/drain fence must prevent new
-    work until start. Snapshot/restore retain exact installed unit bytes and
-    activation state. validate_snapshot rejects invalid types and paths before
-    any mutation. Completion sequences are monotonic for each unit.
+    work until start. For an issuing unit the controller also holds the
+    runner's tick lock from the journal intent until immediately before the
+    start's own pre-ExecStart work (unmask, daemon-reload, byte checks), and
+    reacquires it for any rollback fence. This keeps ticks from dispatching
+    new queue work between the fence's queue observation and that
+    pre-ExecStart window; it does not cover the window itself, and the lock is
+    released before start so the started runner can actually tick.
+    Snapshot/restore retain exact installed unit bytes and activation
+    state. validate_snapshot rejects invalid types
+    and paths before any mutation. Completion sequences are monotonic for
+    each unit.
     """
     if unit not in UNIT_RUNTIMES or not _unit_runtime(runtime):
         raise Refused("invalid unit or runtime")
@@ -1986,61 +2070,92 @@ def switch_unit(effects, adapter, unit, runtime):
                     "prior_runtime": prior["runtime"], "outcome": "pending", "at": now_iso(),
                     "snapshot": snapshot, "state": None, "phase": "snapshot",
                     "prior_head": prior_head}
-        path = effects.journal_append(identity)
-        try:
-            adapter.stop_and_drain(unit)
-            identity = {**identity, "state": captured_state(effects, unit),
-                        "phase": "drained"}
-            effects.journal_replace(path, identity)
-            baseline = adapter.sequence(unit)
-            if type(baseline) is not int or baseline < 0:
-                raise ValueError("invalid completion baseline")
-            adapter.install(unit, runtime)
-            preservation_check(effects, identity["state"],
-                               preserved_surfaces(unit))
-            identity = {**identity, "phase": "activation_pending"}
-            effects.journal_replace(path, identity)
-            adapter.start(unit)
-            first = _completion(adapter, unit, runtime, baseline)
-            second = _completion(adapter, unit, runtime, first["sequence"])
-            record = {**identity, "outcome": "completed", "completions": [first, second]}
-            effects.journal_replace(path, record)
-            return record
-        except (Exception, KeyboardInterrupt) as exc:
+        # Exclusive with every tick, slot and repair pass for the whole
+        # transaction: the adapter fence below observes the queue once and
+        # covers only this unit's systemd topology, so a tick that starts
+        # after that observation could dispatch new queue work before
+        # activation. tick.lock is the runner's own lock (crq.py LOCK), so
+        # holding it closes that dispatch window from the journal intent up
+        # to activation. It is released immediately before start: the tick
+        # command waits on this same lock (crq.py with_lock, lock_wait=90) and
+        # exits successfully without ticking when the wait expires, so a lock
+        # held through the completion observations would let lock-busy no-ops
+        # satisfy both observations and mark an unexercised runtime healthy.
+        # A rollback re-fence reacquires it. A still-busy lock refuses before
+        # the journal entry: no mutation, no pending intent. The watchdog is
+        # non-issuing and shares no queue state, so it keeps its own fences.
+        issues = unit_issues_queue_work(unit)
+        tick_fence = contextlib.ExitStack()
+        with tick_fence:
+            if issues:
+                tick_fence.enter_context(effects.tick_lock())
+            fence_held = issues
+            path = effects.journal_append(identity)
             try:
-                failed_phase = identity["phase"]
-                # The fence is the discriminator, not the phase alone: a
-                # successful stop_and_drain has observed no matching job, no
-                # owned process, an inactive service and inactive activators,
-                # and (for an issuing unit) a drained queue. In that state a
-                # switch that failed after start may restore the authenticated
-                # snapshot. The target still ran; the record keeps the failed
-                # phase, the reason and the fence evidence. A fence that cannot
-                # establish absence raises and stays recovery_required.
-                fence = adapter.stop_and_drain(unit)
-                state, rebased_from = rebaseline_preserved(
-                    effects, identity["state"], unit, failed_phase)
-                adapter.restore(unit, snapshot)
-                if state is not None:
-                    preservation_check(effects, state, preserved_surfaces(unit))
-                identity = {**identity, "phase": "restore_activation_pending",
-                            "failed_phase": failed_phase, "fence": fence,
-                            "state": state, "reason": str(exc)[:400]}
-                if rebased_from is not None:
-                    identity["rebaselined_from"] = rebased_from
+                adapter.stop_and_drain(unit)
+                identity = {**identity, "state": captured_state(effects, unit),
+                            "phase": "drained"}
                 effects.journal_replace(path, identity)
-                adapter.restore_activation(unit, snapshot)
-                record = {**identity, "outcome": "rolled_back"}
+                baseline = adapter.sequence(unit)
+                if type(baseline) is not int or baseline < 0:
+                    raise ValueError("invalid completion baseline")
+                adapter.install(unit, runtime)
+                preservation_check(effects, identity["state"],
+                                   preserved_surfaces(unit))
+                identity = {**identity, "phase": "activation_pending"}
+                effects.journal_replace(path, identity)
+                tick_fence.close()  # the started runner must be able to tick
+                fence_held = False
+                adapter.start(unit)
+                first = _completion(adapter, unit, runtime, baseline)
+                second = _completion(adapter, unit, runtime, first["sequence"])
+                record = {**identity, "outcome": "completed", "completions": [first, second]}
                 effects.journal_replace(path, record)
-            except (Exception, KeyboardInterrupt) as rollback_exc:
-                recovery = {**identity, "outcome": "recovery_required", "record_path": str(path),
-                            "reason": str(exc)[:200] + "; rollback: " + str(rollback_exc)[:200]}
+                return record
+            except (Exception, KeyboardInterrupt) as exc:
                 try:
-                    effects.journal_replace(path, recovery)
-                except Exception:
-                    pass  # retained pending intent remains the recovery anchor
-                raise RecoveryRequired(recovery) from rollback_exc
-            raise RecoveryRequired({**record, "record_path": str(path)}) from exc
+                    failed_phase = identity["phase"]
+                    # The fence is the discriminator, not the phase alone: a
+                    # successful stop_and_drain has observed no matching job, no
+                    # owned process, an inactive service and inactive activators,
+                    # and (for an issuing unit) a drained queue. In that state a
+                    # switch that failed after start may restore the authenticated
+                    # snapshot. The target still ran; the record keeps the failed
+                    # phase, the reason and the fence evidence. A fence that cannot
+                    # establish absence raises and stays recovery_required.
+                    if issues and not fence_held:
+                        tick_fence.enter_context(effects.tick_lock())
+                        fence_held = True
+                    fence = adapter.stop_and_drain(unit)
+                    state, rebased_from = rebaseline_preserved(
+                        effects, identity["state"], unit, failed_phase)
+                    adapter.restore(unit, snapshot)
+                    if state is not None:
+                        preservation_check(effects, state, preserved_surfaces(unit))
+                    identity = {**identity, "phase": "restore_activation_pending",
+                                "failed_phase": failed_phase, "fence": fence,
+                                "state": state, "reason": str(exc)[:400]}
+                    if rebased_from is not None:
+                        identity["rebaselined_from"] = rebased_from
+                    effects.journal_replace(path, identity)
+                    # Released before activation for the same reason as start:
+                    # the restored oneshot tick must be able to run, not wait
+                    # out its 90 s lock_wait as a no-op. The fence above has
+                    # already drained the queue and restore has finished.
+                    tick_fence.close()
+                    fence_held = False
+                    adapter.restore_activation(unit, snapshot)
+                    record = {**identity, "outcome": "rolled_back"}
+                    effects.journal_replace(path, record)
+                except (Exception, KeyboardInterrupt) as rollback_exc:
+                    recovery = {**identity, "outcome": "recovery_required", "record_path": str(path),
+                                "reason": str(exc)[:200] + "; rollback: " + str(rollback_exc)[:200]}
+                    try:
+                        effects.journal_replace(path, recovery)
+                    except Exception:
+                        pass  # retained pending intent remains the recovery anchor
+                    raise RecoveryRequired(recovery) from rollback_exc
+                raise RecoveryRequired({**record, "record_path": str(path)}) from exc
 
 
 def prior_tag_for(effects: Effects, sha: str) -> str | None:
@@ -2116,6 +2231,42 @@ def rollback_target(prior: dict) -> dict:
             "rollback_compatibility": compat}
 
 
+def retained_deploy_records(effects: Effects, deployed: str) -> list[dict]:
+    """The one retained completed deploy journal that deployed ``deployed``:
+    the transaction this controller itself retained for the current
+    deployment, as a list of zero or one record. Empty when this checkout
+    holds no such record (the deployment was made outside this controller).
+    Read-only; each retained record is classified with the same
+    producer-shape rules the unfinished-transaction guard enforces, so
+    unclassifiable history refuses instead of being skipped.
+
+    Only finished ``deploy`` records count. Refusals also record the target
+    they attempted, but they changed nothing, so they never describe how the
+    host reached a deployment. When history deployed the same commit more
+    than once (A to B, B to C, C to B) the newest transaction is the current
+    one, ordered by the journal's own strict UTC ``at``; two newest records
+    with the same ``at`` cannot be ordered and refuse."""
+    candidates = []
+    for path in sorted(effects.record_dir.glob("controller-*.json")):
+        status, operation = _classify_record(path)
+        try:
+            entry = json.loads(path.read_text())
+        except (OSError, ValueError) as exc:
+            raise Refused("unreadable controller journal entry: " + path.name) from exc
+        if (status == "finished" and operation == "deploy"
+                and entry.get("target") == deployed):
+            candidates.append(entry)
+    if not candidates:
+        return []
+    newest = max(entry["at"] for entry in candidates)
+    current = [entry for entry in candidates if entry["at"] == newest]
+    if len(current) > 1:
+        raise Refused("cannot identify the transaction for the current "
+                      "deployment: several retained deploy journals share "
+                      "the newest timestamp " + newest)
+    return current
+
+
 _RUNNER_PROBE = """import importlib.util, json, sys
 from pathlib import Path
 runner = Path(sys.argv[1])
@@ -2157,10 +2308,26 @@ def _refusing_liveness(*_args, **_kwargs):
     return "ambiguous"
 
 
+def _matches_retained(prior: dict, retained: dict) -> bool:
+    """The supplied journal is the retained transaction, except that the
+    owner may supply the prior target's approval tag when the retained record
+    legitimately has none (``prior_tag`` null: the prior commit had no
+    annotated runner tag). A retained tag is never replaced. The supplied
+    tag's own validity is checked by ``rollback_target`` and the helper's
+    annotated-tag binding before anything is consumed."""
+    if prior == retained:
+        return True
+    if retained.get("prior_tag") is not None:
+        return False
+    return {**prior, "prior_tag": None} == retained
+
+
 def rollback_plan(effects: Effects, helper_module, prior: dict,
                   overlay_path: Path, helper_sha256: str | None = None) -> dict:
     """Owner-approved rollback to the recorded prior target, through the SAME
-    helper fence. Consumes exactly the journal ``deploy_plan`` wrote.
+    helper fence. Consumes exactly the journal ``deploy_plan`` wrote: when this
+    controller retains the transaction for the current deployment, the supplied
+    journal must match that retained record, not merely name the deployed HEAD.
     Refuses when the compatibility record disables automatic rollback
     (schema-incompatible prior target)."""
     with effects.controller_lock():
@@ -2169,6 +2336,15 @@ def rollback_plan(effects: Effects, helper_module, prior: dict,
         record = rollback_target(prior)
         if effects.git("rev-parse", "HEAD") != record["deployed"]:
             raise Refused("prior record does not describe the current deployment")
+        # Matching HEAD proves only that the supplied record names the same
+        # deployed commit; two hosts can reach it from different priors. When
+        # this controller retains the transaction for the current deployment,
+        # the supplied journal must BE that retained record before its
+        # prior_head (or tag, or compatibility evidence) is consumed.
+        retained = retained_deploy_records(effects, record["deployed"])
+        if retained and not _matches_retained(prior, retained[0]):
+            raise Refused("prior record does not match the locally retained "
+                          "transaction for the current deployment")
         if not rollback_compatible(record["rollback_compatibility"]):
             raise Refused("rollback disabled: queue state the prior target cannot "
                           "provably read (explicit schema marker or author_* state "

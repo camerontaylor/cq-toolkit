@@ -48,6 +48,7 @@ const liveCommands = new Set<string>(LIVE_UNIT_COMMANDS);
 export const LIVE_OPERATOR_COMMANDS = [
   'repair-prepare',
   'status',
+  'summary',
   'backfill',
   'reconcile-merged',
 ] as const;

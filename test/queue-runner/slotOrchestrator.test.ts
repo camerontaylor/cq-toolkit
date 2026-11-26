@@ -35,7 +35,7 @@ function harness(over: Partial<ScheduledSlotPhases> = {}, loaded: JsonObject = b
     readSlotUsage: async (q) => (
       calls.push('readSlotUsage'),
       seen.set('readSlotUsage', nOf(q)),
-      { usage: 'U', reserved: ['r'] }
+      { queue: q, usage: 'U', reserved: ['r'] }
     ),
     admit: async (q, req) => (
       calls.push('admit'),
@@ -88,7 +88,7 @@ describe('runSlot', () => {
   it('a supplied queue is not reloaded, and a supplied observation is not re-read', async () => {
     const h = harness();
     const q = withObjectKeys(base(), [['n', JsonNumber.int(10)]]);
-    await runSlot({ queue: q, observation: { usage: null, reserved: [] } }, h.p);
+    await runSlot({ queue: q, observation: { queue: q, usage: null, reserved: [] } }, h.p);
     expect(h.calls).not.toContain('loadQueue');
     expect(h.calls).not.toContain('readSlotUsage');
     expect(h.seen.get('collectFinished')).toBe(10);
@@ -96,9 +96,22 @@ describe('runSlot', () => {
     expect(h.deadline[0]?.[0]).toBeNull();
   });
 
+  it('without an observation, admission continues from the probed queue', async () => {
+    const h = harness({
+      readSlotUsage: async (q) => ({
+        queue: withObjectKeys(q, [['n', JsonNumber.int(nOf(q) + 10)]]),
+        usage: 'U',
+        reserved: [],
+      }),
+    });
+    await runSlot({}, h.p);
+    expect(h.seen.get('collectFinished')).toBe(0);
+    expect(h.seen.get('admit')).toBe(11);
+  });
+
   it('a null usage observation is a real value, not a missing one', async () => {
     const h = harness();
-    await runSlot({ observation: { usage: null, reserved: ['x', 'y'] } }, h.p);
+    await runSlot({ observation: { queue: base(), usage: null, reserved: ['x', 'y'] } }, h.p);
     expect(h.calls).not.toContain('readSlotUsage');
     expect(h.admitReq[0]?.reserved).toEqual(['x', 'y']);
   });
@@ -167,10 +180,24 @@ describe('runScheduledSlot', () => {
     };
   }
 
+  it('commits on the probed queue, so vendor_observed marks reach admission and the save', async () => {
+    // Python: `observed = copy(snapshot); read_slot_usage(observed); slot(observed, ...)`.
+    const h = harness({
+      readSlotUsage: async (q) => ({
+        queue: withObjectKeys(q, [['n', JsonNumber.int(40)]]),
+        usage: 'U',
+        reserved: [],
+      }),
+    });
+    await runScheduledSlot(lockWith(), h.p);
+    expect(h.seen.get('collectFinished')).toBe(40);
+    expect(h.seen.get('save')).toBe(42);
+  });
+
   it('snapshots under the lock, probes outside it, then commits under a second lock', async () => {
     const events: string[] = [];
     const h = harness({
-      readSlotUsage: async () => (events.push('probe'), { usage: 'U', reserved: [] }),
+      readSlotUsage: async (q) => (events.push('probe'), { queue: q, usage: 'U', reserved: [] }),
     });
     const loaded = h.p.loadQueue;
     h.p.loadQueue = async () => {

@@ -157,6 +157,7 @@ describe('domain boundary vs the sweep ops worktree', () => {
         ['-C', repoRoot, 'fetch', 'origin', `+refs/pull/${PR}/head:refs/cq-review/pr-${PR}`],
         ['-C', repoRoot, 'rev-parse', 'refs/cq-review/pr-7'],
         ['-C', repoRoot, 'worktree', 'list', '--porcelain'],
+        ['-C', repoRoot, 'show-ref', '--verify', '--quiet', `refs/heads/${LABEL}`],
         ['-C', repoRoot, 'worktree', 'add', '-B', LABEL, expectedPath, SHA_B],
         ['-C', expectedPath, 'rev-parse', '--absolute-git-dir'],
         ['-C', expectedPath, 'rev-parse', '--path-format=absolute', '--git-common-dir'],

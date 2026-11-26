@@ -217,7 +217,8 @@ export function leaseDecision(item: JsonObject, dispatch = false): JsonObject {
   return new JsonObject([
     ['v', JsonNumber.int(1)],
     ['request_id', author.get('request_id') ?? null],
-    ['binding', bindingOf(author)],
+    // Python: `dict(item["author"])`, the whole stored binding including request_id.
+    ['binding', new JsonObject(author.entries)],
     ['issuer', state ?? null],
     ['reviewer', state === 'agent' ? (lease.get('reviewer') ?? null) : null],
     ['deadline_at', lease.get('deadline_at') ?? null],

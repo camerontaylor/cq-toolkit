@@ -3,10 +3,12 @@ from runtime_target import DEFAULT_BRANCH, DEFAULT_REF
 import repo_registry
 import review_receipt
 import copy
+import datetime as dt
 import deferred_refresh
 import hashlib
 import json
 from pathlib import Path
+import queue_time
 import re
 import tempfile
 import time
@@ -19,12 +21,37 @@ from crq_repair.bounded import JOB_ID, identity, job_path, require_canonical_del
 # fixed counts on these rungs, so nothing else may be recorded as a fix.
 FIXED_RUNGS = ('A0', 'A1', 'A2')
 
+# A closed fix PR can be reopened upstream and still merge later at the
+# verified head, so neither closed-PR marker below is terminal: each lane
+# rechecks its marker at most once per window, which bounds the forge cost
+# of an abandoned PR without making a reopen invisible.
+CLOSED_FIX_RECHECK = dt.timedelta(hours=24)
+
+
+def closed_marker_due(marker):
+    """True when a closed-PR marker owes its bounded recheck.
+
+    ``marker`` is a fix_closed timestamp or a not_fixed dict with an 'at'
+    stamp. An unreadable stamp is due: the recheck rewrites it, so a corrupt
+    or pre-cadence marker can never silence a record permanently.
+    """
+    stamp = queue_time.parse_utc(marker.get('at') if isinstance(marker, dict) else marker)
+    return stamp is None or dt.datetime.now(dt.timezone.utc) - stamp >= CLOSED_FIX_RECHECK
+
+
 # Total `gh pr create` launches allowed per publication. A process that dies
 # after journaling pr_create_pending but before launching gh (or a transient
 # gh failure) is retried on later ticks up to this bound; exhausted attempts
 # park the run in 'stale' for manual reconciliation instead of failing every
 # future tick.
 PR_CREATE_ATTEMPTS = 3
+BACKFILL_ITEM = 'backfill-finding-'
+BACKFILL_BRANCH = 'crq/fix-backfill-'
+BACKLOG_WINDOW_HOURS = 72
+BACKLOG_HOURS_OF_CAPACITY = 4
+# The tick's view of open backfill fix PRs, set by refresh_fix_pr_backlog and
+# cleared by crq.tick before and after its harvest pass; None means unread.
+TICK_BACKLOG = {'open': None, 'limit': None}
 
 
 def scan_fix_instructions(c, instructions, source_sha, scan_path):
@@ -366,31 +393,31 @@ def record_unpublished_siblings(c, record, handled):
             done.append(other)
             continue
         try:
-            if result.get('verdict') == 'FIXED':
+            # Sibling results bypass harvest's validation, so apply the same
+            # identity and binding checks before the verdict dispatches: a
+            # mismatched artifact must not record any decision. A deterministic
+            # artifact defect is terminalized (like harvest's
+            # record_terminal_failure) instead of replayed forever: the failure
+            # outcome is recorded, the attacker-controlled verdict is not, and
+            # the tick proceeds.
+            if result.get('job') != other or result.get('item') != job.get('item'):
+                reason = 'invalid repair result: sibling identity mismatch'
+            elif job.get('source_sha') and any(result.get(k) != job.get(k)
+                    for k in ('source_sha', 'finding_sha256', 'origin_job')):
+                reason = 'invalid repair result: sibling source/evidence binding mismatch'
+            else:
+                reason = None
+            if reason is not None:
+                mark_finding_outcome(c, job, {'job': other, 'item': job.get('item'),
+                                              'verdict': 'FAILED', 'reason': reason,
+                                              'finding': job.get('finding')})
+            elif result.get('verdict') == 'FIXED':
                 finding_inbox(c).repair_outcome(
                     job['canonical_finding_id'], other, 'needs-human',
                     'repair run failed before publication; the verified fix was not published',
                     c.iso(), repair_base=job.get('repair_base'), failure_class='exhausted')
             elif result.get('verdict') in ('FAILED', 'NOT-FIXED', 'STALE'):
-                # Sibling results bypass harvest's validation, so apply the
-                # same identity and binding checks before the verdict becomes
-                # an authoritative outcome write-back. A deterministic artifact
-                # defect is terminalized (like harvest's record_terminal_failure)
-                # instead of replayed forever: the failure outcome is recorded,
-                # the attacker-controlled verdict is not, and the tick proceeds.
-                if result.get('job') != other or result.get('item') != job.get('item'):
-                    reason = 'invalid repair result: sibling identity mismatch'
-                elif job.get('source_sha') and any(result.get(k) != job.get(k)
-                        for k in ('source_sha', 'finding_sha256', 'origin_job')):
-                    reason = 'invalid repair result: sibling source/evidence binding mismatch'
-                else:
-                    reason = None
-                if reason is not None:
-                    mark_finding_outcome(c, job, {'job': other, 'item': job.get('item'),
-                                                  'verdict': 'FAILED', 'reason': reason,
-                                                  'finding': job.get('finding')})
-                else:
-                    mark_finding_outcome(c, job, result)
+                mark_finding_outcome(c, job, result)
             done.append(other)
         except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
             # One sibling's ledger write must not skip the healthy ones; the
@@ -404,14 +431,24 @@ def record_unpublished_siblings(c, record, handled):
 
 class ReplayBudget:
     """Bounds the terminal-failure replays one tick may run, so a backlog
-    degrades to slower catch-up instead of a tick that never reaches save."""
-    def __init__(self, count=25, seconds=240.0, clock=time.monotonic):
-        self.count, self.clock = count, clock
+    degrades to slower catch-up instead of a tick that never reaches save.
+
+    A run whose replay did not settle it (a sibling result not yet readable)
+    is stamped and not retried for `retry_seconds`, so such runs cannot
+    monopolize the budget and starve the runs behind them."""
+    def __init__(self, count=25, seconds=240.0, clock=time.monotonic, retry_seconds=900.0, wall=time.time):
+        self.count, self.clock, self.wall, self.retry = count, clock, wall, retry_seconds
         self.deadline = clock() + seconds
 
-    def take(self):
+    def take(self, record=None):
         if self.count <= 0 or self.clock() >= self.deadline:
             return False
+        if record is not None:
+            now = self.wall()
+            last = record.get('replay_attempted')
+            if isinstance(last, (int, float)) and 0 <= now - last < self.retry:
+                return False
+            record['replay_attempted'] = now
         self.count -= 1
         return True
 
@@ -434,7 +471,7 @@ def harvest(c, q, item, dry=False):
             # retained FAILED outcomes through the ledger's idempotent event chain.
             budget = getattr(c, 'REPLAY_BUDGET', None)
             if (not dry and record['state'] == 'failed' and not replay_settled(record)
-                    and (budget is None or budget.take())):
+                    and (budget is None or budget.take(record))):
                 handled = set()
                 for result in record.get('verdicts', []):
                     if (result.get('verdict') != 'FAILED'
@@ -484,8 +521,16 @@ def harvest(c, q, item, dry=False):
                 break
             expected = json.loads((c.STATE / 'repair/inbox' / (job_id + '.json')).read_text())
             try:
-                require_canonical_delivery(c.STATE.parent, expected)
+                require_canonical_delivery(c.STATE.parent, expected, written_back=True,
+                                           retained=lambda: finding_inbox(c).publication.retained())
             except ValueError as exc:
+                if 'canonical delivery state unavailable' in str(exc):
+                    # An unreadable triage row leaves ownership unproven, not
+                    # lost: unlike a confirmed mismatch this can pass on a later
+                    # tick, so keep the run retryable instead of stranding the
+                    # retained verified result in a terminal state. Publish
+                    # nothing from this tick.
+                    break
                 if not dry:
                     record.update(state='stale', error=str(exc))
                     item['state'] = 'done'
@@ -587,6 +632,83 @@ def harvest(c, q, item, dry=False):
     return messages
 
 
+def review_start_limit(c, now=None):
+    """review_started events in the trailing 72 h, times four hours of capacity."""
+    import datetime as dt
+    now = now or dt.datetime.now(dt.timezone.utc)
+    cutoff = now - dt.timedelta(hours=BACKLOG_WINDOW_HOURS)
+    started = 0
+    try:
+        lines = c.EVENTS.read_text().splitlines()
+    except OSError:
+        return 0
+    for line in lines:
+        if '"review_started"' not in line:
+            continue
+        try:
+            row = json.loads(line)
+            at = dt.datetime.fromisoformat(str(row['at']).replace('Z', '+00:00'))
+        except (ValueError, KeyError, TypeError):
+            continue
+        if row.get('event') == 'review_started' and at.tzinfo and cutoff <= at <= now:
+            started += 1
+    return started * BACKLOG_HOURS_OF_CAPACITY // BACKLOG_WINDOW_HOURS
+
+
+def refresh_fix_pr_backlog(c, q):
+    """Write state/repair/fix-pr-backlog.json once per tick, before any publish.
+
+    GitHub determines which PRs are open. Queue records identify legacy retry
+    branches whose names alone cannot distinguish backfill from ordinary work. A
+    failed read leaves the previous file for the drain and holds creation for
+    the rest of this tick.
+    """
+    import datetime as dt
+    reset_fix_pr_backlog()
+    try:
+        prs = c.gh_json(['pr', 'list', '--repo', c.REPO, '--state', 'open', '--limit', '1000',
+                         '--json', 'headRefName'])
+        # Older backfill retries used the same branch prefix as ordinary retries.
+        legacy_backfill = {
+            'crq/fix-' + run
+            for item in q.get('items', [])
+            if str(item.get('id', '')).startswith(BACKFILL_ITEM)
+            for run in (item.get('repair_runs') or {})
+            if run.startswith('revalidated-')
+        }
+        open_branches = (str(pr.get('headRefName', '')) for pr in prs)
+        open_count = sum(branch.startswith(BACKFILL_BRANCH) or branch in legacy_backfill
+                         for branch in open_branches)
+        limit = review_start_limit(c)
+        atomic(c.STATE / 'repair' / 'fix-pr-backlog.json',
+               {'at': dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+                'open': open_count, 'limit': limit})
+    except Exception:
+        return None
+    TICK_BACKLOG.update(open=open_count, limit=limit)
+    return TICK_BACKLOG
+
+
+def reset_fix_pr_backlog():
+    """Forget the count: creation holds until this tick's refresh reads it."""
+    TICK_BACKLOG.update(open=None, limit=None)
+
+
+def backfill_repair_present(q):
+    """True when a backfill item carries repair runs: only then can this tick
+    publish a backfill fix PR or the drain have a backfill group to budget."""
+    return any(str(item.get('id', '')).startswith(BACKFILL_ITEM) and item.get('repair_runs')
+               for item in q.get('items', []))
+
+
+def backfill_slot_free(item):
+    """Hard cap: a backfill fix PR may be created only while open < limit this tick."""
+    if not str(item.get('id', '')).startswith(BACKFILL_ITEM):
+        return True
+    open_count, limit = TICK_BACKLOG['open'], TICK_BACKLOG['limit']
+    return open_count is not None and limit is not None and open_count < limit
+
+
 def publish(c, q, item, run, record, fixed):
     journal = c.STATE / 'repair' / record['jobs'][0] / 'publication.json'
     if journal.exists():
@@ -652,7 +774,12 @@ def publish(c, q, item, run, record, fixed):
                 raise ValueError('PR moved during publication; retry on fresh head')
             remote_branch = record['branch']
         else:
-            remote_branch = 'crq/fix-' + run
+            # The item's backfill status, not the run id, picks the prefix: a
+            # prepared retry (revalidated- run) on a backfill item must keep
+            # the counted backfill prefix or its PR escapes the cap on later
+            # ticks, while ordinary fix PRs stay outside it.
+            prefix = BACKFILL_BRANCH if str(item.get('id', '')).startswith(BACKFILL_ITEM) else 'crq/fix-'
+            remote_branch = prefix + run
         publication = {'head': head, 'target': target, 'branch': remote_branch,
                        'commits': translated, 'open_pr': bool(info), 'at': c.iso()}
         journal = c.STATE / 'repair' / record['jobs'][0] / 'publication.json'
@@ -688,6 +815,13 @@ def recover_publication(c, q, item, run, record, publication):
         if info['headRefOid'] != publication['target']:
             record.update(state='stale', error='head moved after prepared publication; needs new review')
             return
+        if remote_head == head:
+            # The earlier ls-remote read says the prepared head is published
+            # but the open PR, read later, is still at the journaled target:
+            # the branch was reset (or the PR view lags our own push) in
+            # between. Finalizing would record commits as published that are
+            # not on the branch, so refuse and let a later tick re-read both.
+            raise ValueError('remote branch read is stale against the open PR head')
     else:
         prs = c.gh_json(['pr', 'list', '--repo', c.REPO, '--head', branch, '--state', 'all', '--json', 'number,url,state,headRefOid'])
         if prs:
@@ -699,17 +833,25 @@ def recover_publication(c, q, item, run, record, publication):
         raise ValueError('existing fix branch differs from prepared publication')
     if remote_head != head:
         # Immutable publication SHA survives retries via refs/crq/publication.
-        # Lease the update on the tip observed above and require it to
+        # Lease the update on the tip recovery verified and require it to
         # fast-forward from that exact SHA, so a maintainer reset to an
-        # ancestor cannot be silently resurrected by this push.
-        if remote_head and not c.is_ancestor(remote_head, head):
-            raise ValueError('publication would not fast-forward the observed remote head')
-        c.git('push', 'origin', '--force-with-lease=refs/heads/' + branch + ':' + (remote_head or ''),
+        # ancestor cannot be silently resurrected by this push. For an open
+        # PR the PR head was just verified to equal the journaled target, so
+        # lease on that target: the ls-remote read above may already be
+        # stale after a reset, and leasing it would let this push restore
+        # commits the maintainer removed.
+        expected = publication['target'] if publication['open_pr'] else (remote_head or '')
+        if expected and not c.is_ancestor(expected, head):
+            raise ValueError('publication would not fast-forward the checked remote head')
+        c.git('push', 'origin', '--force-with-lease=refs/heads/' + branch + ':' + expected,
               head + ':refs/heads/' + branch)
     finalize_publication(c, q, item, run, record, publication)
 
 
 def finalize_publication(c, q, item, run, record, publication):
+    missing = object()
+    before = (record.get('publication', missing), record.get('published_commits', missing),
+              list(q.get('repair_own_commits', [])), 'repair_own_commits' in q)
     record['publication'] = publication
     translated, head, branch = publication['commits'], publication['head'], publication['branch']
     owned = q.setdefault('repair_own_commits', [])
@@ -719,7 +861,7 @@ def finalize_publication(c, q, item, run, record, publication):
         item['last_push'] = {'sha': head, 'shas': translated, 'at': c.iso()}
         record['fix_pr'] = {'number': item['pr'], 'url': 'https://github.com/' + c.REPO + '/pull/' + str(item['pr'])}
     else:
-        prs = c.gh_json(['pr', 'list', '--repo', c.REPO, '--head', branch, '--state', 'all', '--json', 'number,url,state'])
+        prs = c.gh_json(['pr', 'list', '--repo', c.REPO, '--head', branch, '--state', 'all', '--json', 'number,url,state,headRefOid'])
         if not prs:
             # recover_publication reconciled the fix branch to the prepared
             # head and adopts any PR matching that head before calling here,
@@ -733,6 +875,20 @@ def finalize_publication(c, q, item, run, record, publication):
                               error='fix PR creation never completed after ' + str(PR_CREATE_ATTEMPTS)
                                     + ' attempts; reconcile the PR for ' + branch + ' manually')
                 return
+            if not backfill_slot_free(item):
+                # Held, not failed: nothing changes, no attempt is counted, and
+                # the publication is retried on a later tick. Undo the
+                # bookkeeping done above so the record reads as it did before.
+                for key, value in (('publication', before[0]), ('published_commits', before[1])):
+                    if value is missing:
+                        record.pop(key, None)
+                    else:
+                        record[key] = value
+                if before[3]:
+                    owned[:] = before[2]
+                else:
+                    q.pop('repair_own_commits', None)
+                return
             body = ['Verified CodeRabbit repairs from ' + run, '', '| finding | verdict | reason |', '|---|---|---|']
             for v in record['verdicts']:
                 body.append('| ' + v['job'] + ' | ' + v['verdict'] + ' | ' + v['reason'].replace('|', r'\|').replace('\n', ' ') + ' |')
@@ -743,11 +899,24 @@ def finalize_publication(c, q, item, run, record, publication):
             publication['pr_create_attempts'] = attempts + 1
             atomic(c.STATE / 'repair' / record['jobs'][0] / 'publication.json', publication)
             c.save_queue(q)
-            c.run(['gh', 'pr', 'create', '--repo', c.REPO, '--base', DEFAULT_BRANCH, '--head', branch,
-                   '--title', 'fix: Address CodeRabbit findings from ' + run, '--body-file', str(path)])
-            prs = c.gh_json(['pr', 'list', '--repo', c.REPO, '--head', branch, '--state', 'all', '--json', 'number,url,state'])
-        if len(prs) != 1:
-            raise ValueError('fix PR identity is ambiguous')
+            # Reserve the slot before creating: a create that lands but then
+            # times out still counts for the rest of the tick, and the next
+            # tick's refresh recounts from GitHub. backfill_slot_free above
+            # guarantees the count was read. Only a create gh reports as
+            # failed (non-zero exit) releases it.
+            reserved = str(item.get('id', '')).startswith(BACKFILL_ITEM)
+            if reserved:
+                TICK_BACKLOG['open'] += 1
+            try:
+                c.run(['gh', 'pr', 'create', '--repo', c.REPO, '--base', DEFAULT_BRANCH, '--head', branch,
+                       '--title', 'fix: Address CodeRabbit findings from ' + run, '--body-file', str(path)])
+            except RuntimeError:
+                if reserved and TICK_BACKLOG['open'] is not None:
+                    TICK_BACKLOG['open'] -= 1
+                raise
+            prs = c.gh_json(['pr', 'list', '--repo', c.REPO, '--head', branch, '--state', 'all', '--json', 'number,url,state,headRefOid'])
+        if len(prs) != 1 or prs[0]['headRefOid'] != head:
+            raise ValueError('fix PR identity or prepared head mismatch')
         pr = prs[0]
         record['fix_pr'] = pr
         if not any(i['pr'] == pr['number'] and i['kind'] == 'open' for i in q['items']):
@@ -826,9 +995,12 @@ def reconcile_current_fix(c, item):
     if item.get('remediation_state') == 'fixed':
         item['remediation_state'] = 'pending-merged-evidence'
     rid = item.get('receipt_id')
+    # A not_fixed marker suppresses its record only until the bounded recheck:
+    # a closed fix PR can reopen upstream and later merge, and this lane must
+    # observe that instead of trusting the marker forever.
     records = [r for r in item.get('repair_runs', {}).values()
                if r.get('receipt_id') == rid and r.get('state') == 'published'
-               and not r.get('not_fixed')]
+               and (not r.get('not_fixed') or closed_marker_due(r['not_fixed']))]
     if not rid or not records:
         return counts
     import hashlib
@@ -851,7 +1023,7 @@ def reconcile_current_fix(c, item):
                 or len(verdicts) != len(doc.get('findings', []))
                 or record.get('receipt_findings') != sorted(review_receipt.digest(f) for f in doc.get('findings', []))):
             continue
-        # Merged PR identity is immutable; only target ancestry needs refreshing.
+        # Merged PR identity is immutable. Recheck target ancestry and tree evidence.
         info = record.get('merged_fix')
         if not info:
             try:
@@ -863,9 +1035,13 @@ def reconcile_current_fix(c, item):
                 continue
         if (info.get('state') == 'CLOSED' or
                 info.get('state') == 'MERGED' and info.get('headRefOid') != publication.get('head')):
+            # Bounded marker, not terminal: 'at' schedules the next recheck,
+            # which sees a reopen and lets a later verified merge be credited.
             record['not_fixed'] = {'pr': pr['number'], 'state': info.get('state'),
-                                   'head': info.get('headRefOid'), 'reason': 'closed-or-head-mismatch'}
+                                   'head': info.get('headRefOid'), 'reason': 'closed-or-head-mismatch',
+                                   'at': c.iso()}
             continue
+        record.pop('not_fixed', None)  # Reopened or re-merged at head: marker is stale.
         if info.get('state') == 'MERGED' and info.get('number') == pr['number']:
             record['merged_fix'] = copy.deepcopy(info)
         selector = item['subject']['target_selector']
@@ -874,9 +1050,14 @@ def reconcile_current_fix(c, item):
         merge = (info.get('mergeCommit') or {}).get('oid')
         if (info.get('state') != 'MERGED' or info.get('number') != pr['number']
                 or info.get('baseRefName') != ref.removeprefix('origin/')
-                or info.get('headRefOid') != publication.get('head') or not merge
+                or not publication.get('head') or info.get('headRefOid') != publication['head'] or not merge
                 or not c.is_ancestor(merge, target)
                 or not c.is_ancestor(doc['capture']['target'], publication.get('target', ''))):
+            continue
+        try:
+            merge_head_evidence(c, record, info['headRefOid'], merge=merge)
+        except (OSError, RuntimeError, ValueError) as exc:
+            skipped(exc)
             continue
         evidence = dict(receipt_id=rid, subject=item['subject'], capture_digest=review_receipt.digest(doc['capture']),
                         findings=sorted(review_receipt.digest(f) for f in doc['findings']),
@@ -1140,17 +1321,23 @@ def extra_commits(c, published, actual_head):
     return commits, total
 
 
-def merge_head_evidence(c, record, actual_head):
+def merge_head_evidence(c, record, actual_head, *, merge=None):
     published = record.get('publication', {}).get('head')
     if not published:
         return None  # Preserve legacy reconciliation without a publication journal.
     evidence = {'published_head': published, 'actual_head': actual_head, 'source_blobs': {}}
-    if actual_head == published:
+    # The caller binds the forge merge commit to the promoted ref. Its tree
+    # is authoritative even for squash merges, where the PR head is not an
+    # ancestor. Still require lineage for the observed PR head itself.
+    comparison = merge if merge is not None else actual_head
+    if actual_head == published == comparison:
         return evidence
     fixed = [v['job'] for v in record.get('verdicts', []) if v['verdict'] == 'FIXED']
     if (not isinstance(actual_head, str) or not re.fullmatch(r'[0-9a-f]{40}', actual_head)
             or not fixed or not c.is_ancestor(published, actual_head)):
         raise ValueError('merged repair head is not a descendant of the published fix')
+    if not isinstance(comparison, str) or not re.fullmatch(r'[0-9a-f]{40}', comparison):
+        raise ValueError('merged repair commit unavailable; needs revalidation')
     commits = record.get('publication', {}).get('commits')
     if not isinstance(commits, list) or not commits:
         raise ValueError('published repair commits unavailable; needs revalidation')
@@ -1179,7 +1366,7 @@ def merge_head_evidence(c, record, actual_head):
         for index, path in enumerate(sorted(paths)):
             source_path({'path': path})
             before = repair_source_entry(c, published, path)
-            after = repair_source_entry(c, actual_head, path)
+            after = repair_source_entry(c, comparison, path)
             parent_entry = repair_source_entry(c, published_parent, path) if published_parent else None
             evidence['source_blobs'][path] = before[1] if before else None
             evidence['source_modes'][path] = before[0] if before else None
@@ -1214,10 +1401,19 @@ def merge_head_evidence(c, record, actual_head):
             if not (published_lines[0] or published_lines[1] or mode_changed):
                 raise ValueError('merged repair source changed; needs revalidation: ' + path)
             head_size, head_patch = head_change_patch(
-                c, tmp, 'head-' + str(index) + '.diff', published, actual_head, path)
+                c, tmp, 'head-' + str(index) + '.diff', published, comparison, path)
             total_bytes += head_size
             if head_size > MAX_CONTAINMENT_PATCH_BYTES or total_bytes > MAX_CONTAINMENT_TOTAL_BYTES:
                 raise ValueError('published repair change too large to verify; needs revalidation: ' + path)
+            if (published_lines[0] or published_lines[1]) and any(
+                    line.startswith('Binary files ') or line.startswith('GIT binary patch')
+                    for line in head_patch.splitlines()):
+                # A binary head diff has no text hunks, so the comparison
+                # below would see no changed locations: a head that replaced
+                # the published text with a blob while keeping the mode would
+                # look contained. When the published repair depended on text
+                # changes, refuse to call that containment.
+                raise ValueError('merged repair source changed; needs revalidation: ' + path)
             undone = change_undone(diff_changed_locations(published_patch),
                                    diff_changed_locations(head_patch))
             if undone or (mode_changed and after[0] != before[0]):
@@ -1435,7 +1631,9 @@ def reconcile_fix_prs(c, q):
             continue
         for run, record in item.get('repair_runs', {}).items():
             pr = record.get('fix_pr')
-            if not pr or record.get('fix_merged') or record.get('fix_closed'):
+            if not pr or record.get('fix_merged'):
+                continue
+            if record.get('fix_closed') and not closed_marker_due(record['fix_closed']):
                 continue
             stats['examined'] += 1
             try:
@@ -1446,10 +1644,13 @@ def reconcile_fix_prs(c, q):
                 continue
             pr['state'] = info['state']
             if info['state'] == 'CLOSED':
-                # Terminal marker: an abandoned fix PR must not cost one forge
-                # call per tick forever.
+                # Bounded marker, not terminal: an abandoned fix PR must not
+                # cost one forge call per tick forever, but a closed PR can
+                # reopen upstream, so closed_marker_due rechecks the marker
+                # once per CLOSED_FIX_RECHECK.
                 record['fix_closed'] = c.iso()
                 continue
+            record.pop('fix_closed', None)  # Reopened or merged: the closed marker expired.
             if info['state'] == 'MERGED':
                 merge = (info.get('mergeCommit') or {}).get('oid')
                 if not merge or not c.is_ancestor(merge, c.git('rev-parse', DEFAULT_REF)):
@@ -1467,7 +1668,7 @@ def reconcile_fix_prs(c, q):
                             record['publication'] = saved
                             proof = {'fixed_revalidation': evidence}
                         else:
-                            proof = merge_head_evidence(c, record, info.get('headRefOid'))
+                            proof = merge_head_evidence(c, record, info.get('headRefOid'), merge=merge)
                     elif canonical_fixed_events(c, record, info) != proof:
                         raise ValueError('canonical fixed finding changed before source feedback')
                 except Exception as exc:
