@@ -3672,6 +3672,345 @@
      {
       "escalate": false,
       "id": "a"
+     },
+     {
+      "escalate": false,
+      "id": "b"
+     }
+    ],
+    "plans": []
+   },
+   "context": {
+    "a": {
+     "message": "x",
+     "raises": "KeyError"
+    }
+   },
+   "expected": {
+    "report_json": "{\"total\": 2, \"judged\": 1, \"unjudged\": 1, \"counts\": {\"dismissed\": 1}, \"delivered\": 0, \"delivery_deferred\": 0, \"context_errors\": [{\"finding_id\": \"a\", \"type\": \"KeyError\", \"target\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}], \"stop_report\": {}, \"stopped\": null, \"dry_run\": false, \"judgment_candidates\": [], \"outcomes\": [{\"finding_id\": \"b\", \"action\": \"dismissed\", \"reason\": \"default\"}]}",
+    "trace": [
+     [
+      "context",
+      "a",
+      false
+     ],
+     [
+      "context",
+      "b",
+      false
+     ],
+     [
+      "context_error",
+      "b",
+      "ev0-b",
+      "null"
+     ],
+     [
+      "judge",
+      "b",
+      "{\"packed\": \"b\"}",
+      600,
+      false
+     ],
+     [
+      "triage",
+      "b",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "dismissed",
+      "crq-triage/judge",
+      "default",
+      "2026-11-26T00:00:00Z",
+      "{\"expected_previous_event_id\": \"ev0-b\", \"failure_class\": \"exhausted\"}"
+     ]
+    ]
+   },
+   "judge": {},
+   "name": "context-error-missing-previous",
+   "rows": [
+    {
+     "id": "a",
+     "kind": "pending",
+     "row_omit": [
+      "previous_event_id"
+     ]
+    },
+    {
+     "id": "b",
+     "kind": "pending"
+    }
+   ],
+   "rows_json": [
+    "{\"finding\": {\"id\": \"a\", \"severity\": \"major\", \"path\": \"src/a.py\", \"title\": \"T a\", \"body\": \"B a\", \"anchor_status\": \"verified\"}, \"status\": \"untriaged\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-a\"}",
+    "{\"finding\": {\"id\": \"b\", \"severity\": \"major\", \"path\": \"src/b.py\", \"title\": \"T b\", \"body\": \"B b\", \"anchor_status\": \"verified\"}, \"status\": \"untriaged\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-b\", \"previous_event_id\": \"ev0-b\"}"
+   ],
+   "ts_refuses": false
+  },
+  {
+   "boundary": {
+    "candidates": [
+     {
+      "escalate": false,
+      "id": "a"
+     },
+     {
+      "escalate": false,
+      "id": "b"
+     }
+    ],
+    "plans": [
+     {
+      "action": "needs-human",
+      "escalate": false,
+      "id": "m",
+      "kwargs_json": "{\"failure_class\": \"evidence\"}",
+      "reason": "finding has no repository path"
+     }
+    ]
+   },
+   "expected": {
+    "report_json": "{\"total\": 3, \"judged\": 1, \"unjudged\": 1, \"counts\": {\"needs-human\": 1, \"dismissed\": 1}, \"delivered\": 0, \"delivery_deferred\": 0, \"context_errors\": [], \"stop_report\": {}, \"stopped\": null, \"dry_run\": false, \"judgment_candidates\": [], \"outcomes\": [{\"finding_id\": \"m\", \"action\": \"needs-human\", \"reason\": \"finding has no repository path\"}, {\"finding_id\": \"b\", \"action\": \"dismissed\", \"reason\": \"default\"}]}",
+    "trace": [
+     [
+      "context",
+      "a",
+      false
+     ],
+     [
+      "context",
+      "b",
+      false
+     ],
+     [
+      "context_error",
+      "b",
+      "ev0-b",
+      "null"
+     ],
+     [
+      "judge",
+      "b",
+      "{\"packed\": \"b\"}",
+      600,
+      false
+     ],
+     [
+      "triage",
+      "m",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "needs-human",
+      "crq-triage/deterministic",
+      "finding has no repository path",
+      "2026-11-26T00:00:00Z",
+      "{\"expected_previous_event_id\": \"ev0-m\", \"failure_class\": \"evidence\"}"
+     ],
+     [
+      "triage",
+      "b",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "dismissed",
+      "crq-triage/judge",
+      "default",
+      "2026-11-26T00:00:00Z",
+      "{\"expected_previous_event_id\": \"ev0-b\", \"failure_class\": \"exhausted\"}"
+     ]
+    ]
+   },
+   "judge": {},
+   "name": "context-clear-missing-previous",
+   "rows": [
+    {
+     "id": "a",
+     "kind": "pending",
+     "row_omit": [
+      "previous_event_id"
+     ]
+    },
+    {
+     "id": "b",
+     "kind": "pending"
+    },
+    {
+     "id": "m",
+     "kind": "pathless"
+    }
+   ],
+   "rows_json": [
+    "{\"finding\": {\"id\": \"a\", \"severity\": \"major\", \"path\": \"src/a.py\", \"title\": \"T a\", \"body\": \"B a\", \"anchor_status\": \"verified\"}, \"status\": \"untriaged\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-a\"}",
+    "{\"finding\": {\"id\": \"b\", \"severity\": \"major\", \"path\": \"src/b.py\", \"title\": \"T b\", \"body\": \"B b\", \"anchor_status\": \"verified\"}, \"status\": \"untriaged\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-b\", \"previous_event_id\": \"ev0-b\"}",
+    "{\"finding\": {\"id\": \"m\", \"severity\": \"major\", \"path\": \"\", \"title\": \"T m\", \"body\": \"B m\", \"anchor_status\": \"verified\"}, \"status\": \"untriaged\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-m\", \"previous_event_id\": \"ev0-m\"}"
+   ],
+   "ts_refuses": false
+  },
+  {
+   "boundary": {
+    "candidates": [],
+    "plans": []
+   },
+   "deliver": {
+    "c1": {
+     "message": "ceiling",
+     "raises": "RepairRoundCeiling"
+    }
+   },
+   "expected": {
+    "raises": "KeyError",
+    "trace": [
+     [
+      "deliver",
+      "c1",
+      "transport",
+      "2026-11-26T00:00:00Z"
+     ]
+    ]
+   },
+   "judge": {},
+   "name": "delivery-ceiling-missing-previous",
+   "rows": [
+    {
+     "id": "c1",
+     "kind": "confirmed",
+     "row_omit": [
+      "previous_event_id"
+     ]
+    }
+   ],
+   "rows_json": [
+    "{\"finding\": {\"id\": \"c1\", \"severity\": \"major\", \"path\": \"src/c1.py\", \"title\": \"T c1\", \"body\": \"B c1\", \"anchor_status\": \"verified\"}, \"status\": \"confirmed\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-c1\", \"target_current\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}"
+   ],
+   "ts_refuses": false
+  },
+  {
+   "boundary": {
+    "candidates": [
+     {
+      "escalate": false,
+      "id": "a"
+     }
+    ],
+    "plans": []
+   },
+   "context_error": {
+    "a": {
+     "clear": {
+      "corrupt": {
+       "id": "c2",
+       "raises": "JSONDecodeError",
+       "raw": "{not json"
+      }
+     }
+    }
+   },
+   "expected": {
+    "raises": "JSONDecodeError",
+    "trace": [
+     [
+      "context",
+      "a",
+      false
+     ],
+     [
+      "context_error",
+      "a",
+      "ev0-a",
+      "null"
+     ],
+     [
+      "judge",
+      "a",
+      "{\"packed\": \"a\"}",
+      600,
+      false
+     ],
+     [
+      "triage",
+      "a",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "dismissed",
+      "crq-triage/judge",
+      "default",
+      "2026-11-26T00:00:00Z",
+      "{\"expected_previous_event_id\": \"ev0-a\", \"failure_class\": \"exhausted\"}"
+     ],
+     [
+      "deliver",
+      "c1",
+      "transport",
+      "2026-11-26T00:00:00Z"
+     ]
+    ]
+   },
+   "judge": {},
+   "name": "delivery-later-file-unreadable",
+   "rows": [
+    {
+     "id": "a",
+     "kind": "pending"
+    },
+    {
+     "id": "c1",
+     "kind": "confirmed"
+    },
+    {
+     "id": "c2",
+     "kind": "confirmed"
+    }
+   ],
+   "rows_json": [
+    "{\"finding\": {\"id\": \"a\", \"severity\": \"major\", \"path\": \"src/a.py\", \"title\": \"T a\", \"body\": \"B a\", \"anchor_status\": \"verified\"}, \"status\": \"untriaged\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-a\", \"previous_event_id\": \"ev0-a\"}",
+    "{\"finding\": {\"id\": \"c1\", \"severity\": \"major\", \"path\": \"src/c1.py\", \"title\": \"T c1\", \"body\": \"B c1\", \"anchor_status\": \"verified\"}, \"status\": \"confirmed\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-c1\", \"previous_event_id\": \"ev0-c1\", \"target_current\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+    "{\"finding\": {\"id\": \"c2\", \"severity\": \"major\", \"path\": \"src/c2.py\", \"title\": \"T c2\", \"body\": \"B c2\", \"anchor_status\": \"verified\"}, \"status\": \"confirmed\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-c2\", \"previous_event_id\": \"ev0-c2\", \"target_current\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}"
+   ],
+   "ts_refuses": false
+  },
+  {
+   "boundary": {
+    "candidates": [],
+    "plans": []
+   },
+   "deliver": {
+    "c1": {
+     "corrupt": {
+      "field": "status",
+      "id": "c2",
+      "value": "stale"
+     }
+    }
+   },
+   "expected": {
+    "report_json": "{\"total\": 2, \"judged\": 0, \"unjudged\": 0, \"counts\": {}, \"delivered\": 1, \"delivery_deferred\": 0, \"context_errors\": [], \"stop_report\": {}, \"stopped\": null, \"dry_run\": false, \"judgment_candidates\": [], \"outcomes\": []}",
+    "trace": [
+     [
+      "deliver",
+      "c1",
+      "transport",
+      "2026-11-26T00:00:00Z"
+     ]
+    ]
+   },
+   "judge": {},
+   "name": "delivery-later-file-mutated-by-delivery",
+   "rows": [
+    {
+     "id": "c1",
+     "kind": "confirmed"
+    },
+    {
+     "id": "c2",
+     "kind": "confirmed"
+    }
+   ],
+   "rows_json": [
+    "{\"finding\": {\"id\": \"c1\", \"severity\": \"major\", \"path\": \"src/c1.py\", \"title\": \"T c1\", \"body\": \"B c1\", \"anchor_status\": \"verified\"}, \"status\": \"confirmed\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-c1\", \"previous_event_id\": \"ev0-c1\", \"target_current\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+    "{\"finding\": {\"id\": \"c2\", \"severity\": \"major\", \"path\": \"src/c2.py\", \"title\": \"T c2\", \"body\": \"B c2\", \"anchor_status\": \"verified\"}, \"status\": \"confirmed\", \"target\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"review_id\": \"rv-c2\", \"previous_event_id\": \"ev0-c2\", \"target_current\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}"
+   ],
+   "ts_refuses": false
+  },
+  {
+   "boundary": {
+    "candidates": [
+     {
+      "escalate": false,
+      "id": "a"
      }
     ],
     "plans": []

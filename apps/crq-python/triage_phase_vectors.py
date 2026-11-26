@@ -140,20 +140,27 @@ class FakeInbox:
         script = self._script("context_error", fid)
         key = "clear" if error is None else "set"
         entry = script.get(key, {})
-        corrupt = entry.get("corrupt")
-        if corrupt:
-            # Damage a re-read row after the head loaded it: only the delivery loop sees it.
-            damaged = self.store[corrupt["id"]]
-            if corrupt.get("delete"):
-                damaged.pop(corrupt["field"], None)
-            else:
-                damaged[corrupt["field"]] = corrupt["value"]
-            (self.root / "triage" / (corrupt["id"] + ".json")).write_text(dump(damaged), encoding="utf-8")
+        self.corrupt(entry.get("corrupt"))
         if "raises" in entry:
             raise EXCEPTIONS[entry["raises"]](entry.get("message", ""))
         if "result" in entry:
             return entry["result"]
         return True
+
+    def corrupt(self, corrupt) -> None:
+        """Damage a row file after the head loaded it: only the delivery loop re-reads it."""
+        if not corrupt:
+            return
+        path = self.root / "triage" / (corrupt["id"] + ".json")
+        if "raw" in corrupt:
+            path.write_text(corrupt["raw"], encoding="utf-8")
+            return
+        damaged = self.store[corrupt["id"]]
+        if corrupt.get("delete"):
+            damaged.pop(corrupt["field"], None)
+        else:
+            damaged[corrupt["field"]] = corrupt["value"]
+        path.write_text(dump(damaged), encoding="utf-8")
 
     def triage(self, fid, repo, tip, action, actor, reason, at, **kw):
         self.trace.append(["triage", fid, tip, action, actor, reason, at, dump(kw)])
@@ -181,6 +188,7 @@ class FakeInbox:
     def deliver(self, fid, transport, at):
         self.trace.append(["deliver", fid, transport, at])
         entry = self._script("deliver", fid)
+        self.corrupt(entry.get("corrupt"))
         if "raises" in entry:
             raise EXCEPTIONS[entry["raises"]](entry.get("message", ""))
         return {"receipt": fid}
@@ -232,6 +240,8 @@ def build_row(spec: dict, index: int):
     if kind == "stale":
         row["target_current"] = OTHER
     row.update(spec.get("row", {}))
+    for key in spec.get("row_omit", []):
+        row.pop(key, None)
     reviews = [{"id": "rv-" + fid, "occurred_at": "2026-01-01T00:00:%02dZ" % index}]
     if kind in ("escalation", "investigate"):
         evidence = {"reason": "missing source context"} if kind == "investigate" else {}
@@ -455,6 +465,17 @@ def cases() -> list[dict]:
                  context_error={"a": {"clear": {"corrupt": {"id": "c1", "field": "finding", **spec_}}}}))
     add(case("delivery-malformed-finding-ineligible-skipped", [R("a"), R("f1", "fixed"), R("s1", "stale")],
              context_error={"a": {"clear": {"corrupt": {"id": "f1", "field": "finding", "value": None}}}}))
+    # Python evaluates row['previous_event_id'] inside the try: a missing key is caught.
+    add(case("context-error-missing-previous", [R("a", row_omit=["previous_event_id"]), R("b")],
+             context={"a": {"raises": "KeyError", "message": "x"}}))
+    add(case("context-clear-missing-previous", [R("a", row_omit=["previous_event_id"]), R("b"), R("m", "pathless")]))
+    add(case("delivery-ceiling-missing-previous", [R("c1", "confirmed", row_omit=["previous_event_id"])],
+             deliver={"c1": {"raises": "RepairRoundCeiling", "message": "ceiling"}}))
+    # The delivery loop reads each file at its own turn, not all up front.
+    add(case("delivery-later-file-unreadable", [R("a"), R("c1", "confirmed"), R("c2", "confirmed")],
+             context_error={"a": {"clear": {"corrupt": {"id": "c2", "raw": "{not json", "raises": "JSONDecodeError"}}}}))
+    add(case("delivery-later-file-mutated-by-delivery", [R("c1", "confirmed"), R("c2", "confirmed")],
+             deliver={"c1": {"corrupt": {"id": "c2", "field": "status", "value": "stale"}}}))
     add(case("delivery-malformed-status-missing", [R("a"), R("c1", "confirmed")],
              context_error={"a": {"clear": {"corrupt": {"id": "c1", "field": "status", "delete": True}}}}))
     context_failures = (

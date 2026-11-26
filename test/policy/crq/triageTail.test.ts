@@ -60,7 +60,10 @@ interface PhaseCase {
   context?: Record<string, { advance?: number; raises?: string; message?: string }>;
   context_error?: Script;
   triage?: Script;
-  deliver?: Record<string, { raises?: string; message?: string; injected_form?: boolean }>;
+  deliver?: Record<
+    string,
+    { raises?: string; message?: string; injected_form?: boolean; corrupt?: unknown }
+  >;
   boundary: {
     candidates: Array<{ id: string; escalate: boolean }>;
     plans: Array<{
@@ -184,6 +187,7 @@ function reportToPython(report: TriageTailReport): string {
 async function replay(item: PhaseCase): Promise<{ trace: unknown[][]; report?: string }> {
   const trace: unknown[][] = [];
   const store = new Map<string, Record<string, unknown>>();
+  const unreadable = new Map<string, string>();
   const loaded = new Map<string, JsonObject>();
   for (const text of item.rows_json) {
     const plain = JSON.parse(text) as { finding: { id: string } };
@@ -199,19 +203,31 @@ async function replay(item: PhaseCase): Promise<{ trace: unknown[][]; report?: s
   const triageCalls = (fid: string): number =>
     trace.filter((entry) => entry[0] === 'triage' && entry[1] === fid).length;
 
+  /** Damage a row file after the head loaded it: only the delivery loop re-reads it. */
+  const applyCorrupt = (spec: unknown): void => {
+    if (spec === undefined) return;
+    const corrupt = spec as {
+      id: string;
+      field?: string;
+      delete?: boolean;
+      value?: unknown;
+      raw?: string;
+      raises?: string;
+    };
+    if (corrupt.raw !== undefined) {
+      unreadable.set(corrupt.id, corrupt.raises ?? 'JSONDecodeError');
+      return;
+    }
+    const damaged = store.get(corrupt.id) as Record<string, unknown>;
+    if (corrupt.delete === true) delete damaged[corrupt.field as string];
+    else damaged[corrupt.field as string] = corrupt.value;
+  };
+
   const inbox: TriageTailInbox<string> = {
     contextError(fid, previous, error) {
       trace.push(['context_error', fid, toPlainJson(previous), pyDump(error)]);
       const entry = item.context_error?.[fid]?.[error === null ? 'clear' : 'set'] ?? {};
-      const corrupt = entry.corrupt as
-        | { id: string; field: string; delete?: boolean; value?: unknown }
-        | undefined;
-      if (corrupt !== undefined) {
-        // Damage a row the head already loaded: only the delivery re-read sees it.
-        const damaged = store.get(corrupt.id) as Record<string, unknown>;
-        if (corrupt.delete === true) delete damaged[corrupt.field];
-        else damaged[corrupt.field] = corrupt.value;
-      }
+      applyCorrupt(entry.corrupt);
       if (typeof entry.raises === 'string') raise(entry.raises, String(entry.message ?? ''));
       return Promise.resolve('result' in entry ? (entry.result as boolean) : true);
     },
@@ -249,15 +265,20 @@ async function replay(item: PhaseCase): Promise<{ trace: unknown[][]; report?: s
       if (entry.no_payload === true) return Promise.resolve(new JsonObject([]));
       return Promise.resolve(toJson({ payload: { action: recorded } }) as JsonObject);
     },
-    readTriageRows() {
+    // The listing is taken once; each file is read at its own turn, as Python does.
+    async *readTriageRows() {
       const names = [...store.keys()].sort((a, b) => (`${a}.json` < `${b}.json` ? -1 : 1));
-      return Promise.resolve(
-        names.map((name) => parseJsonValue(JSON.stringify(store.get(name))) as JsonObject),
-      );
+      for (const name of names) {
+        const broken = unreadable.get(name);
+        if (broken !== undefined) throw new TriageInjectedFailure(broken, 'unreadable row file');
+        yield parseJsonValue(JSON.stringify(store.get(name))) as JsonObject;
+      }
+      await Promise.resolve();
     },
     deliver(fid, transport, at) {
       trace.push(['deliver', fid, transport, at]);
       const entry = item.deliver?.[fid] ?? {};
+      applyCorrupt(entry.corrupt);
       if (typeof entry.raises === 'string') {
         if (entry.injected_form === true) {
           throw new TriageInjectedFailure(entry.raises, String(entry.message ?? ''));

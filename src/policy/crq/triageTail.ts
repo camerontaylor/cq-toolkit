@@ -205,8 +205,13 @@ export interface TriageTailInbox<TTransport> {
     readonly kwargs: JsonObject;
     readonly expectedPreviousEventId: JsonValue;
   }): Promise<JsonObject | null>;
-  /** `ledger.loads` of `sorted((inbox.root / 'triage').glob('*.json'))`. */
-  readTriageRows(): Promise<readonly JsonObject[]>;
+  /**
+   * `ledger.loads(path.read_bytes())` for each of `sorted((inbox.root / 'triage').glob('*.json'))`.
+   * The sorted listing is taken once, but each file is read only when the
+   * delivery loop reaches it, so earlier deliveries run (and may rewrite later
+   * files) before a later unreadable file throws.
+   */
+  readTriageRows(): AsyncIterable<JsonObject>;
   /** `inbox.deliver(fid, transport, at)`. */
   deliver(findingId: string, transport: TTransport, at: string): Promise<unknown>;
 }
@@ -333,9 +338,12 @@ export async function triagePhaseTail<TTransport>(
         type: [...context.errorType].slice(0, 80).join(''),
         target: tip,
       });
-      if (!dryRun) {
+      // Python evaluates `row['previous_event_id']` inside the try: a missing
+      // key is the caught KeyError, so the call is never made.
+      const previous = row.get('previous_event_id');
+      if (!dryRun && previous !== undefined) {
         try {
-          await inbox.contextError(id, rowKey(row, 'previous_event_id'), error);
+          await inbox.contextError(id, previous, error);
         } catch (failure) {
           if (!isContextErrorWriteFailure(failure)) throw failure;
         }
@@ -343,8 +351,10 @@ export async function triagePhaseTail<TTransport>(
       continue;
     }
     if (!dryRun) {
+      const previous = row.get('previous_event_id');
+      if (previous === undefined) continue;
       try {
-        if (!(await inbox.contextError(id, rowKey(row, 'previous_event_id'), null))) continue;
+        if (!(await inbox.contextError(id, previous, null))) continue;
       } catch (failure) {
         if (isContextErrorWriteFailure(failure)) continue;
         throw failure;
@@ -483,7 +493,7 @@ export async function triagePhaseTail<TTransport>(
   let delivered = 0;
   let deliveryDeferred = 0;
   if (!dryRun) {
-    for (const row of await inbox.readTriageRows()) {
+    for await (const row of inbox.readTriageRows()) {
       if (
         rowKey(row, 'status') === 'confirmed' &&
         row.get('target_current') === tip &&
