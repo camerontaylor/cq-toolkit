@@ -23,6 +23,10 @@
  * non-dict truthy `measure` is an `AttributeError`; `item["id"]` is read only
  * after the projection commits are written, so an item without an id leaves the
  * (unreferenced) projection objects behind, as Python does.
+ *
+ * Deviation: a `bool` `generation` is not modelled. Python accepts it as an int
+ * and writes the ref component `True`/`False`; `GitSubjectRepository.pin`
+ * rejects it with an `IntegrityError`. The oracle excludes those scenarios.
  */
 import { JsonNumber } from '../../policy/crq/jsonValue.js';
 import { synthPaths, type MeasureGit } from '../../queue-runner/measureMerged.js';

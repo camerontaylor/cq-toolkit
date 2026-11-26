@@ -11,7 +11,7 @@ returned subject, and whether the item record was left unchanged. Nothing
 touches a real clone, queue, network, provider or host service; ``gh`` is not
 reached.
 
-The TypeScript test (``test/adapters/crq/buildSynthetic.test.ts``) replays the
+The TypeScript test (``test/adapters/crq/buildSyntheticOracle.test.ts``) replays the
 same history ops into its own temp repositories and compares all of that,
 including the exact object ids.
 
