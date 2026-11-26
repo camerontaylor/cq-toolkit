@@ -2,7 +2,7 @@
 // repository once, on demand, under its state (review_transport.provision),
 // reusing the primary origin's transport; it never joins the `repos` list.
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readdir, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
@@ -124,5 +124,17 @@ describe('manual review clones', () => {
     await expect(stat(join(root, 'state', 'review-repos'))).rejects.toMatchObject({
       code: 'ENOENT',
     });
+  });
+});
+
+describe('retained review records', () => {
+  test('corrupt or non-object retained files are skipped, not fatal (retained_loads)', async () => {
+    const { root, effects } = await fixture();
+    const pending = join(root, 'state', 'record-outbox', 'pending');
+    await mkdir(pending, { recursive: true });
+    await writeFile(join(pending, 'a-truncated.json'), '{"event_type":"review","id":');
+    await writeFile(join(pending, 'b-badutf8.json'), Buffer.from([0x7b, 0xff, 0xfe, 0x7d]));
+    await writeFile(join(pending, 'c-array.json'), '[1]');
+    expect(await effects.retainedRecords()).toEqual([]);
   });
 });

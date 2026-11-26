@@ -177,7 +177,12 @@ export async function completeLocalReview(
     ['wait_reason', null],
     ['attempts', nextAttempts],
   ]);
-  updated = withoutObjectKey(withoutObjectKey(updated, 'not_before'), 'reconcile_failures');
+  // A published receipt re-verifies, so an earlier receipt-unavailable mark is stale
+  // (Python local_review_runtime.complete, 0cf499194).
+  updated = withoutObjectKey(
+    withoutObjectKey(withoutObjectKey(updated, 'not_before'), 'receipt_unavailable'),
+    'reconcile_failures',
+  );
   const items = queue.get('items');
   if (!Array.isArray(items)) throw new Error('missing queue items');
   const index = items.indexOf(item);
