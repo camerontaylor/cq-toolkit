@@ -15,11 +15,12 @@ modified and no repository, queue, state, network, model, signer or host
 service is touched.
 
 Each case also records a ``boundary``: the head's products the tail consumes
-(mechanical plans and the sorted judgment candidates), measured by a probe run
-of the same case with a uniform judge. The TS test feeds the boundary to the
-tail and compares the trace and report to the real run. Boundary plan kwargs
-omit ``failure_class`` for ``superseded``/``duplicate`` plans, which the head
-never sets (``inbox.triage`` call kwargs show the default applied).
+(mechanical plans and the full sorted judgment candidate list), captured from
+the real run, under the case's own ``maximum`` and deadline, by a trace hook
+that snapshots ``plans`` and ``candidates`` at the head/tail boundary line
+(before the candidate loop). The TS test feeds the boundary to the tail and
+compares the trace and report to the same run. Boundary plan kwargs are the
+head's own (``failure_class`` is set only where the head sets it).
 
 Regenerate with ``python3 triage_phase_vectors.py --write`` and verify with
 ``--check``. Output is deterministic: sorted keys, ``ensure_ascii``.
@@ -28,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import inspect
 import json
 import subprocess
 import sys
@@ -114,13 +116,12 @@ class FakeRepo:
 
 
 class FakeInbox:
-    def __init__(self, root: Path, spec: dict, store: dict, reviews: list, trace: list, probe: bool) -> None:
+    def __init__(self, root: Path, spec: dict, store: dict, reviews: list, trace: list) -> None:
         self.root = root
         self.spec = spec
         self.store = store
         self.reviews = reviews
         self.trace = trace
-        self.probe = probe
         self.counter = 0
 
         class Publication:
@@ -133,7 +134,7 @@ class FakeInbox:
         pass
 
     def _script(self, table: str, fid: str):
-        return {} if self.probe else self.spec.get(table, {}).get(fid, {})
+        return self.spec.get(table, {}).get(fid, {})
 
     def context_error(self, fid, previous, error):
         self.trace.append(["context_error", fid, previous, dump(error)])
@@ -257,11 +258,50 @@ def build_row(spec: dict, index: int):
 # Execution
 # ---------------------------------------------------------------------------
 
-def uniform_judge_report():
-    return {"stop": "ok", "verdict": "invalid", "reason": "probe", "model": "probe"}
+def _boundary_line() -> int:
+    """The line of ``phase`` that begins the candidate loop (``judged = 0``)."""
+    lines, start = inspect.getsourcelines(triage.phase)
+    for offset, text in enumerate(lines):
+        if text.strip() == "judged = 0":
+            return start + offset
+    raise AssertionError("triage.phase no longer has the head/tail boundary line")
 
 
-def run_phase(spec: dict, *, probe: bool) -> dict:
+class BoundaryCapture:
+    """Snapshot ``plans`` and ``candidates`` as the real ``phase`` reaches the tail."""
+
+    def __init__(self) -> None:
+        self.boundary = None
+        self._line = _boundary_line()
+
+    def tracer(self, frame, event, _arg):
+        if event == "call" and frame.f_code is triage.phase.__code__:
+            return self._local
+        return None
+
+    def _local(self, frame, event, _arg):
+        if event == "line" and frame.f_lineno == self._line and self.boundary is None:
+            local = frame.f_locals
+            self.boundary = {
+                "candidates": [
+                    {"id": r["finding"]["id"], "escalate": bool(r.get("_escalate"))}
+                    for r in local["candidates"]
+                ],
+                "plans": [
+                    {
+                        "id": r["finding"]["id"],
+                        "action": action,
+                        "reason": reason,
+                        "kwargs_json": dump(kwargs),
+                        "escalate": bool(r.get("_escalate")),
+                    }
+                    for r, action, reason, kwargs in local["plans"]
+                ],
+            }
+        return self._local
+
+
+def run_phase(spec: dict) -> dict:
     clock = Clock()
     trace: list = []
     rows_spec = spec["rows"]
@@ -281,8 +321,8 @@ def run_phase(spec: dict, *, probe: bool) -> dict:
             for r in store.values()
             if r["finding"]["path"] and not r["finding"]["path"].startswith("gone/")
         }
-        inbox = FakeInbox(root, spec, store, reviews, trace, probe)
-        context_script = {} if probe else spec.get("context", {})
+        inbox = FakeInbox(root, spec, store, reviews, trace)
+        context_script = spec.get("context", {})
         judge_script = spec.get("judge", {})
 
         def fake_context(_repo, row, tip):
@@ -297,8 +337,6 @@ def run_phase(spec: dict, *, probe: bool) -> dict:
         def fake_judge(row, packed, remaining):
             fid = row["finding"]["id"]
             trace.append(["judge", fid, dump(packed), remaining, bool(row.get("_escalate"))])
-            if probe:
-                return uniform_judge_report()
             entry = judge_script.get(fid, {"report": {"stop": "ok", "verdict": "invalid", "reason": "default"}})
             clock.now += entry.get("advance", 0)
             if "raises" in entry:
@@ -310,10 +348,12 @@ def run_phase(spec: dict, *, probe: bool) -> dict:
 
         original_context, original_time = triage.context, triage.time
         triage.context, triage.time = fake_context, FakeTime
-        maximum = 1000 if probe else spec.get("maximum", 6)
-        seconds = 100000 if probe else spec.get("seconds", 600)
+        maximum = spec.get("maximum", 6)
+        seconds = spec.get("seconds", 600)
+        capture = BoundaryCapture()
         try:
             try:
+                sys.settrace(capture.tracer)
                 report = triage.phase(
                     inbox, repo, TIP, fake_judge, TRANSPORT, AT,
                     maximum=maximum, seconds=seconds, dry_run=spec.get("dry_run", False),
@@ -321,40 +361,15 @@ def run_phase(spec: dict, *, probe: bool) -> dict:
             except AssertionError:
                 raise
             except Exception as exc:  # noqa: BLE001 - the class name is the recorded fact
-                return {"trace": trace, "raises": type(exc).__name__}
+                return {"trace": trace, "raises": type(exc).__name__, "boundary": capture.boundary}
         finally:
+            sys.settrace(None)
             triage.context, triage.time = original_context, original_time
-    return {"trace": trace, "report_json": dump(report)}
-
-
-def boundary_of(spec: dict) -> dict:
-    """The head's products, measured by a probe run with a uniform judge."""
-    probe_spec = dict(spec, dry_run=False, maximum=1000)
-    result = run_phase(probe_spec, probe=True)
-    assert "raises" not in result, "probe must not raise"
-    candidates = [
-        {"id": e[1], "escalate": e[2]} for e in result["trace"] if e[0] == "context"
-    ]
-    plans = []
-    for e in result["trace"]:
-        if e[0] != "triage" or not e[4].endswith("/deterministic"):
-            continue
-        kw = json.loads(e[7])
-        kw.pop("expected_previous_event_id")
-        if e[3] in ("superseded", "duplicate"):
-            kw.pop("failure_class", None)
-        plans.append({
-            "id": e[1],
-            "action": e[3],
-            "reason": e[5],
-            "kwargs_json": dump(kw),
-            "escalate": "/escalation/" in e[4],
-        })
-    return {"candidates": candidates, "plans": plans}
+    return {"trace": trace, "report_json": dump(report), "boundary": capture.boundary}
 
 
 def run_python(spec: dict) -> dict:
-    return run_phase(spec, probe=False)
+    return run_phase(spec)
 
 
 # ---------------------------------------------------------------------------
@@ -465,12 +480,29 @@ def cases() -> list[dict]:
                  context_error={"a": {"clear": {"corrupt": {"id": "c1", "field": "finding", **spec_}}}}))
     add(case("delivery-malformed-finding-ineligible-skipped", [R("a"), R("f1", "fixed"), R("s1", "stale")],
              context_error={"a": {"clear": {"corrupt": {"id": "f1", "field": "finding", "value": None}}}}))
+    # The head itself honours the cap and the deadline, so the boundary must be measured under them.
+    add(case("head-cap-admission", [R("m", "pathless"), R("inv", "investigate"), R("p")], maximum=1))
+    add(case("head-deadline-keeps-deleted-candidate", [R("d", "deleted"), R("a")], seconds=0))
     # Python evaluates row['previous_event_id'] inside the try: a missing key is caught.
     add(case("context-error-missing-previous", [R("a", row_omit=["previous_event_id"]), R("b")],
              context={"a": {"raises": "KeyError", "message": "x"}}))
     add(case("context-clear-missing-previous", [R("a", row_omit=["previous_event_id"]), R("b"), R("m", "pathless")]))
     add(case("delivery-ceiling-missing-previous", [R("c1", "confirmed", row_omit=["previous_event_id"])],
              deliver={"c1": {"raises": "RepairRoundCeiling", "message": "ceiling"}}))
+    # ContextScanError is a RuntimeError: a delivery failure defers and later rows still deliver.
+    add(case("delivery-context-scan-error-defers", [R("c1", "confirmed"), R("c2", "confirmed")],
+             deliver={"c1": {"raises": "ContextScanError", "message": "policy unreadable"}}))
+    # A blank cause falls back to the cause's type name, `str`, for both signal forms.
+    for form in (False, True):
+        add(case("judge-context-scan-blank-cause" + ("-injected-form" if form else ""),
+                 [R("m", "pathless"), R("a"), R("b")],
+                 judge={"a": {"raises": "ContextScanError", "message": " \n\t ", "injected_form": form}}))
+    add(case("judge-reason-astral-and-non-ascii", [R("a")],
+             judge={"a": {"report": {"stop": "ok", "verdict": "invalid", "reason": "bad \U0001F600 caf\u00e9"}}}))
+    # `ledger.loads` accepts any JSON value; a non-object row fails at row['status'] after earlier deliveries.
+    for label, raw in (("null", "null"), ("list", "[]"), ("string", '"x"'), ("number", "5")):
+        add(case("delivery-later-file-not-object-" + label, [R("a"), R("c1", "confirmed"), R("c2", "confirmed")],
+                 context_error={"a": {"clear": {"corrupt": {"id": "c2", "raw": raw}}}}))
     # The delivery loop reads each file at its own turn, not all up front.
     add(case("delivery-later-file-unreadable", [R("a"), R("c1", "confirmed"), R("c2", "confirmed")],
              context_error={"a": {"clear": {"corrupt": {"id": "c2", "raw": "{not json", "raises": "JSONDecodeError"}}}}))
@@ -620,8 +652,10 @@ def build() -> dict:
             for fid, item in spec.get("judge", {}).items()
         }
         entry["rows_json"] = [dump(build_row(r, i)[0]) for i, r in enumerate(spec["rows"])]
-        entry["boundary"] = boundary_of(spec)
-        entry["expected"] = run_python(spec)
+        expected = run_python(spec)
+        # A case whose head raises never reaches the tail; its boundary stays null.
+        entry["boundary"] = expected.pop("boundary")
+        entry["expected"] = expected
         built.append(entry)
     names = [item["name"] for item in built]
     assert len(names) == len(set(names)), "case names must be unique"

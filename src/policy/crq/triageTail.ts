@@ -150,6 +150,8 @@ function isContextErrorWriteFailure(error: unknown): boolean {
 function isDeliveryFailure(error: unknown): boolean {
   return (
     isLedgerValueError(error) ||
+    // `ContextScanError` is a Python `RuntimeError`, whether dedicated or injected.
+    error instanceof ContextScanError ||
     injectedIn(error, [...OS_ERRORS, ...RUNTIME_ERRORS, ...VALUE_ERRORS])
   );
 }
@@ -211,7 +213,7 @@ export interface TriageTailInbox<TTransport> {
    * delivery loop reaches it, so earlier deliveries run (and may rewrite later
    * files) before a later unreadable file throws.
    */
-  readTriageRows(): AsyncIterable<JsonObject>;
+  readTriageRows(): AsyncIterable<JsonValue>;
   /** `inbox.deliver(fid, transport, at)`. */
   deliver(findingId: string, transport: TTransport, at: string): Promise<unknown>;
 }
@@ -401,7 +403,7 @@ export async function triagePhaseTail<TTransport>(
             'reason',
             failure instanceof ContextScanError
               ? failure.reason
-              : errorReason((failure as Error).message, 'ContextScanError'),
+              : errorReason((failure as Error).message, 'str'),
           ],
         ]);
         break;
@@ -494,6 +496,8 @@ export async function triagePhaseTail<TTransport>(
   let deliveryDeferred = 0;
   if (!dryRun) {
     for await (const row of inbox.readTriageRows()) {
+      // `ledger.loads` accepts any JSON value; `row['status']` on a non-object raises TypeError.
+      if (!(row instanceof JsonObject)) refuse('triage row is not an object (TypeError)');
       if (
         rowKey(row, 'status') === 'confirmed' &&
         row.get('target_current') === tip &&

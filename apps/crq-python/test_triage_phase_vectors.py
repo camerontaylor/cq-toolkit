@@ -32,9 +32,9 @@ class TriagePhaseVectorsTest(unittest.TestCase):
         self.assertTrue({"KeyError", "TypeError", "AttributeError", "RuntimeError"} <= raised)
         self.assertTrue(any(case["expected"].get("report_json") for case in cases))
 
-    def test_probe_never_raises(self) -> None:
-        for spec in emitter.cases():
-            self.assertNotIn("raises", emitter.run_phase(dict(spec, dry_run=False), probe=True), spec["name"])
+    def test_every_case_reaches_the_tail_boundary(self) -> None:
+        for case in emitter.build()["cases"]:
+            self.assertIsNotNone(case["boundary"], case["name"])
 
 
 if __name__ == "__main__":

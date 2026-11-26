@@ -103,8 +103,9 @@ function pyDump(value: JsonValue): string {
   if (value === null) return 'null';
   if (typeof value === 'boolean') return value ? 'true' : 'false';
   if (typeof value === 'string') {
+    // No `u` flag: match UTF-16 units so astral characters become surrogate pairs, as Python emits.
     return JSON.stringify(value).replace(
-      /[\u0080-￿]/gu,
+      /[\u0080-￿]/g,
       (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`,
     );
   }
@@ -187,7 +188,7 @@ function reportToPython(report: TriageTailReport): string {
 async function replay(item: PhaseCase): Promise<{ trace: unknown[][]; report?: string }> {
   const trace: unknown[][] = [];
   const store = new Map<string, Record<string, unknown>>();
-  const unreadable = new Map<string, string>();
+  const rawFiles = new Map<string, { text: string; raises: string | undefined }>();
   const loaded = new Map<string, JsonObject>();
   for (const text of item.rows_json) {
     const plain = JSON.parse(text) as { finding: { id: string } };
@@ -215,7 +216,7 @@ async function replay(item: PhaseCase): Promise<{ trace: unknown[][]; report?: s
       raises?: string;
     };
     if (corrupt.raw !== undefined) {
-      unreadable.set(corrupt.id, corrupt.raises ?? 'JSONDecodeError');
+      rawFiles.set(corrupt.id, { text: corrupt.raw, raises: corrupt.raises });
       return;
     }
     const damaged = store.get(corrupt.id) as Record<string, unknown>;
@@ -269,9 +270,12 @@ async function replay(item: PhaseCase): Promise<{ trace: unknown[][]; report?: s
     async *readTriageRows() {
       const names = [...store.keys()].sort((a, b) => (`${a}.json` < `${b}.json` ? -1 : 1));
       for (const name of names) {
-        const broken = unreadable.get(name);
-        if (broken !== undefined) throw new TriageInjectedFailure(broken, 'unreadable row file');
-        yield parseJsonValue(JSON.stringify(store.get(name))) as JsonObject;
+        const raw = rawFiles.get(name);
+        if (raw?.raises !== undefined)
+          throw new TriageInjectedFailure(raw.raises, 'unreadable row file');
+        yield raw === undefined
+          ? (parseJsonValue(JSON.stringify(store.get(name))) as JsonObject)
+          : parseJsonValue(raw.text);
       }
       await Promise.resolve();
     },
@@ -354,7 +358,17 @@ describe('triagePhaseTail against the Python oracle', () => {
     test(item.name, async () => {
       const expected = item.expected;
       if (item.ts_refuses) {
-        await expect(replay(item)).rejects.toBeInstanceOf(TriageTailRefusal);
+        const refused = await replay(item).then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+        expect(refused).toBeInstanceOf(TriageTailRefusal);
+        // The refusal differs from Python only by stopping early: every call made so far is
+        // Python's, in order, and the refusal follows a triage write.
+        const made = (refused as { trace?: unknown[][] }).trace ?? [];
+        expect(made.length).toBeGreaterThan(0);
+        expect(made.at(-1)?.[0]).toBe('triage');
+        expect(expected.trace.slice(0, made.length)).toEqual(made);
         return;
       }
       if (expected.raises !== undefined) {
