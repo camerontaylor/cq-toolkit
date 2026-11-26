@@ -18,6 +18,33 @@ import {
 } from './ledger.js';
 import { pythonJsonText, sha256Hex } from './pythonJson.js';
 
+/** A Python exception the real code lets escape (`AttributeError`, `KeyError`, `TypeError`). */
+export class PythonRetainedError extends Error {
+  constructor(
+    override readonly name: 'AttributeError' | 'KeyError' | 'TypeError',
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+/** Python `x[key]` on a loaded JSON value: a dict raises `KeyError`, anything else `TypeError`. */
+function pyIndex(value: JsonValue | undefined, key: string): JsonValue {
+  if (!(value instanceof JsonObject))
+    throw new PythonRetainedError('TypeError', 'not subscriptable');
+  const found = value.get(key);
+  if (found === undefined) throw new PythonRetainedError('KeyError', `'${key}'`);
+  return found;
+}
+
+/** Python iteration over a loaded JSON value: list items, str characters, dict keys. */
+function pyIterate(value: JsonValue): readonly JsonValue[] {
+  if (Array.isArray(value)) return value;
+  if (typeof value === 'string') return Array.from(value);
+  if (value instanceof JsonObject) return value.entries.map(([key]) => key);
+  throw new PythonRetainedError('TypeError', 'not iterable');
+}
+
 /** `review_ledger.REPORT_PRODUCERS`. */
 export const REPORT_PRODUCERS = ['manual', 'agent'] as const;
 /** `review_ledger.REPO`: the canonical repository spelling. */
@@ -297,19 +324,22 @@ export function importRecord(
     if (value === null) return { events: [], action: `refused:${reason}` };
     return { events: [value], action: `quarantined:${reason}` };
   }
+  // `next(v for v in existing if v.get("source_key") == value["source_key"] and
+  // v.get("event_type") == "review" and any(a["sha256"] == digest_hex for a in
+  // v["payload"]["artifacts"]))`: the same short-circuit order, and the same
+  // KeyError/TypeError on a retained record that was never schema-validated.
   const previous = existing.find((candidate) => {
+    if (candidate.get('source_key') !== value.get('source_key')) return false;
     if (candidate.get('event_type') !== 'review') return false;
-    const payload = candidate.get('payload');
-    if (!(payload instanceof JsonObject)) return false;
-    const artifacts = payload.get('artifacts');
-    return (
-      candidate.get('source_key') === value.get('source_key') &&
-      Array.isArray(artifacts) &&
-      artifacts.some((entry) => entry instanceof JsonObject && entry.get('sha256') === digestHex)
-    );
+    const artifacts = pyIndex(pyIndex(candidate, 'payload'), 'artifacts');
+    return pyIterate(artifacts).some((entry) => pyIndex(entry, 'sha256') === digestHex);
   });
   if (previous !== undefined) {
-    return { events: [], action: `duplicate:${String(previous.get('id'))}` };
+    // `"duplicate:" + previous["id"]` concatenates only a str.
+    const id = pyIndex(previous, 'id');
+    if (typeof id !== 'string')
+      throw new PythonRetainedError('TypeError', 'can only concatenate str');
+    return { events: [], action: `duplicate:${id}` };
   }
   const payload = value.get('payload');
   const supersedes = payload instanceof JsonObject ? payload.get('supersedes') : null;

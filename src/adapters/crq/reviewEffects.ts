@@ -12,18 +12,20 @@ import { appendFile, mkdir, mkdtemp, readFile, readdir, rename, rm, stat } from 
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { JsonNumber, JsonObject as ObjectValue } from '../../policy/crq/jsonValue.js';
-import type { JsonObject } from '../../policy/crq/jsonValue.js';
+import type { JsonObject, JsonValue } from '../../policy/crq/jsonValue.js';
 import { parseJsonValue } from '../../policy/crq/jsonValue.js';
 import {
   ledgerCanonicalBytes,
   ledgerLoads,
   ledgerValidate,
   LedgerIntegrityError,
+  LedgerJsonDecodeError,
+  LedgerUnicodeDecodeError,
 } from '../../policy/crq/ledger.js';
 import { pythonJsonText, sha256Hex } from '../../policy/crq/pythonJson.js';
 import { GitUnavailable, type GitFn } from '../../policy/crq/reviewHistory.js';
 import { ValueError } from '../../policy/crq/reviewAdmission.js';
-import { MAX_EVENT_BYTES } from '../../policy/crq/reviewRecord.js';
+import { MAX_EVENT_BYTES, PythonRetainedError } from '../../policy/crq/reviewRecord.js';
 import { MAX_RECEIPT_BYTES } from '../../policy/crq/queueReceipt.js';
 import type { ReviewCapabilityEffects } from '../../ops/crq/reviewCapability.js';
 import { atomicWrite } from './atomic.js';
@@ -77,6 +79,39 @@ function isoUtc(clock: Date): string {
 
 function isoNow(clock: () => Date): string {
   return isoUtc(clock());
+}
+
+/** Python `sorted()` over `str`: code point order, not UTF-16 unit order. */
+function compareCodePoints(left: string, right: string): number {
+  const a = Array.from(left);
+  const b = Array.from(right);
+  for (let i = 0; i < Math.min(a.length, b.length); i += 1) {
+    const x = a[i]!.codePointAt(0)!;
+    const y = b[i]!.codePointAt(0)!;
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  return a.length - b.length;
+}
+
+/** The `seen`-set identity of a loaded `id`: Python hashing, `True == 1`, unhashables raise. */
+function pythonSetKey(id: JsonValue): string {
+  if (id === null) return 'n';
+  if (typeof id === 'string') return `s${id}`;
+  if (typeof id === 'boolean') return `i${id ? 1 : 0}`;
+  if (id instanceof JsonNumber && id.integer !== null) return `i${id.integer}`;
+  throw new PythonRetainedError('TypeError', 'unhashable type');
+}
+
+/** `value["id"]`: a missing key is a `KeyError`, an explicit null is a value. */
+function requiredId(value: ObjectValue): JsonValue {
+  const id = value.get('id');
+  if (id === undefined) throw new PythonRetainedError('KeyError', "'id'");
+  return id;
+}
+
+/** Python `str(x)` for a loaded JSON value, as far as a `record:` prefix test can tell. */
+function pythonStr(value: JsonValue): string {
+  return typeof value === 'string' ? value : '\0not-a-string';
 }
 
 function objectOrNull(value: unknown): JsonObject | null {
@@ -341,6 +376,12 @@ export function createReviewEffects(options: ReviewEffectsOptions): ReviewEffect
     },
     historyGit,
     async retainedRecords() {
+      // `review_transport._retained_records`, exactly: only `retained_loads` and the
+      // read can skip a file (IntegrityError, OSError). There is no validate call, no
+      // object check and no string check on `id`; whatever else Python lets escape
+      // (`.get` on a non-dict, a missing or unhashable `id`) escapes here as the same
+      // named class. Downstream, `importRecord` mirrors Python's own escapes on the
+      // loosely shaped records this now returns (see its duplicate predicate).
       const roots = [join(state, 'backfill/publication'), join(state, 'record-outbox')];
       const seen = new Set<string>();
       const records: JsonObject[] = [];
@@ -348,35 +389,46 @@ export function createReviewEffects(options: ReviewEffectsOptions): ReviewEffect
         const directory = join(root, 'pending');
         let names: string[];
         try {
-          names = (await readdir(directory)).filter((name) => name.endsWith('.json')).sort();
+          names = (await readdir(directory))
+            .filter((name) => name.endsWith('.json'))
+            .sort(compareCodePoints);
         } catch (error) {
-          if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+          // `directory.is_dir()` is false for a missing path or a regular file, and
+          // pathlib's glob swallows OSError: both yield no records.
+          if (typeof (error as NodeJS.ErrnoException).code === 'string') continue;
           throw error;
         }
         for (const name of names) {
-          let value: JsonObject;
+          let value: JsonValue;
           try {
             // review_ledger.retained_loads: strict UTF-8 (a lone 0xff is refused, not
             // decoded to U+FFFD), BOM strip, duplicate keys and floats refused.
-            const parsed = ledgerLoads(await readFile(join(directory, name)));
-            if (!(parsed instanceof ObjectValue)) continue;
-            ledgerValidate(parsed);
-            value = parsed;
-          } catch {
-            continue;
+            value = ledgerLoads(await readFile(join(directory, name)));
+          } catch (error) {
+            // IntegrityError or OSError (EISDIR, EACCES, ...); anything else escapes.
+            if (
+              error instanceof LedgerIntegrityError ||
+              error instanceof LedgerJsonDecodeError ||
+              error instanceof LedgerUnicodeDecodeError ||
+              typeof (error as NodeJS.ErrnoException).code === 'string'
+            ) {
+              continue;
+            }
+            throw error;
           }
-          const id = value.get('id');
-          if (value.get('event_type') === 'review' && typeof id === 'string' && !seen.has(id)) {
-            seen.add(id);
+          if (!(value instanceof ObjectValue)) {
+            throw new PythonRetainedError('AttributeError', 'retained record is not a dict');
+          }
+          const eventType = value.get('event_type');
+          if (eventType === 'review' && !seen.has(pythonSetKey(value.get('id') ?? null))) {
+            seen.add(pythonSetKey(requiredId(value)));
             records.push(value);
           } else if (
-            value.get('event_type') === 'import-result' &&
-            typeof value.get('source_key') === 'string' &&
-            (value.get('source_key') as string).startsWith('record:') &&
-            typeof id === 'string' &&
-            !seen.has(id)
+            eventType === 'import-result' &&
+            pythonStr(value.get('source_key') ?? '').startsWith('record:') &&
+            !seen.has(pythonSetKey(value.get('id') ?? null))
           ) {
-            seen.add(id);
+            seen.add(pythonSetKey(requiredId(value)));
             records.push(value);
           }
         }
