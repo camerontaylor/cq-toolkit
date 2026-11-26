@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -62,7 +63,9 @@ const python = (s: ComposedSpec) => async (root: string) => {
 async function shadow(
   queue: unknown,
   over: Partial<ComposedSpec> = {},
-  allowList: readonly ExplainedDivergence[] = [],
+  allowList:
+    | readonly ExplainedDivergence[]
+    | ((scratch: string) => readonly ExplainedDivergence[]) = [],
 ) {
   const s = spec(over);
   const liveRoot = live(queue);
@@ -72,7 +75,7 @@ async function shadow(
     scratch,
     pinnedAt: NOW,
     sample: 'probe',
-    allowList,
+    allowList: typeof allowList === 'function' ? allowList(scratch) : allowList,
     python: python(s),
     ts: (root) => runComposedTs(REPO, root, s),
   });
@@ -236,6 +239,80 @@ describe('composed tick shadow: Python crq.tick vs the TS composed tick', () => 
     expect(seen).toEqual({ a: [], b: [] });
   });
 
+  // The scratch clearing must never reach live state or a foreign directory: each case refuses and
+  // leaves the target intact.
+  const guarded = async (
+    arrange: (scratch: string, liveRoot: string) => { liveRoot: string; intact: string[] },
+    message: string,
+  ) => {
+    const scratch = tmp();
+    const liveRoot = live(SEEDS[0]![1]);
+    const { liveRoot: used, intact } = arrange(scratch, liveRoot);
+    const s = spec();
+    await expect(
+      runComposedShadow({
+        liveRoot: used,
+        scratch,
+        pinnedAt: NOW,
+        sample: 'guard',
+        python: python(s),
+        ts: (root) => runComposedTs(REPO, root, s),
+      }),
+    ).rejects.toThrow(message);
+    for (const path of intact) expect(existsSync(path)).toBe(true);
+  };
+
+  it('refuses a live root nested under a scratch copy, and does not delete it', () =>
+    guarded((scratch) => {
+      const nested = join(scratch, 'a', 'live-state');
+      mkdirSync(nested, { recursive: true });
+      writeFileSync(join(nested, 'queue.json'), JSON.stringify(SEEDS[0]![1]));
+      return { liveRoot: nested, intact: [join(nested, 'queue.json')] };
+    }, 'overlaps the live root'));
+
+  it('refuses a scratch copy linked to the live root parent, and does not delete it', () =>
+    guarded((scratch, liveRoot) => {
+      symlinkSync(join(liveRoot, '..'), join(scratch, 'a'));
+      return { liveRoot, intact: [join(liveRoot, 'queue.json')] };
+    }, 'overlaps the live root'));
+
+  it('refuses a scratch copy linked to an unrelated directory, and does not clear it', () =>
+    guarded((scratch, liveRoot) => {
+      const victim = tmp();
+      mkdirSync(join(victim, 'receipts'));
+      writeFileSync(join(victim, 'notes.md'), 'keep');
+      symlinkSync(victim, join(scratch, 'b'));
+      return { liveRoot, intact: [join(victim, 'receipts'), join(victim, 'notes.md')] };
+    }, 'is a symbolic link'));
+
+  it('clears the overwritten outputs a run left in both copies', async () => {
+    const scratch = tmp();
+    const seen: Record<string, boolean> = {};
+    const run = async (leave: boolean) => {
+      const s = spec();
+      const py = python(s);
+      return runComposedShadow({
+        liveRoot: live(SEEDS[0]![1]),
+        scratch,
+        pinnedAt: NOW,
+        sample: 'outputs-reused',
+        python: async (root) => {
+          seen.a = existsSync(join(root, 'tick.lock'));
+          return py(root);
+        },
+        ts: async (root) => {
+          seen.b = existsSync(join(root, 'tick.lock'));
+          const out = await runComposedTs(REPO, root, s);
+          if (leave) writeFileSync(join(root, 'tick.lock'), 'stale');
+          return out;
+        },
+      });
+    };
+    await run(true);
+    expect((await run(false)).report.class).toBe('identical');
+    expect(seen).toEqual({ a: false, b: false });
+  });
+
   it('accepts the outputs the tick overwrites without reading', async () => {
     const liveRoot = live(SEEDS[0]![1]);
     for (const name of ['status.json', 'status.md', 'next-review-at', 'tick.lock'])
@@ -269,17 +346,81 @@ describe('composed tick shadow: Python crq.tick vs the TS composed tick', () => 
   // queue it persists keeps the item pending. The divergence is explained, not fixed here.
   // Allowed: `queue.json` and the two status files that render the retired item (its state,
   // `not_before`, `last_error` and the pending counters). Everything else must match exactly.
-  const retirementOnly: ExplainedDivergence = {
+  // The expected delta is derived, not assumed: the TS copy with the retirement applied must equal
+  // the Python copy by value (queue) or by bytes (status.json, status.md), and each of the three
+  // must actually differ. What the retirement changes: the item's state (`pending` -> `done`) and the `idle_while_pending_24h` counter that derives from it,
+  // the `not_before`/`last_error` keys Python adds, and the coverage observation's `pending` flag.
+  const retirementOnly = (scratch: string): ExplainedDivergence => ({
     id: 'load-queue-retirement-not-persisted',
-    explains: (d) =>
-      d.queue === 'differs' &&
-      d.events.verdict === 'same' &&
-      d.heartbeat === 'same' &&
-      d.phaseCalls === 'same' &&
-      d.slotDecision === 'same' &&
-      d.composed?.log === 'same' &&
-      d.composed.files['next-review-at'] === 'same',
-  };
+    explains: (d) => {
+      if (
+        d.queue !== 'differs' ||
+        d.events.verdict !== 'same' ||
+        d.heartbeat !== 'same' ||
+        d.phaseCalls !== 'same' ||
+        d.slotDecision !== 'same' ||
+        d.composed?.log !== 'same' ||
+        d.composed.files['next-review-at'] !== 'same' ||
+        d.composed.files['status.json'] !== 'differs' ||
+        d.composed.files['status.md'] !== 'differs'
+      )
+        return false;
+      const read = (side: string, name: string): string | null => {
+        try {
+          return readFileSync(join(scratch, side, name), 'utf8');
+        } catch {
+          return null;
+        }
+      };
+      const [qa, qb, ja, jb, ma, mb] = [
+        read('a', 'queue.json'),
+        read('b', 'queue.json'),
+        read('a', 'status.json'),
+        read('b', 'status.json'),
+        read('a', 'status.md'),
+        read('b', 'status.md'),
+      ];
+      if ([qa, qb, ja, jb, ma, mb].some((v) => v === null)) return false;
+      try {
+        const queueB = JSON.parse(qb as string) as {
+          items: Record<string, unknown>[];
+          coverage: { observations: Record<string, Record<string, unknown>> };
+        };
+        queueB.items = queueB.items.map((it) =>
+          it.state === 'pending'
+            ? { ...it, state: 'done', not_before: null, last_error: null }
+            : it,
+        );
+        for (const obs of Object.values(queueB.coverage.observations)) obs.pending = false;
+        const retiredQueue = JSON.stringify(queueB);
+        const statusB = JSON.parse(jb as string) as { items: Record<string, unknown>[] };
+        statusB.items = statusB.items.map((it) =>
+          it.state === 'pending' ? { ...it, state: 'done' } : it,
+        );
+        const sameJson = (x: string, y: string) =>
+          JSON.stringify(sortKeys(JSON.parse(x))) === JSON.stringify(sortKeys(JSON.parse(y)));
+        return (
+          sameJson(qa as string, retiredQueue) &&
+          JSON.stringify(statusB, null, 2) + '\n' === ja &&
+          (mb as string)
+            .replace('| open | pending |', '| open | done |')
+            .replace('"idle_while_pending_24h": 1,', '"idle_while_pending_24h": 0,') === ma
+        );
+      } catch {
+        return false;
+      }
+    },
+  });
+  const sortKeys = (v: unknown): unknown =>
+    Array.isArray(v)
+      ? v.map(sortKeys)
+      : v !== null && typeof v === 'object'
+        ? Object.fromEntries(
+            Object.entries(v as Record<string, unknown>)
+              .sort(([x], [y]) => x.localeCompare(y))
+              .map(([k, x]) => [k, sortKeys(x)]),
+          )
+        : v;
   const retirementQueue = {
     items: [item({ state: 'pending' })],
     starts: [],
@@ -290,18 +431,19 @@ describe('composed tick shadow: Python crq.tick vs the TS composed tick', () => 
     const unexplained = await shadow(retirementQueue);
     expect(unexplained.result.report.class).toBe('unexplained');
     expect(unexplained.result.report.diff?.queue).toBe('differs');
-    const explained = await shadow(retirementQueue, {}, [retirementOnly]);
+    const explained = await shadow(retirementQueue, {}, (scratch) => [retirementOnly(scratch)]);
     expect(explained.result.report.class).toBe('explained');
   });
 
   const retirementWith = (mutate: (root: string) => void, extra: Partial<ComposedSpec> = {}) => {
     const s = spec(extra);
+    const scratch = tmp();
     return runComposedShadow({
       liveRoot: live(retirementQueue),
-      scratch: tmp(),
+      scratch,
       pinnedAt: NOW,
       sample: 'retirement',
-      allowList: [retirementOnly],
+      allowList: [retirementOnly(scratch)],
       python: python(s),
       ts: async (root) => {
         const out = await runComposedTs(REPO, root, s);
@@ -316,16 +458,29 @@ describe('composed tick shadow: Python crq.tick vs the TS composed tick', () => 
       (root: string) => writeFileSync(join(root, 'next-review-at'), 'x'),
       (root: string) => appendFileSync(join(root, 'events.jsonl'), '{"at":"x","event":"x"}\n'),
       (root: string) => writeFileSync(join(root, 'heartbeat.json'), '{}'),
+      // Queue corruption and lost reports are not the retirement delta.
+      (root: string) => writeFileSync(join(root, 'queue.json'), '{"items":[]}'),
+      (root: string) => unlinkSync(join(root, 'status.json')),
+      (root: string) => unlinkSync(join(root, 'status.md')),
+      (root: string) => appendFileSync(join(root, 'status.md'), 'extra\n'),
+      (root: string) => {
+        const q = JSON.parse(readFileSync(join(root, 'queue.json'), 'utf8')) as {
+          items: Record<string, unknown>[];
+        };
+        q.items[0]!.repo = 'o/other';
+        writeFileSync(join(root, 'queue.json'), JSON.stringify(q));
+      },
     ]) {
       expect((await retirementWith(mutate)).report.class).toBe('unexplained');
     }
     const logDrift = spec();
+    const logScratch = tmp();
     const { report } = await runComposedShadow({
       liveRoot: live(retirementQueue),
-      scratch: tmp(),
+      scratch: logScratch,
       pinnedAt: NOW,
       sample: 'retirement-log',
-      allowList: [retirementOnly],
+      allowList: [retirementOnly(logScratch)],
       python: python(logDrift),
       ts: async (root) => {
         const out = await runComposedTs(REPO, root, logDrift);

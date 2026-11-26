@@ -422,12 +422,21 @@ export async function runComposedShadow(
       `composed shadow refuses a live root holding inputs it does not freeze: ${unfrozen.join(', ')}`,
     );
   }
+  // Validate both scratch destinations before anything is deleted: a live root nested under, or
+  // aliased by, a copy would otherwise be removed as a "stray" before the freeze's own overlap
+  // check runs, and a copy that is itself a symbolic link would redirect the deletion elsewhere.
+  const sides = [join(options.scratch, 'a'), join(options.scratch, 'b')];
+  rejectLiveOverlap(options.liveRoot, sides);
+  for (const side of sides) {
+    if (lstatOrNull(side)?.isSymbolicLink()) {
+      throw new Error(`scratch destination ${side} is a symbolic link; refusing to clear it`);
+    }
+  }
   // A reused scratch is cleared of everything outside the same set, before either runner starts:
   // a copy keeping `receipts/`, `runs/` or `ledger/` from an earlier run (Python's tick creates
   // some itself) would feed one side an input the other lacks. `rmSync` never follows a link.
-  for (const side of ['a', 'b'])
-    for (const name of strays(join(options.scratch, side)))
-      rmSync(join(options.scratch, side, name), { recursive: true, force: true });
+  for (const side of sides)
+    for (const name of strays(side)) rmSync(join(side, name), { recursive: true, force: true });
   const frozen = freezeStateRoot(options.liveRoot, options.scratch);
   // The overwritten outputs of an earlier run are cleared on both sides, so each run starts equal.
   for (const dir of [frozen.a, frozen.b])
