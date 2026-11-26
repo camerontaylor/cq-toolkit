@@ -44,6 +44,7 @@ import {
   ledgerValidate,
   ledgerValidateSequence,
 } from '../../policy/crq/ledger.js';
+import { PUBLICATION_RECORD_BYTES } from '../../policy/crq/publication.js';
 
 /** A push/transport failure that a fresh fetch can reconcile: retry class. */
 export class LedgerTransportError extends Error {
@@ -93,6 +94,8 @@ export interface GitLedgerOptions {
 
 /** Batched `cat-file --batch` group size, exactly Python's read(). */
 const READ_GROUP = 64;
+/** Total body bytes requested per `cat-file --batch` group. */
+const READ_GROUP_BYTES = 4 * 1024 * 1024;
 /** The signer transport bundle bound (`review_ledger.GitLedger.push`). */
 const BUNDLE_BYTES = 64 * 1024 * 1024;
 const CHECKPOINT = 'refs/crq/review-ledger-validated';
@@ -179,46 +182,58 @@ export class GitLedger {
    * into a throwaway ref, read and validate the whole history, then advance
    * the validated checkpoint without moving it backward.
    */
-  async fetch(): Promise<{ head: string; values: JsonValue[] }> {
-    const previous = await this.revParseQuiet(CHECKPOINT);
-    const ref = `refs/crq/ledger-fetch/${randomUUID().replace(/-/g, '')}`;
-    let head = '';
-    try {
-      await this.gitOk(
-        'fetch',
-        '--no-tags',
-        '--no-write-fetch-head',
-        this.remote,
-        `refs/heads/${this.branch}:${ref}`,
-      );
-      const parsed = await this.revParseQuiet(ref);
-      if (!OID.test(parsed)) throw integrity('ledger fetch produced no head');
-      head = parsed;
-    } finally {
-      await this.git('update-ref', '-d', ref, head === '' ? ZERO_OID : head).catch(() => undefined);
-    }
-    if (previous !== '' && !(await this.isAncestor(previous, head))) {
-      throw integrity('ledger head is not a descendant of validated history');
-    }
-    const values = await this.read(head);
-    // Python: never move the checkpoint backward; a checkpoint that is an
-    // ancestor of ours advances past an older concurrent validation, a
-    // diverged one is an integrity refusal. Compare-and-swap through
-    // `update-ref <ref> <new> <expected>`, retrying up to eight times.
-    let expected = previous === '' ? ZERO_OID : previous;
-    for (let attempt = 0; ; attempt++) {
-      const swap = await this.git('update-ref', CHECKPOINT, head, expected);
-      if (swap.code === 0) break;
-      const latest = await this.revParseQuiet(CHECKPOINT);
-      if (latest === '') throw integrity('validated checkpoint contention');
-      if (await this.isAncestor(head, latest)) break;
-      if (!(await this.isAncestor(latest, head))) {
-        throw integrity('validated checkpoint diverged from ledger head');
+  async fetch(attempts = 3): Promise<{ head: string; values: JsonValue[] }> {
+    for (let round = 0; round < attempts; round++) {
+      const previous = await this.revParseQuiet(CHECKPOINT);
+      const ref = `refs/crq/ledger-fetch/${randomUUID().replace(/-/g, '')}`;
+      let head = '';
+      try {
+        await this.gitOk(
+          'fetch',
+          '--no-tags',
+          '--no-write-fetch-head',
+          this.remote,
+          `refs/heads/${this.branch}:${ref}`,
+        );
+        const parsed = await this.revParseQuiet(ref);
+        if (!OID.test(parsed)) throw integrity('ledger fetch produced no head');
+        head = parsed;
+      } finally {
+        await this.git('update-ref', '-d', ref, head === '' ? ZERO_OID : head).catch(
+          () => undefined,
+        );
       }
-      expected = latest;
-      if (attempt >= 7) throw integrity('validated checkpoint contention');
+      if (previous !== '' && !(await this.isAncestor(previous, head))) {
+        throw integrity('ledger head is not a descendant of validated history');
+      }
+      const values = await this.read(head);
+      // Python: never move the checkpoint backward; a checkpoint that is an
+      // ancestor of ours advances past an older concurrent validation, a
+      // diverged one is an integrity refusal. Compare-and-swap through
+      // `update-ref <ref> <new> <expected>`, retrying up to eight times.
+      let stale = false;
+      let expected = previous === '' ? ZERO_OID : previous;
+      for (let attempt = 0; ; attempt++) {
+        const swap = await this.git('update-ref', CHECKPOINT, head, expected);
+        if (swap.code === 0) break;
+        const latest = await this.revParseQuiet(CHECKPOINT);
+        if (latest === '') throw integrity('validated checkpoint contention');
+        if (await this.isAncestor(head, latest)) {
+          // Equal heads are success; a checkpoint strictly newer than this
+          // head makes the whole snapshot stale, so refetch rather than let
+          // publication append behind the validated checkpoint.
+          stale = head !== latest;
+          break;
+        }
+        if (!(await this.isAncestor(latest, head))) {
+          throw integrity('validated checkpoint diverged from ledger head');
+        }
+        expected = latest;
+        if (attempt >= 7) throw integrity('validated checkpoint contention');
+      }
+      if (!stale) return { head, values };
     }
-    return { head, values };
+    throw integrity('ledger head is older than the validated checkpoint');
   }
 
   /**
@@ -285,8 +300,51 @@ export class GitLedger {
       entries.push({ commit, filename, oid: fields[3] ?? '' });
     }
     const batches = new Map<string, JsonValue[]>();
-    for (let offset = 0; offset < entries.length; offset += READ_GROUP) {
-      const group = entries.slice(offset, offset + READ_GROUP);
+    // Check each object's type and size without its body first, so an
+    // oversized record is rejected before any payload is buffered; then request
+    // bodies in groups bounded by record count and by total bytes.
+    const sizes = new Map<string, number>();
+    if (entries.length > 0) {
+      const check = decode(
+        await this.gitOkEnv(
+          {},
+          new TextEncoder().encode(`${entries.map((entry) => entry.oid).join('\n')}\n`),
+          'cat-file',
+          '--batch-check',
+        ),
+      ).split('\n');
+      if (check.length !== entries.length + 1 || check[check.length - 1] !== '') {
+        throw integrity('unexpected ledger blob response');
+      }
+      entries.forEach((entry, index) => {
+        const fields = (check[index] ?? '').split(/\s+/).filter((field) => field !== '');
+        if (
+          fields.length !== 3 ||
+          fields[0] !== entry.oid ||
+          fields[1] !== 'blob' ||
+          !/^\d+$/.test(fields[2] ?? '')
+        ) {
+          throw integrity('malformed ledger blob response');
+        }
+        const size = Number(fields[2]);
+        if (size > PUBLICATION_RECORD_BYTES) {
+          throw integrity('ledger record exceeds validation bound');
+        }
+        sizes.set(entry.oid, size);
+      });
+    }
+    let offset = 0;
+    while (offset < entries.length) {
+      const group: typeof entries = [];
+      let total = 0;
+      while (offset < entries.length && group.length < READ_GROUP) {
+        const next = entries[offset] as (typeof entries)[number];
+        const size = sizes.get(next.oid) ?? 0;
+        if (group.length > 0 && total + size > READ_GROUP_BYTES) break;
+        group.push(next);
+        total += size;
+        offset += 1;
+      }
       const raw = await this.gitOkEnv(
         {},
         new TextEncoder().encode(`${group.map((entry) => entry.oid).join('\n')}\n`),
@@ -308,6 +366,7 @@ export class GitLedger {
           throw integrity('malformed ledger blob response');
         }
         const size = Number(fields[2]);
+        if (size !== sizes.get(entry.oid)) throw integrity('ledger blob size mismatch');
         cursor = end + 1;
         const payload = raw.slice(cursor, cursor + size);
         cursor += size;
