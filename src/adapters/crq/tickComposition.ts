@@ -153,7 +153,7 @@ export const STAGED_GAPS: readonly TickGap[] = [
     phases: ['admit.startOne'],
     python: 'start_one, launch (crq.py:3198/:2004)',
     missing:
-      'fileLaunchEffects binds the launch effects, but its scans, receipt, author lease, on-demand clone and queue save are injected, and CoverageEffects select, buildSynthetic, rank4Gate and the tick clocks and queue helpers are still injected (makeCoverageEffects binds the merged half: mergeQueueSha, diffNameOnly, measureMerged, coverageCandidate, legacyOrigins, legacyRetryAllowed)',
+      'fileLaunchEffects binds the launch effects, but its scans, receipt, author lease, on-demand clone and queue save are injected, and CoverageEffects select, buildSynthetic and the tick clocks and queue helpers are still injected (makeCoverageEffects binds mergeQueueSha, diffNameOnly, measureMerged, coverageCandidate, legacyOrigins, legacyRetryAllowed, rank4Gate, bindRun and cancelBeforeVendor; the clock, ordinary eligibility, usage refresh, outbox and queue writer arrive as Rank4Collaborators)',
   },
   {
     id: 'shadow-d2',
