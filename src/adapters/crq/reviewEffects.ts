@@ -16,6 +16,7 @@ import type { JsonObject } from '../../policy/crq/jsonValue.js';
 import { parseJsonValue } from '../../policy/crq/jsonValue.js';
 import {
   ledgerCanonicalBytes,
+  ledgerLoads,
   ledgerValidate,
   LedgerIntegrityError,
 } from '../../policy/crq/ledger.js';
@@ -355,9 +356,9 @@ export function createReviewEffects(options: ReviewEffectsOptions): ReviewEffect
         for (const name of names) {
           let value: JsonObject;
           try {
-            const parsed = parseJsonValue(await readFile(join(directory, name), 'utf8'), {
-              duplicates: 'error',
-            });
+            // review_ledger.retained_loads: strict UTF-8 (a lone 0xff is refused, not
+            // decoded to U+FFFD), BOM strip, duplicate keys and floats refused.
+            const parsed = ledgerLoads(await readFile(join(directory, name)));
             if (!(parsed instanceof ObjectValue)) continue;
             ledgerValidate(parsed);
             value = parsed;
