@@ -31,6 +31,7 @@ interface CqCase {
   end: 'timeout' | 'stdout';
   stdout?: string;
   no_dir?: boolean;
+  sessions_is_file?: boolean;
   work_id?: string;
   expect: { record: CqSessionRecord | null; stop: string } | { raises: string };
 }
@@ -94,11 +95,13 @@ describe('paseo judge answer validation (a508c93ca)', () => {
 
 function effectsFor(c: CqCase, written: CqSessionRecord[]): CqSessionLinkEffects {
   const names = [...c.existing, ...c.created];
-  const exists = c.no_dir !== true || c.created.length > 0;
+  const isFile = c.sessions_is_file === true;
+  const exists = !isFile && (c.no_dir !== true || c.created.length > 0);
   return {
     isDirectory: () => exists,
     listJsonl: () => names.filter((name) => name.endsWith('.jsonl')),
-    hasEntries: () => names.length > 0,
+    // A file at the path is an entry-bearing path that is not a directory: only is_dir() refuses it.
+    hasEntries: () => isFile || names.length > 0,
     writeSession: (record) => {
       written.push(record);
     },
@@ -139,6 +142,31 @@ describe('cq session link (2eb6b4770)', () => {
       expect(written).toEqual(c.expect.record === null ? [] : [c.expect.record]);
     });
   }
+});
+
+describe('cq session link directory gate', () => {
+  it('a non-directory path yields no listing and no sessionsDir even if entries are reported', () => {
+    const written: CqSessionRecord[] = [];
+    const record = writeCqSessionLink(
+      { sessionsDir: '/s', created: new Set(), workId: null },
+      {
+        isDirectory: () => false,
+        listJsonl: () => ['a.jsonl'],
+        hasEntries: () => true,
+        writeSession: (r) => {
+          written.push(r);
+        },
+      },
+    );
+    expect(record).toEqual({
+      harness: 'cq',
+      sessionId: null,
+      sessionIds: [],
+      sessionsDir: null,
+      workId: null,
+    });
+    expect(written).toHaveLength(1);
+  });
 });
 
 describe('cq session link failure handling', () => {

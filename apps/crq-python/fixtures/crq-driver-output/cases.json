@@ -791,6 +791,23 @@
     },
     "stop": "budget"
    },
+   "label": "wall clock with a regular file at the sessions path",
+   "sessions_is_file": true
+  },
+  {
+   "created": [],
+   "end": "timeout",
+   "existing": [],
+   "expect": {
+    "record": {
+     "harness": "cq",
+     "sessionId": null,
+     "sessionIds": [],
+     "sessionsDir": null,
+     "workId": null
+    },
+    "stop": "budget"
+   },
    "label": "wall clock with an empty sessions dir"
   },
   {
@@ -1356,6 +1373,24 @@
    },
    "label": "normal run no sessions dir",
    "no_dir": true,
+   "stdout": "{\"status\":\"ok\",\"value\":{\"verdict\":\"pass\",\"changed\":false,\"commits\":[],\"summary\":\"s\"}}"
+  },
+  {
+   "created": [],
+   "end": "stdout",
+   "existing": [],
+   "expect": {
+    "record": {
+     "harness": "cq",
+     "sessionId": null,
+     "sessionIds": [],
+     "sessionsDir": null,
+     "workId": null
+    },
+    "stop": "ok"
+   },
+   "label": "normal run with a regular file at the sessions path",
+   "sessions_is_file": true,
    "stdout": "{\"status\":\"ok\",\"value\":{\"verdict\":\"pass\",\"changed\":false,\"commits\":[],\"summary\":\"s\"}}"
   }
  ],

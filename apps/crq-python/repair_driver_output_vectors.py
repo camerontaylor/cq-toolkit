@@ -289,6 +289,8 @@ def cq_cases() -> list[dict]:
     return [
         {"label": "wall clock with one created session", "existing": [], "created": ["abc.jsonl"], "end": "timeout"},
         {"label": "wall clock with no sessions", "existing": [], "created": [], "end": "timeout", "no_dir": True},
+        {"label": "wall clock with a regular file at the sessions path", "existing": [], "created": [],
+         "end": "timeout", "sessions_is_file": True},
         {"label": "wall clock with an empty sessions dir", "existing": [], "created": [], "end": "timeout"},
         {"label": "wall clock never claims an earlier run session", "existing": ["old.jsonl"], "created": [],
          "end": "timeout"},
@@ -344,6 +346,8 @@ def cq_cases() -> list[dict]:
          "end": "stdout", "stdout": '{"status":"error","error":"boom"}'},
         {"label": "normal run no sessions dir", "existing": [], "created": [], "end": "stdout", "stdout": ok,
          "no_dir": True},
+        {"label": "normal run with a regular file at the sessions path", "existing": [], "created": [],
+         "end": "stdout", "stdout": ok, "sessions_is_file": True},
     ]
 
 
@@ -351,7 +355,9 @@ def run_cq(case: dict) -> dict:
     with tempfile.TemporaryDirectory() as tmp:
         directory = Path(tmp)
         sessions = directory / "sessions"
-        if not case.get("no_dir"):
+        if case.get("sessions_is_file"):
+            sessions.write_text("not a directory\n")
+        elif not case.get("no_dir"):
             sessions.mkdir()
         for name in case["existing"]:
             (sessions / name).write_text("{}\n")
