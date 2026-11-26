@@ -65,6 +65,34 @@ describe('makeCoverageEffects', () => {
     expect(() => effects.select({} as never, [], false, null)).toThrow('select is not bound');
   });
 
+  it('binds buildSynthetic over the supplied synthetic deps', async () => {
+    const seen: string[] = [];
+    const effects = makeCoverageEffects({
+      git: { git: () => Promise.resolve(''), pathExists: () => Promise.resolve(true) },
+      measure: { defaultRef: 'origin/main', minFileFocus: 0.25, iso: () => 'x' },
+      coverageConfig: {},
+      rank4: {
+        iso: () => 'x',
+        ordinaryEligible: unbound('ordinaryEligible'),
+        stateEvent: unbound('stateEvent') as never,
+        saveQueue: unbound('saveQueue') as never,
+      },
+      synthetic: {
+        git: { git: () => Promise.resolve(''), pathExists: () => Promise.resolve(true) },
+        accounting: {
+          resolve: (target: string) => {
+            seen.push(target);
+            return Promise.reject(new PyError('RuntimeError', 'stop'));
+          },
+        } as never,
+        subjects: {} as never,
+      },
+      injected,
+    });
+    await expect(effects.buildSynthetic({} as never, 'sha1')).rejects.toThrow('stop');
+    expect(seen).toEqual(['sha1']);
+  });
+
   it('binds rank4Gate, bindRun and cancelBeforeVendor, and an unbound collaborator throws', async () => {
     const { effects } = build();
     const item = { id: 'job-a', kind: 'backfill', state: 'pending', attempt_id: 'job-a:1' };

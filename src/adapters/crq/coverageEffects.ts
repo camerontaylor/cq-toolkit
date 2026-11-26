@@ -17,9 +17,13 @@
  *   (clock, ordinary eligibility, usage refresh, state-event outbox, queue
  *   writer) arrive as {@link Rank4Collaborators}.
  *
+ * - `buildSynthetic` over `src/adapters/crq/buildSynthetic.ts` (`crq.build_synthetic`)
+ *   when {@link CoverageEffectsInput.synthetic} supplies the clone's git, accounting
+ *   and subject repositories; without it the caller's injected one is used, and an
+ *   unbound one must throw.
+ *
  * Left injected: `select` (it launches through the publisher and services, and
- * `launch` is unbound), `buildSynthetic` (a git-writing plumbing sequence),
- * `backfillDispatchConfigured`, and the tick's queue helpers (`liveItems`,
+ * `launch` is unbound), `backfillDispatchConfigured`, and the tick's queue helpers (`liveItems`,
  * `compareItems`, `depsMet`, the clocks): the caller supplies them and an
  * unbound one must throw, never succeed.
  */
@@ -29,6 +33,7 @@ import {
   bindRank4Gate,
   type Rank4Collaborators,
 } from './coverageBackfillSeams.js';
+import { buildSynthetic, type BuildSyntheticDeps } from './buildSynthetic.js';
 import {
   measureMerged,
   type MeasureGit,
@@ -59,8 +64,8 @@ export type InjectedCoverageSeams = Pick<
   | 'nowMs'
   | 'parseIsoMs'
   | 'depsMet'
-  | 'buildSynthetic'
->;
+> &
+  Partial<Pick<CoverageEffects, 'buildSynthetic'>>;
 
 export interface CoverageEffectsInput {
   readonly git: MeasureGit;
@@ -70,6 +75,8 @@ export interface CoverageEffectsInput {
   /** The effects `rank4_gate` reaches through `c`: clock, eligibility, refresh, outbox, writer. */
   readonly rank4: Rank4Collaborators;
   readonly injected: InjectedCoverageSeams;
+  /** Binds `buildSynthetic` over the primary clone; absent, `injected.buildSynthetic` is used. */
+  readonly synthetic?: BuildSyntheticDeps;
 }
 
 const COVERAGE_KEYS = new Set(['max_paths', 'min_age_hours', 'excluded_paths']);
@@ -123,8 +130,19 @@ function identity<T>(read: () => T): T {
 
 export function makeCoverageEffects(input: CoverageEffectsInput): Omit<CoverageEffects, 'launch'> {
   const { git, measure, injected } = input;
+  const deps = input.synthetic;
+  const synthetic = deps
+    ? { buildSynthetic: (item: Item, sha: string) => buildSynthetic(deps, item, sha) }
+    : {
+        buildSynthetic:
+          injected.buildSynthetic ??
+          (() => {
+            throw new Error('buildSynthetic is not bound');
+          }),
+      };
   return {
     ...injected,
+    ...synthetic,
     rank4Gate: bindRank4Gate(input.rank4),
     bindRun: bindBindRun,
     cancelBeforeVendor: bindCancelBeforeVendor,
