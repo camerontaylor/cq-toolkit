@@ -52,6 +52,9 @@ describe('cq.judge against the Python oracle', () => {
       let requestText: string | null = null;
       let command: { timeout: JsonNumber } | null = null;
       const logged: Array<{ stdout: string; stderr: string }> = [];
+      const scripted = Object.assign(new Error('scripted'), {
+        name: 'raise' in process ? process.raise : '',
+      });
       let report: JsonValue | undefined;
       let thrown: unknown;
       try {
@@ -63,7 +66,7 @@ describe('cq.judge against the Python oracle', () => {
             },
             runBridge: (timeout) => {
               command = { timeout };
-              if ('raise' in process) return Promise.reject(new Error(process.raise));
+              if ('raise' in process) return Promise.reject(scripted);
               return Promise.resolve(process);
             },
             logInvocation: (stdout, stderr) => {
@@ -100,7 +103,8 @@ describe('cq.judge against the Python oracle', () => {
       const raises = expected.get('raises');
       if (typeof raises === 'string') {
         if ('raise' in process) {
-          expect((thrown as Error).message, name).toBe(process.raise);
+          expect(thrown, name).toBe(scripted);
+          expect(raises, name).toBe(process.raise);
           return;
         }
         expect(thrown, name).toBeInstanceOf(TriageJudgePyError);

@@ -239,7 +239,7 @@ def run_judge(spec: dict) -> dict:
                                          copy.deepcopy(spec["job"]), worktree, directory)
             recorded["result"] = result
             recorded["result_text"] = json.dumps(result)
-        except BaseException as exc:  # noqa: BLE001 - the oracle records every escape
+        except Exception as exc:  # noqa: BLE001 - the oracle records every escape; an interrupt stops regeneration
             recorded.update(exception_record(exc))
         # The request text is recorded from inside command(); a failure before
         # the write leaves it None, and so does an unreadable file.
@@ -464,7 +464,7 @@ def run_gate(spec: dict) -> dict:
             events.clear()
             try:
                 outcome["result"] = judge(copy.deepcopy(spec["row"]), copy.deepcopy(spec["context"]), spec["remaining"])
-            except BaseException as exc:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
                 outcome.update(exception_record(exc))
             return {}
 
@@ -494,7 +494,7 @@ def run_gate(spec: dict) -> dict:
                 stack.enter_context(patch)
             try:
                 service.triage_phase(config)
-            except BaseException as exc:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
                 construction.update(exception_record(exc))
         # The closure never runs when triage_phase itself refuses.
         if construction:

@@ -82,7 +82,14 @@ const DEFAULT_ROLE = new JsonObject([
 ]);
 const EMPTY = new JsonObject([]);
 
-/** `base / segment` for a relative POSIX segment, normalised as `pathlib` does. */
+/**
+ * `base / segment` for a relative POSIX segment, normalised as `pathlib` does.
+ *
+ * Inherited from Python and NOT contained: `..` segments are kept, so a finding
+ * id such as `x/../..` leaves the triage directory (`str(value["id"])` of a
+ * vendor finding is not segment-validated upstream). Nothing is routed yet; the
+ * routing slice must reject `.`/`..`/empty segments here and in Python.
+ */
 function join(base: string, segment: string): string {
   if (segment.startsWith('/')) {
     throw new TriageJudgeGateRefusal(`absolute path segment: ${JSON.stringify(segment)}`);
@@ -91,6 +98,17 @@ function join(base: string, segment: string): string {
     (part) => part !== '' && part !== '.',
   );
   return (base.startsWith('/') ? '/' : '') + parts.join('/');
+}
+
+/** `copy.deepcopy` over the lossless model (numbers are immutable). */
+function cloneValue(value: JsonValue): JsonValue {
+  if (Array.isArray(value)) return value.map(cloneValue);
+  if (value instanceof JsonObject) {
+    return new JsonObject(
+      value.entries.map(([key, item]): [string, JsonValue] => [key, cloneValue(item)]),
+    );
+  }
+  return value;
 }
 
 function report(entries: Array<[string, JsonValue]>): JsonObject {
@@ -112,7 +130,7 @@ function withWallClock(config: JsonValue, minutes: number): JsonValue {
     );
     return new JsonObject(found ? entries : [...entries, [key, update(undefined)]]);
   };
-  return replace(config, 'repair', (repair) =>
+  return replace(cloneValue(config), 'repair', (repair) =>
     replace(repair ?? EMPTY, 'budget', (budget) =>
       replace(budget ?? EMPTY, 'wall_clock_min', () => value),
     ),

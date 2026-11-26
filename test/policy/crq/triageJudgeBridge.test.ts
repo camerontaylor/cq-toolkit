@@ -67,9 +67,11 @@ function runBridge(schema: string | undefined, report: unknown) {
   );
   const done = spawnSync('node', [BRIDGE, request], {
     encoding: 'utf8',
+    timeout: 30_000,
+    killSignal: 'SIGKILL',
     env: { ...process.env, STUB_CAPTURE: capture, STUB_REPORT: JSON.stringify(report) },
   });
-  expect(done.status, done.stderr).toBe(0);
+  expect(done.status, `${String(done.error)} ${done.stderr}`).toBe(0);
   return {
     stdout: done.stdout,
     captured: JSON.parse(readFileSync(capture, 'utf8')) as {

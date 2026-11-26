@@ -29,12 +29,22 @@ class TriageJudgeVectorsTest(unittest.TestCase):
         for group in ("judge", "gate"):
             names = [case["name"] for case in built[group]]
             self.assertEqual(len(names), len(set(names)), group)
-        stops = {
-            case["expected"]["outcome"]["result"].get("errorClass")
-            for case in built["gate"]
-            if isinstance(case["expected"]["outcome"].get("result"), dict)
-        }
+        results = [
+            case for case in built["gate"] if isinstance(case["expected"]["outcome"].get("result"), dict)
+        ]
+
+        def answers(predicate):
+            return [case for case in results if predicate(case["expected"]["outcome"]["result"])]
+
+        stops = {case["expected"]["outcome"]["result"].get("errorClass") for case in results}
         self.assertTrue({"runner-disabled", "blackout", "rate-limit"} <= stops)
+        deadline = answers(lambda result: result.get("stop") == "deadline")
+        refused = answers(lambda result: result.get("context_scan_refused") is True)
+        self.assertTrue(deadline)
+        self.assertTrue(refused)
+        for case in deadline + refused + answers(lambda result: result.get("stop") == "deferred"):
+            effects = [event["effect"] for event in case["expected"]["events"]]
+            self.assertNotIn("dispatch", effects, case["name"])
 
 
 if __name__ == "__main__":

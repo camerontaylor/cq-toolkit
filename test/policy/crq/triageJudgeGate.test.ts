@@ -7,7 +7,10 @@ import { describe, expect, test } from 'vitest';
 import { JsonNumber, JsonObject, type JsonValue } from '../../../src/policy/crq/jsonValue.js';
 import { TriageInjectedFailure } from '../../../src/policy/crq/triageTail.js';
 import { TriageJudgePyError } from '../../../src/policy/crq/triageJudge.js';
-import { makeTriageJudge } from '../../../src/policy/crq/triageJudgeGate.js';
+import {
+  TriageJudgeGateRefusal,
+  makeTriageJudge,
+} from '../../../src/policy/crq/triageJudgeGate.js';
 import { cases, canon, field, num } from '../../helpers/triageJudgeOracle.js';
 
 const text = (value: JsonValue): string => value as string;
@@ -158,7 +161,66 @@ describe('triage judge closure against the Python oracle', () => {
       }
       if (outcome.get('construction') === true) expect(events, name).toEqual([]);
       expect(canon(events), name).toBe(canon(expected.get('events')));
-      void JsonNumber;
     });
   }
+});
+
+describe('triage judge closure: port-owned behaviour', () => {
+  const config = new JsonObject([
+    ['clone', 'CLONE'],
+    [
+      'repair',
+      new JsonObject([
+        ['budget', new JsonObject([['wall_clock_min', JsonNumber.int(5)]])],
+        ['roles', new JsonObject([['judge_critical', new JsonObject([['driver', 'cq']])]])],
+        ['keep', ['a']],
+      ]),
+    ],
+  ]);
+  const row = (id: string) =>
+    new JsonObject([
+      ['finding', new JsonObject([['id', id]])],
+      ['review_id', 'R1'],
+    ]);
+  const effects = (
+    seen: string[],
+    dispatch: (call: { config: JsonValue }) => JsonValue = () => null,
+  ) => ({
+    monotonic: () => 0,
+    mkdir: (path: string) => {
+      seen.push(path);
+    },
+    scan: () => true,
+    runnerDisabled: () => false,
+    narrate: () => undefined,
+    publishRefusal: () => undefined,
+    blocked: () => false,
+    dispatchPaused: () => null,
+    dispatch,
+  });
+
+  test('an absolute finding id is refused before any effect', async () => {
+    const seen: string[] = [];
+    const judge = makeTriageJudge({ config, stateDir: STATE, effects: effects(seen) });
+    await expect(judge(row('/abs'), null, 10)).rejects.toBeInstanceOf(TriageJudgeGateRefusal);
+    expect(seen).toEqual([]);
+  });
+
+  test('a dispatch that mutates its config copy does not leak into the next judgment', async () => {
+    const seen: string[] = [];
+    let keep: JsonValue = [];
+    const judge = makeTriageJudge({
+      config,
+      stateDir: STATE,
+      effects: effects(seen, (call) => {
+        const repair = (call.config as JsonObject).get('repair') as JsonObject;
+        keep = repair.get('keep') as JsonValue;
+        (keep as JsonValue[]).push('mutated');
+        return null;
+      }),
+    });
+    await judge(row('F1'), null, 600);
+    await judge(row('F2'), null, 600);
+    expect((config.get('repair') as JsonObject).get('keep') as JsonValue[]).toEqual(['a']);
+  });
 });
