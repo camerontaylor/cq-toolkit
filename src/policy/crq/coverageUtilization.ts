@@ -309,7 +309,7 @@ function cooldownMinutes(queue: unknown, now: bigint): number | JsonNumber {
   return JsonNumber.float(minutes);
 }
 
-function coverageTime(value: unknown): bigint {
+export function coverageTime(value: unknown): bigint {
   if (typeof value === 'string') return coverageTimeFromString(value);
   if (typeof value === 'boolean') return int64Seconds(value ? 1n : 0n);
   if (typeof value === 'bigint') return int64Seconds(value);
@@ -636,7 +636,7 @@ function encodeIntSum(value: bigint): number | JsonNumber {
   return Number.isSafeInteger(Number(value)) ? Number(value) : JsonNumber.int(value);
 }
 
-function pyTruthy(value: unknown): boolean {
+export function pyTruthy(value: unknown): boolean {
   if (value === null || value === undefined) return false;
   if (typeof value === 'boolean') return value;
   if (typeof value === 'number') return value !== 0 || Number.isNaN(value);
