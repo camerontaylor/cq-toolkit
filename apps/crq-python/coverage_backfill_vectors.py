@@ -206,6 +206,10 @@ def rank4_cases() -> List[dict]:
               queue(), refresh=REFRESH_FAIL, dry=True))
     add(rank4("admission history is appended", queue(backfill_usage=usage(),
                                                      backfill_admissions=[{"at": "x", "decision": "admit"}])))
+    for label, rows in (("a null row", [None]), ("scalar and list rows", [5, [2]]),
+                        ("a row object without a decision", [{"at": "t"}])):
+        add(rank4(f"admission history with {label} is appended to", queue(backfill_usage=usage(),
+                                                                         backfill_admissions=rows)))
     add(rank4("a refusal marks wait_reason and appends history", queue(backfill_usage=usage(remaining=1))))
     add(rank4("a refusal on a dry run leaves no reservation", queue(backfill_usage=usage(remaining=1)), dry=True))
     add(rank4("an item without an id raises KeyError", queue([{"kind": "backfill", "state": "pending"}],
@@ -252,6 +256,20 @@ def bind_cases() -> List[dict]:
              queue([job(attempt_id=7)], backfill_reservations={"job-a:1": vendor_hold()})),
         case("a list attempt_id raises TypeError",
              queue([job(attempt_id=["x"])], backfill_reservations={"job-a:1": vendor_hold()})),
+        case("a list attempt_id with no reservation table raises KeyError",
+             queue([job(attempt_id=["x"])])),
+        case("an object attempt_id with no reservation table raises KeyError",
+             queue([job(attempt_id={"k": 1})])),
+        case("an object attempt_id raises TypeError",
+             queue([job(attempt_id={"k": 1})], backfill_reservations={"job-a:1": vendor_hold()})),
+        case("an equal integer run id is idempotent",
+             queue([reserved], backfill_reservations={"job-a:1": vendor_hold(5)}), run_id=5),
+        case("an equal float run id is idempotent",
+             queue([reserved], backfill_reservations={"job-a:1": vendor_hold(5)}), run_id=5.0),
+        case("a true run id equals an existing 1",
+             queue([reserved], backfill_reservations={"job-a:1": vendor_hold(1)}), run_id=True),
+        case("an unequal integer run id conflicts",
+             queue([reserved], backfill_reservations={"job-a:1": vendor_hold(5)}), run_id=6),
         case("a null reservation table raises TypeError",
              queue([reserved], backfill_reservations=None)),
         case("binds the second item",

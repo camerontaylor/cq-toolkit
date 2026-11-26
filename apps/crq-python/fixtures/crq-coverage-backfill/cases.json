@@ -7570,6 +7570,501 @@
    }
   },
   {
+   "name": "admission history with a null row is appended to",
+   "result": {
+    "ok": {
+     "admitted": true,
+     "queue": {
+      "backfill_admission_history_version": 1,
+      "backfill_admissions": [
+       null,
+       {
+        "at": "2026-11-20T12:00:00Z",
+        "decision": "admit",
+        "effective_remaining": 5,
+        "item": "job-a",
+        "observation": {
+         "observed_at": "2026-11-20T11:59:30Z",
+         "remaining": 5,
+         "successful": true
+        },
+        "ordinary_eligible": false,
+        "reservation_counts": {}
+       }
+      ],
+      "backfill_daily_capacity": {
+       "2026-11-20": {
+        "completed_partitions": 0,
+        "spare_admissions": 1
+       }
+      },
+      "backfill_reservations": {
+       "job-a:1": {
+        "at": "2026-11-20T12:00:00Z",
+        "item": "job-a",
+        "quota_state": "reserved",
+        "vendor_run_id": null
+       }
+      },
+      "backfill_usage": {
+       "observed_at": "2026-11-20T11:59:30Z",
+       "reflected_reservations": [],
+       "remaining": 5,
+       "successful": true
+      },
+      "items": [
+       {
+        "attempt": 1,
+        "attempt_id": "job-a:1",
+        "id": "job-a",
+        "job_id": "job-a",
+        "kind": "backfill",
+        "state": "launch-unknown",
+        "vendor_state": "unknown"
+       }
+      ],
+      "starts": []
+     }
+    },
+    "trace": [
+     [
+      "state_event",
+      "job-a",
+      "2026-11-20T12:00:00Z",
+      "atomic quota reservation before launch",
+      {
+       "attempt": 1,
+       "attempt_id": "job-a:1",
+       "id": "job-a",
+       "job_id": "job-a",
+       "kind": "backfill",
+       "state": "launch-unknown",
+       "vendor_state": "unknown"
+      }
+     ],
+     [
+      "save",
+      {
+       "backfill_admission_history_version": 1,
+       "backfill_admissions": [
+        null,
+        {
+         "at": "2026-11-20T12:00:00Z",
+         "decision": "admit",
+         "effective_remaining": 5,
+         "item": "job-a",
+         "observation": {
+          "observed_at": "2026-11-20T11:59:30Z",
+          "remaining": 5,
+          "successful": true
+         },
+         "ordinary_eligible": false,
+         "reservation_counts": {}
+        }
+       ],
+       "backfill_daily_capacity": {
+        "2026-11-20": {
+         "completed_partitions": 0,
+         "spare_admissions": 1
+        }
+       },
+       "backfill_reservations": {
+        "job-a:1": {
+         "at": "2026-11-20T12:00:00Z",
+         "item": "job-a",
+         "quota_state": "reserved",
+         "vendor_run_id": null
+        }
+       },
+       "backfill_usage": {
+        "observed_at": "2026-11-20T11:59:30Z",
+        "reflected_reservations": [],
+        "remaining": 5,
+        "successful": true
+       },
+       "items": [
+        {
+         "attempt": 1,
+         "attempt_id": "job-a:1",
+         "id": "job-a",
+         "job_id": "job-a",
+         "kind": "backfill",
+         "state": "launch-unknown",
+         "vendor_state": "unknown"
+        }
+       ],
+       "starts": []
+      }
+     ]
+    ]
+   },
+   "spec": {
+    "dry": false,
+    "event_mutates": false,
+    "fn": "rank4",
+    "index": 0,
+    "now": "2026-11-20T12:00:00Z",
+    "ordinary": false,
+    "queue": {
+     "backfill_admissions": [
+      null
+     ],
+     "backfill_usage": {
+      "observed_at": "2026-11-20T11:59:30Z",
+      "reflected_reservations": [],
+      "remaining": 5,
+      "successful": true
+     },
+     "items": [
+      {
+       "attempt": 0,
+       "id": "job-a",
+       "job_id": "job-a",
+       "kind": "backfill",
+       "state": "pending"
+      }
+     ],
+     "starts": []
+    },
+    "refresh": null
+   }
+  },
+  {
+   "name": "admission history with scalar and list rows is appended to",
+   "result": {
+    "ok": {
+     "admitted": true,
+     "queue": {
+      "backfill_admission_history_version": 1,
+      "backfill_admissions": [
+       5,
+       [
+        2
+       ],
+       {
+        "at": "2026-11-20T12:00:00Z",
+        "decision": "admit",
+        "effective_remaining": 5,
+        "item": "job-a",
+        "observation": {
+         "observed_at": "2026-11-20T11:59:30Z",
+         "remaining": 5,
+         "successful": true
+        },
+        "ordinary_eligible": false,
+        "reservation_counts": {}
+       }
+      ],
+      "backfill_daily_capacity": {
+       "2026-11-20": {
+        "completed_partitions": 0,
+        "spare_admissions": 1
+       }
+      },
+      "backfill_reservations": {
+       "job-a:1": {
+        "at": "2026-11-20T12:00:00Z",
+        "item": "job-a",
+        "quota_state": "reserved",
+        "vendor_run_id": null
+       }
+      },
+      "backfill_usage": {
+       "observed_at": "2026-11-20T11:59:30Z",
+       "reflected_reservations": [],
+       "remaining": 5,
+       "successful": true
+      },
+      "items": [
+       {
+        "attempt": 1,
+        "attempt_id": "job-a:1",
+        "id": "job-a",
+        "job_id": "job-a",
+        "kind": "backfill",
+        "state": "launch-unknown",
+        "vendor_state": "unknown"
+       }
+      ],
+      "starts": []
+     }
+    },
+    "trace": [
+     [
+      "state_event",
+      "job-a",
+      "2026-11-20T12:00:00Z",
+      "atomic quota reservation before launch",
+      {
+       "attempt": 1,
+       "attempt_id": "job-a:1",
+       "id": "job-a",
+       "job_id": "job-a",
+       "kind": "backfill",
+       "state": "launch-unknown",
+       "vendor_state": "unknown"
+      }
+     ],
+     [
+      "save",
+      {
+       "backfill_admission_history_version": 1,
+       "backfill_admissions": [
+        5,
+        [
+         2
+        ],
+        {
+         "at": "2026-11-20T12:00:00Z",
+         "decision": "admit",
+         "effective_remaining": 5,
+         "item": "job-a",
+         "observation": {
+          "observed_at": "2026-11-20T11:59:30Z",
+          "remaining": 5,
+          "successful": true
+         },
+         "ordinary_eligible": false,
+         "reservation_counts": {}
+        }
+       ],
+       "backfill_daily_capacity": {
+        "2026-11-20": {
+         "completed_partitions": 0,
+         "spare_admissions": 1
+        }
+       },
+       "backfill_reservations": {
+        "job-a:1": {
+         "at": "2026-11-20T12:00:00Z",
+         "item": "job-a",
+         "quota_state": "reserved",
+         "vendor_run_id": null
+        }
+       },
+       "backfill_usage": {
+        "observed_at": "2026-11-20T11:59:30Z",
+        "reflected_reservations": [],
+        "remaining": 5,
+        "successful": true
+       },
+       "items": [
+        {
+         "attempt": 1,
+         "attempt_id": "job-a:1",
+         "id": "job-a",
+         "job_id": "job-a",
+         "kind": "backfill",
+         "state": "launch-unknown",
+         "vendor_state": "unknown"
+        }
+       ],
+       "starts": []
+      }
+     ]
+    ]
+   },
+   "spec": {
+    "dry": false,
+    "event_mutates": false,
+    "fn": "rank4",
+    "index": 0,
+    "now": "2026-11-20T12:00:00Z",
+    "ordinary": false,
+    "queue": {
+     "backfill_admissions": [
+      5,
+      [
+       2
+      ]
+     ],
+     "backfill_usage": {
+      "observed_at": "2026-11-20T11:59:30Z",
+      "reflected_reservations": [],
+      "remaining": 5,
+      "successful": true
+     },
+     "items": [
+      {
+       "attempt": 0,
+       "id": "job-a",
+       "job_id": "job-a",
+       "kind": "backfill",
+       "state": "pending"
+      }
+     ],
+     "starts": []
+    },
+    "refresh": null
+   }
+  },
+  {
+   "name": "admission history with a row object without a decision is appended to",
+   "result": {
+    "ok": {
+     "admitted": true,
+     "queue": {
+      "backfill_admission_history_version": 1,
+      "backfill_admissions": [
+       {
+        "at": "t"
+       },
+       {
+        "at": "2026-11-20T12:00:00Z",
+        "decision": "admit",
+        "effective_remaining": 5,
+        "item": "job-a",
+        "observation": {
+         "observed_at": "2026-11-20T11:59:30Z",
+         "remaining": 5,
+         "successful": true
+        },
+        "ordinary_eligible": false,
+        "reservation_counts": {}
+       }
+      ],
+      "backfill_daily_capacity": {
+       "2026-11-20": {
+        "completed_partitions": 0,
+        "spare_admissions": 1
+       }
+      },
+      "backfill_reservations": {
+       "job-a:1": {
+        "at": "2026-11-20T12:00:00Z",
+        "item": "job-a",
+        "quota_state": "reserved",
+        "vendor_run_id": null
+       }
+      },
+      "backfill_usage": {
+       "observed_at": "2026-11-20T11:59:30Z",
+       "reflected_reservations": [],
+       "remaining": 5,
+       "successful": true
+      },
+      "items": [
+       {
+        "attempt": 1,
+        "attempt_id": "job-a:1",
+        "id": "job-a",
+        "job_id": "job-a",
+        "kind": "backfill",
+        "state": "launch-unknown",
+        "vendor_state": "unknown"
+       }
+      ],
+      "starts": []
+     }
+    },
+    "trace": [
+     [
+      "state_event",
+      "job-a",
+      "2026-11-20T12:00:00Z",
+      "atomic quota reservation before launch",
+      {
+       "attempt": 1,
+       "attempt_id": "job-a:1",
+       "id": "job-a",
+       "job_id": "job-a",
+       "kind": "backfill",
+       "state": "launch-unknown",
+       "vendor_state": "unknown"
+      }
+     ],
+     [
+      "save",
+      {
+       "backfill_admission_history_version": 1,
+       "backfill_admissions": [
+        {
+         "at": "t"
+        },
+        {
+         "at": "2026-11-20T12:00:00Z",
+         "decision": "admit",
+         "effective_remaining": 5,
+         "item": "job-a",
+         "observation": {
+          "observed_at": "2026-11-20T11:59:30Z",
+          "remaining": 5,
+          "successful": true
+         },
+         "ordinary_eligible": false,
+         "reservation_counts": {}
+        }
+       ],
+       "backfill_daily_capacity": {
+        "2026-11-20": {
+         "completed_partitions": 0,
+         "spare_admissions": 1
+        }
+       },
+       "backfill_reservations": {
+        "job-a:1": {
+         "at": "2026-11-20T12:00:00Z",
+         "item": "job-a",
+         "quota_state": "reserved",
+         "vendor_run_id": null
+        }
+       },
+       "backfill_usage": {
+        "observed_at": "2026-11-20T11:59:30Z",
+        "reflected_reservations": [],
+        "remaining": 5,
+        "successful": true
+       },
+       "items": [
+        {
+         "attempt": 1,
+         "attempt_id": "job-a:1",
+         "id": "job-a",
+         "job_id": "job-a",
+         "kind": "backfill",
+         "state": "launch-unknown",
+         "vendor_state": "unknown"
+        }
+       ],
+       "starts": []
+      }
+     ]
+    ]
+   },
+   "spec": {
+    "dry": false,
+    "event_mutates": false,
+    "fn": "rank4",
+    "index": 0,
+    "now": "2026-11-20T12:00:00Z",
+    "ordinary": false,
+    "queue": {
+     "backfill_admissions": [
+      {
+       "at": "t"
+      }
+     ],
+     "backfill_usage": {
+      "observed_at": "2026-11-20T11:59:30Z",
+      "reflected_reservations": [],
+      "remaining": 5,
+      "successful": true
+     },
+     "items": [
+      {
+       "attempt": 0,
+       "id": "job-a",
+       "job_id": "job-a",
+       "kind": "backfill",
+       "state": "pending"
+      }
+     ],
+     "starts": []
+    },
+    "refresh": null
+   }
+  },
+  {
    "name": "a refusal marks wait_reason and appends history",
    "result": {
     "ok": {
@@ -8499,6 +8994,297 @@
      "starts": []
     },
     "run_id": "run-1"
+   }
+  },
+  {
+   "name": "a list attempt_id with no reservation table raises KeyError",
+   "result": {
+    "message": "'backfill_reservations'",
+    "raises": "KeyError"
+   },
+   "spec": {
+    "fn": "bind",
+    "index": 0,
+    "queue": {
+     "items": [
+      {
+       "attempt": 0,
+       "attempt_id": [
+        "x"
+       ],
+       "id": "job-a",
+       "job_id": "job-a",
+       "kind": "backfill",
+       "state": "pending"
+      }
+     ],
+     "starts": []
+    },
+    "run_id": "run-1"
+   }
+  },
+  {
+   "name": "an object attempt_id with no reservation table raises KeyError",
+   "result": {
+    "message": "'backfill_reservations'",
+    "raises": "KeyError"
+   },
+   "spec": {
+    "fn": "bind",
+    "index": 0,
+    "queue": {
+     "items": [
+      {
+       "attempt": 0,
+       "attempt_id": {
+        "k": 1
+       },
+       "id": "job-a",
+       "job_id": "job-a",
+       "kind": "backfill",
+       "state": "pending"
+      }
+     ],
+     "starts": []
+    },
+    "run_id": "run-1"
+   }
+  },
+  {
+   "name": "an object attempt_id raises TypeError",
+   "result": {
+    "message": "cannot use 'dict' as a dict key (unhashable type: 'dict')",
+    "raises": "TypeError"
+   },
+   "spec": {
+    "fn": "bind",
+    "index": 0,
+    "queue": {
+     "backfill_reservations": {
+      "job-a:1": {
+       "at": "2026-11-20T12:00:00Z",
+       "item": "job-a",
+       "quota_state": "reserved",
+       "vendor_run_id": null
+      }
+     },
+     "items": [
+      {
+       "attempt": 0,
+       "attempt_id": {
+        "k": 1
+       },
+       "id": "job-a",
+       "job_id": "job-a",
+       "kind": "backfill",
+       "state": "pending"
+      }
+     ],
+     "starts": []
+    },
+    "run_id": "run-1"
+   }
+  },
+  {
+   "name": "an equal integer run id is idempotent",
+   "result": {
+    "ok": {
+     "queue": {
+      "backfill_reservations": {
+       "job-a:1": {
+        "at": "2026-11-20T12:00:00Z",
+        "item": "job-a",
+        "quota_state": "reserved",
+        "vendor_run_id": 5
+       }
+      },
+      "items": [
+       {
+        "attempt": 0,
+        "attempt_id": "job-a:1",
+        "id": "job-a",
+        "job_id": "job-a",
+        "kind": "backfill",
+        "state": "reviewing",
+        "vendor_state": "live"
+       }
+      ],
+      "starts": []
+     }
+    }
+   },
+   "spec": {
+    "fn": "bind",
+    "index": 0,
+    "queue": {
+     "backfill_reservations": {
+      "job-a:1": {
+       "at": "2026-11-20T12:00:00Z",
+       "item": "job-a",
+       "quota_state": "reserved",
+       "vendor_run_id": 5
+      }
+     },
+     "items": [
+      {
+       "attempt": 0,
+       "attempt_id": "job-a:1",
+       "id": "job-a",
+       "job_id": "job-a",
+       "kind": "backfill",
+       "state": "launch-unknown",
+       "vendor_state": "unknown"
+      }
+     ],
+     "starts": []
+    },
+    "run_id": 5
+   }
+  },
+  {
+   "name": "an equal float run id is idempotent",
+   "result": {
+    "ok": {
+     "queue": {
+      "backfill_reservations": {
+       "job-a:1": {
+        "at": "2026-11-20T12:00:00Z",
+        "item": "job-a",
+        "quota_state": "reserved",
+        "vendor_run_id": 5.0
+       }
+      },
+      "items": [
+       {
+        "attempt": 0,
+        "attempt_id": "job-a:1",
+        "id": "job-a",
+        "job_id": "job-a",
+        "kind": "backfill",
+        "state": "reviewing",
+        "vendor_state": "live"
+       }
+      ],
+      "starts": []
+     }
+    }
+   },
+   "spec": {
+    "fn": "bind",
+    "index": 0,
+    "queue": {
+     "backfill_reservations": {
+      "job-a:1": {
+       "at": "2026-11-20T12:00:00Z",
+       "item": "job-a",
+       "quota_state": "reserved",
+       "vendor_run_id": 5
+      }
+     },
+     "items": [
+      {
+       "attempt": 0,
+       "attempt_id": "job-a:1",
+       "id": "job-a",
+       "job_id": "job-a",
+       "kind": "backfill",
+       "state": "launch-unknown",
+       "vendor_state": "unknown"
+      }
+     ],
+     "starts": []
+    },
+    "run_id": 5.0
+   }
+  },
+  {
+   "name": "a true run id equals an existing 1",
+   "result": {
+    "ok": {
+     "queue": {
+      "backfill_reservations": {
+       "job-a:1": {
+        "at": "2026-11-20T12:00:00Z",
+        "item": "job-a",
+        "quota_state": "reserved",
+        "vendor_run_id": true
+       }
+      },
+      "items": [
+       {
+        "attempt": 0,
+        "attempt_id": "job-a:1",
+        "id": "job-a",
+        "job_id": "job-a",
+        "kind": "backfill",
+        "state": "reviewing",
+        "vendor_state": "live"
+       }
+      ],
+      "starts": []
+     }
+    }
+   },
+   "spec": {
+    "fn": "bind",
+    "index": 0,
+    "queue": {
+     "backfill_reservations": {
+      "job-a:1": {
+       "at": "2026-11-20T12:00:00Z",
+       "item": "job-a",
+       "quota_state": "reserved",
+       "vendor_run_id": 1
+      }
+     },
+     "items": [
+      {
+       "attempt": 0,
+       "attempt_id": "job-a:1",
+       "id": "job-a",
+       "job_id": "job-a",
+       "kind": "backfill",
+       "state": "launch-unknown",
+       "vendor_state": "unknown"
+      }
+     ],
+     "starts": []
+    },
+    "run_id": true
+   }
+  },
+  {
+   "name": "an unequal integer run id conflicts",
+   "result": {
+    "message": "vendor identity conflict",
+    "raises": "IntegrityError"
+   },
+   "spec": {
+    "fn": "bind",
+    "index": 0,
+    "queue": {
+     "backfill_reservations": {
+      "job-a:1": {
+       "at": "2026-11-20T12:00:00Z",
+       "item": "job-a",
+       "quota_state": "reserved",
+       "vendor_run_id": 5
+      }
+     },
+     "items": [
+      {
+       "attempt": 0,
+       "attempt_id": "job-a:1",
+       "id": "job-a",
+       "job_id": "job-a",
+       "kind": "backfill",
+       "state": "launch-unknown",
+       "vendor_state": "unknown"
+      }
+     ],
+     "starts": []
+    },
+    "run_id": 6
    }
   },
   {
