@@ -66,7 +66,7 @@ both are empty. `TICK_MISSING_EFFECTS` (`src/queue-runner/tick.ts`) repeats
 
 - `harvest-review-effects`: `harvest_review` effects beyond the run-artifact reads (findings.md for non-local kinds, `removeWorktree`, `writeReceipt`, `repairEnqueue`, `backfillHarvest`, `requestPrReview`, coverage).
 - `repair-harvest-effects`: `repair_tick.harvest` queue side (worktree, verify, mechanical, `markFindingOutcome`, `cleanupHarvested`, publish); only the reads are file-backed.
-- `start-one-effects`: `fileLaunchEffects` (`src/adapters/crq/launchEffects.ts`) binds the clock, repo identity, band, run directory, worktree, `meta.json`, work record, event and `_review` spawn effects. Its scans, blocked receipt, author lease, on-demand clone and queue save stay required injected seams, and `CoverageEffects` (select, measureMerged, coverageCandidate, legacyOrigins, buildSynthetic, rank4Gate) have no implementation.
+- `start-one-effects`: `fileLaunchEffects` (`src/adapters/crq/launchEffects.ts`) binds the clock, repo identity, band, run directory, worktree, `meta.json`, work record, event and `_review` spawn effects. Its scans, blocked receipt, author lease, on-demand clone and queue save stay required injected seams, and `CoverageEffects` `select`, `buildSynthetic`, `rank4Gate` and the tick clocks and queue helpers stay injected. `makeCoverageEffects` (`src/adapters/crq/coverageEffects.ts`) binds the merged half: `mergeQueueSha`, `diffNameOnly`, `measureMerged`, `coverageCandidate`, `legacyOrigins`, `legacyRetryAllowed`.
 - `repair-parity`: repair-side tick passes have no seeded differential against Python.
 - `shadow-d2`: only the plan is shadowed, not the composed phases.
 
