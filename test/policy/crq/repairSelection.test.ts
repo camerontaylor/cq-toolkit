@@ -511,6 +511,17 @@ describe('repair explicit selection', () => {
     expect(result.selection.originJob).toEqual(jobOrigin);
   });
 
+  test('a queue with no items key stays a KeyError for select_job (queue["items"]), unlike drain_job', () => {
+    const { input } = selectInputOf(caseByName('select-prepared'));
+    expect(selectJob(input).ok).toBe(true);
+    // select_job reads `queue['items']`; drain_job reads `queue.get('items', [])` and treats the
+    // same document as an empty queue (see the drainJob test of the same shape).
+    expect(selectJob({ ...input, queue: new JsonObject([]) })).toMatchObject({
+      ok: false,
+      refusal: 'selection-malformed',
+    });
+  });
+
   test('numeric and boolean item ids match across independently parsed documents', () => {
     const entry = caseByName('select-prepared');
     const { input } = selectInputOf(entry);

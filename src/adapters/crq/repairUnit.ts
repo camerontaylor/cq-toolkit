@@ -68,7 +68,7 @@ export interface RepairUnitOptions {
   readonly utc?: () => string;
   /** Test seam for the bounded `git fetch`; defaults to the real one. */
   readonly runFetch?: RunFetch;
-  /** Test seam for `classifyJob`'s five synchronous git reads; defaults to hardened `git -C <clone>`. */
+  /** Test seam for `classifyJob`'s five synchronous git reads; defaults to hardened git run with `cwd` set to the clone. */
   readonly runGitSync?: RunGitSync;
   /** Test seam for the registry; defaults to the central one. */
   readonly entries?: () => Promise<readonly OpRegistryEntry<unknown, unknown>[]>;
