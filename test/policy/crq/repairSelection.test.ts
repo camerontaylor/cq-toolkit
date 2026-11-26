@@ -405,12 +405,18 @@ describe('repair selection refusal cases', () => {
 
   test('a malformed queue is a typed skip, not an exception', () => {
     const { input } = drainInputOf(base);
-    for (const queue of [new JsonObject([]), new JsonObject([['items', 'not-an-array']])]) {
-      const outcome = drainJob({ ...input, queue });
-      expect(outcome.status).toBe('skip');
-      if (outcome.status === 'run') throw new Error('unreachable');
-      expect(outcome.refusal).toBe('selection-malformed');
-    }
+    const outcome = drainJob({ ...input, queue: new JsonObject([['items', 'not-an-array']]) });
+    expect(outcome.status).toBe('skip');
+    if (outcome.status === 'run') throw new Error('unreachable');
+    expect(outcome.refusal).toBe('selection-malformed');
+  });
+
+  test('a queue with no items key is empty, as queue.get("items", []), not malformed', () => {
+    const { input } = drainInputOf(base);
+    const outcome = drainJob({ ...input, queue: new JsonObject([]) });
+    expect(outcome.status).toBe('skip');
+    if (outcome.status === 'run') throw new Error('unreachable');
+    expect(outcome.refusal).toBe('no-queued-run');
   });
 
   test('a missing source blob is a typed stale/skip, never a crash', () => {

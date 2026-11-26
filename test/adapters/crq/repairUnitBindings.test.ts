@@ -4,6 +4,7 @@
 // equal, and a Python exception must coincide with a TS throw. No network, provider or
 // queue state; the only git is a local bare origin inside the temp dir.
 import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -11,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
 import { fileRepairUnit } from '../../../src/adapters/crq/repairUnit.js';
 import { withLock } from '../../../src/adapters/crq/lock.js';
-import { workerLimit } from '../../../src/ops/crq/internal/repairDrain.js';
+import { holdBackfillGroups, workerLimit } from '../../../src/ops/crq/internal/repairDrain.js';
 import { JsonNumber, JsonObject, parseJsonValue } from '../../../src/policy/crq/jsonValue.js';
 import type { JsonValue } from '../../../src/policy/crq/jsonValue.js';
 
@@ -41,7 +42,9 @@ type Op =
   | 'read_backlog'
   | 'pending'
   | 'unreadable_result'
-  | 'mark_stale';
+  | 'mark_stale'
+  | 'classify_job'
+  | 'hold_backfill';
 type FileSpec = string | { dir: true };
 interface Case {
   name: string;
@@ -88,6 +91,56 @@ async function snapshot(state: string, dir = state): Promise<Record<string, stri
   return out;
 }
 
+interface SeedCommit {
+  files: Record<string, string>;
+  /** The origin branch the commit is pushed to; the local clone is then reset (default `main`). */
+  push?: string;
+}
+
+/**
+ * The oracle's `seed_clone`, command for command. A fixed identity and date make the commit
+ * ids reproducible, so a job can name a commit both sides will have. Returns each commit id.
+ */
+function seedClone(clone: string, commits: SeedCommit[]): string[] {
+  const env = {
+    PATH: process.env.PATH ?? '',
+    GIT_AUTHOR_NAME: 'oracle',
+    GIT_AUTHOR_EMAIL: 'oracle@example.invalid',
+    GIT_COMMITTER_NAME: 'oracle',
+    GIT_COMMITTER_EMAIL: 'oracle@example.invalid',
+    GIT_AUTHOR_DATE: '2026-01-01T00:00:00Z',
+    GIT_COMMITTER_DATE: '2026-01-01T00:00:00Z',
+  };
+  const git = (...args: string[]): string =>
+    execFileSync('git', ['-C', clone, '-c', 'commit.gpgsign=false', ...args], {
+      env,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+  const ids: string[] = [];
+  commits.forEach((entry, index) => {
+    const before = index > 0 ? git('rev-parse', 'HEAD') : '';
+    for (const [rel, text] of Object.entries(entry.files)) {
+      mkdirSync(dirname(join(clone, rel)), { recursive: true });
+      writeFileSync(join(clone, rel), text);
+      git('add', rel);
+    }
+    git('commit', '--quiet', '-m', `seed ${String(index)}`);
+    ids.push(git('rev-parse', 'HEAD'));
+    const branch = entry.push ?? 'main';
+    git('push', '--quiet', 'origin', `HEAD:refs/heads/${branch}`);
+    if (branch !== 'main') git('reset', '--quiet', '--hard', before);
+  });
+  return ids;
+}
+
+/** The commit ids a seed produces, from a scratch clone (they do not depend on the clone's path). */
+function seedIds(commits: SeedCommit[]): string[] {
+  const tmp = mkdtempSync(join(tmpdir(), 'crq-unit-seed-'));
+  cleanups.push(tmp);
+  return seedClone(makeClone(tmp), commits);
+}
+
 function makeClone(tmp: string): string {
   const clone = join(tmp, 'clone');
   const origin = join(tmp, 'origin.git');
@@ -120,7 +173,12 @@ async function runTs(item: Case): Promise<Outcome> {
   const now = (): Date => clock[Math.min(reads++, clock.length - 1)] as Date;
   const config = 'config' in args ? toJson(args.config) : undefined;
   const clone =
-    item.op === 'fetch_clone' && item.clone !== 'none' ? makeClone(tmp) : join(tmp, 'clone');
+    (item.op === 'fetch_clone' || item.op === 'classify_job') && item.clone !== 'none'
+      ? makeClone(tmp)
+      : join(tmp, 'clone');
+  if (item.op === 'classify_job' && item.clone !== 'none' && args.seed) {
+    seedClone(clone, args.seed as SeedCommit[]);
+  }
   const { drain } = fileRepairUnit({
     stateRoot: state,
     clone,
@@ -186,6 +244,24 @@ async function runTs(item: Case): Promise<Outcome> {
       case 'unreadable_result':
         ok = await drain.unreadableResult(args.job as string);
         break;
+      case 'classify_job': {
+        const outcome = await drain.classifyJob(toJson(args.queue), args.job as string);
+        ok = { status: outcome.status, job: plain(outcome.job), reason: outcome.reason };
+        break;
+      }
+      case 'hold_backfill': {
+        const narrated: string[] = [];
+        const groups = new Map((args.items as string[]).map((name) => [name, ['x']]));
+        const kept = await holdBackfillGroups(
+          groups,
+          () => drain.readBacklog(),
+          () => drain.nowMs(),
+          async () => true,
+          (line) => narrated.push(line),
+        );
+        ok = { kept: [...kept.keys()], narrated };
+        break;
+      }
       case 'mark_stale':
         ok = await drain.markStale(toJson(args.jobObject) as JsonObject, args.reason as string);
         ok = null;
@@ -207,14 +283,22 @@ function runOracle(cases: Case[]): Outcome[] {
   return (JSON.parse(stdout) as { results: Outcome[] }).results;
 }
 
-/** Each side runs in its own temp dir; an error text that names it is compared without it. */
+/**
+ * Each side runs in its own temp dir; an error text that names it is compared without it. The
+ * parser's own wording after `unreadable job:` (Python's json vs the TS parser) is diagnostic
+ * text, not a verdict, and is compared by its prefix.
+ */
 const scrub = (outcome: Outcome): Outcome =>
-  typeof outcome.ok === 'string'
-    ? {
+  outcome.ok === undefined || outcome.ok === null
+    ? outcome
+    : {
         ...outcome,
-        ok: outcome.ok.replace(/\/\S*(?:repair-unit-oracle-|crq-unit-ts-)[\w-]+/g, '<tmp>'),
-      }
-    : outcome;
+        ok: JSON.parse(
+          JSON.stringify(outcome.ok)
+            .replace(/\/[^"\s]*?(?:repair-unit-oracle-|crq-unit-ts-)[\w-]+/g, '<tmp>')
+            .replace(/("unreadable job: )[^"]*/g, '$1'),
+        ),
+      };
 
 /** Run every case through both implementations and require agreement. */
 async function expectParity(cases: Case[]): Promise<Outcome[]> {
@@ -554,5 +638,351 @@ describe('fileRepairUnit drain bindings against crq_repair.py (Python 3.14)', ()
     const written = python[0]?.files?.['repair/crq-job-1/result.json'] ?? '';
     expect(written).toContain('"started_at": "2026-11-21T00:00:01Z"');
     expect(written).toContain('"finished_at": "2026-11-21T00:00:02Z"');
+  });
+  it('nowMs: the unit clock drives the backlog age window, as hold_backfill_groups', async () => {
+    const path = 'repair/fix-pr-backlog.json';
+    const NOW = '2026-11-21T00:00:00Z';
+    const backlog = (
+      at: unknown,
+      open: unknown = 1,
+      limit: unknown = 3,
+    ): Record<string, string> => ({
+      [path]: JSON.stringify({ at, open, limit }),
+    });
+    const two = ['backfill-finding-a', 'backfill-finding-b'];
+    const hold = (
+      name: string,
+      files: Record<string, string>,
+      extra: Partial<Case> = {},
+    ): Case => ({
+      name,
+      op: 'hold_backfill',
+      files,
+      args: { items: two },
+      ...extra,
+    });
+    const cases: Case[] = [
+      // The age window is 0..3600 s, both ends inclusive.
+      hold('age 0', backlog('2026-11-21T00:00:00Z')),
+      hold('age exactly the limit', backlog('2026-11-20T23:00:00Z')),
+      hold('age one second over', backlog('2026-11-20T22:59:59Z')),
+      hold('one second in the future', backlog('2026-11-21T00:00:01Z')),
+      hold('offset form of the same instant', backlog('2026-11-20T23:30:00+00:00')),
+      hold('a non-UTC offset', backlog('2026-11-21T09:30:00+10:00')),
+      hold('fractional seconds', backlog('2026-11-20T23:59:59.500Z')),
+      hold('naive timestamp', backlog('2026-11-20T23:30:00')),
+      hold('non-string timestamp', backlog(1763683200)),
+      // The same file under a clock that has moved on: only the unit clock can make it stale.
+      hold('same file two hours later', backlog('2026-11-20T23:30:00Z'), {
+        clock: ['2026-11-21T01:30:00Z'],
+      }),
+      // Budget arithmetic over the admitted file.
+      hold('one slot of two groups', backlog(NOW, 2, 3)),
+      hold('no slots', backlog(NOW, 3, 3)),
+      hold('open above limit', backlog(NOW, 5, 3)),
+      hold('boolean open', backlog(NOW, true, 3)),
+      hold('null limit', backlog(NOW, 1, null)),
+      hold('float open', backlog(NOW, 1.5, 3)),
+      hold('missing file', {}),
+      hold('unreadable file', { [path]: '{' }),
+      {
+        name: 'no backfill group: the file is never consulted',
+        op: 'hold_backfill',
+        files: { [path]: '{' },
+        args: { items: ['pr-1', 'pr-2'] },
+      },
+      {
+        name: 'non-backfill groups pass through a held pass',
+        op: 'hold_backfill',
+        files: backlog(NOW, 3, 3),
+        args: { items: ['pr-1', 'backfill-finding-a', 'pr-2'] },
+      },
+    ];
+    const python = await expectParity(cases);
+    const kept = (index: number): unknown =>
+      ((python[index] as Outcome).ok as { kept: string[] }).kept;
+    expect(kept(0)).toEqual(two);
+    expect(kept(1)).toEqual(two);
+    expect(kept(2)).toEqual([]);
+    expect(kept(3)).toEqual([]);
+    expect(kept(9)).toEqual([]);
+    expect(kept(10)).toEqual(['backfill-finding-a']);
+    expect(kept(18)).toEqual(['pr-1', 'pr-2']);
+    expect(kept(19)).toEqual(['pr-1', 'pr-2']);
+  });
+
+  it('nowMs: reads the injected clock at call time and defaults to the wall clock', async () => {
+    const stamps = [Date.parse('2026-11-21T00:00:00Z'), Date.parse('2026-11-21T00:00:07.250Z')];
+    let reads = 0;
+    const { drain } = fileRepairUnit({
+      stateRoot: '/nonexistent',
+      clone: '/nonexistent',
+      narrate: () => undefined,
+      now: () => new Date(stamps[Math.min(reads++, 1)] as number),
+    });
+    expect(reads).toBe(0); // constructing a unit samples nothing
+    expect(drain.nowMs()).toBe(stamps[0]);
+    expect(drain.nowMs()).toBe(stamps[1]);
+    expect(reads).toBe(2);
+    const wall = fileRepairUnit({
+      stateRoot: '/nonexistent',
+      clone: '/nonexistent',
+      narrate: () => undefined,
+    }).drain;
+    const before = Date.now();
+    const sampled = wall.nowMs();
+    expect(sampled).toBeGreaterThanOrEqual(before);
+    expect(sampled).toBeLessThanOrEqual(Date.now());
+  });
+
+  describe('classifyJob: bounded.drain_job over a real clone', () => {
+    const ID = 'crq-run1-F1';
+    const KEPT = 'src/kept.ts';
+    const V1 = 'a\nb\nc\n';
+    const V2 = 'a\nB\nc\n';
+    const V3 = 'a\nb\nC\n';
+    const hex = (n: string): string => n.repeat(40);
+    const FID = hex('d').repeat(1) + hex('d').slice(0, 24); // 64 hex digits
+    const finding = (over: Record<string, unknown> = {}) => ({
+      path: KEPT,
+      line: 2,
+      severity: 'major',
+      body: 'Finding data',
+      ...over,
+    });
+    const jobBody = (pin: string, over: Record<string, unknown> = {}) => ({
+      job: ID,
+      item: 'pr1-merged',
+      run: 'run1',
+      kind: 'merged',
+      pr: 1,
+      repair_base: pin,
+      repair_round: 1,
+      finding: finding(),
+      ...over,
+    });
+    const queueOf = (record: unknown, itemId = 'pr1-merged') => ({
+      items: [{ id: itemId, kind: 'merged', repair_runs: { run1: record } }],
+    });
+    const queued = (pin: string, over: Record<string, unknown> = {}) => ({
+      base: pin,
+      jobs: [ID],
+      state: 'queued',
+      open_pr: false,
+      ...over,
+    });
+    // Main holds A. `fix/x`, `fix/y` and `fix/z` each branch from A: X carries V2, Y carries V3
+    // and Z carries V2 again (a different commit, the same blob).
+    const branched = [
+      { files: { [KEPT]: V1 } },
+      { files: { [KEPT]: V2 }, push: 'fix/x' },
+      { files: { [KEPT]: V3 }, push: 'fix/y' },
+      { files: { [KEPT]: V2 }, push: 'fix/z' },
+    ];
+    const moved = [{ files: { [KEPT]: V1 } }, { files: { [KEPT]: V2 } }];
+    const seedA = [{ files: { [KEPT]: V1 } }];
+    const [PA, PX] = seedIds(branched) as [string, string];
+    const started = { [`repair/${ID}/result.json`]: '{}' };
+    const triageRow = (task: string, status = 'delivered'): Record<string, string> => ({
+      [`backfill/findings/triage/${FID}.json`]: JSON.stringify({
+        status,
+        receipt: { repair_task: task },
+      }),
+    });
+
+    function run(
+      name: string,
+      body: unknown,
+      args: { queue: unknown; seed?: SeedCommit[]; job?: string },
+      extra: Partial<Case> = {},
+    ): Case {
+      return {
+        name,
+        op: 'classify_job',
+        files: {
+          ...(body === undefined
+            ? {}
+            : job(ID, typeof body === 'string' ? body : JSON.stringify(body))),
+          ...extra.files,
+        },
+        args: { job: ID, seed: seedA, ...args },
+        ...(extra.clone ? { clone: extra.clone } : {}),
+      };
+    }
+
+    it('agrees with Python on every refusal, stale ground and bound job', async () => {
+      const q = queueOf(queued(PA));
+      const open = (branch: unknown, pin = PX): Record<string, unknown> =>
+        queued(pin, { open_pr: true, branch });
+      const cases: Case[] = [
+        run('invalid id', jobBody(PA), { queue: q, job: '../x' }),
+        run('job file missing', undefined, { queue: q }),
+        run(
+          'job path is a directory',
+          undefined,
+          { queue: q },
+          { files: { [`repair/inbox/${ID}.json`]: { dir: true } } },
+        ),
+        run('job is a list', '[]', { queue: q }),
+        run('job is not json', '{', { queue: q }),
+        run('job names another id', jobBody(PA, { job: 'crq-other-F1' }), { queue: q }),
+        run('item absent from the queue', jobBody(PA), { queue: queueOf(queued(PA), 'other') }),
+        run('queue item without an id', jobBody(PA), { queue: { items: [{ repair_runs: {} }] } }),
+        run('queue without items', jobBody(PA), { queue: {} }),
+        run('record not queued', jobBody(PA), { queue: queueOf(queued(PA, { state: 'running' })) }),
+        run('job missing from the record', jobBody(PA), {
+          queue: queueOf(queued(PA, { jobs: ['x'] })),
+        }),
+        run('no finding', jobBody(PA, { finding: undefined }), { queue: q }),
+        run('minor severity', jobBody(PA, { finding: finding({ severity: 'minor' }) }), {
+          queue: q,
+        }),
+        run('path escapes the repository', jobBody(PA, { finding: finding({ path: '../x' }) }), {
+          queue: q,
+        }),
+        run('path is absent', jobBody(PA, { finding: finding({ path: undefined }) }), { queue: q }),
+        run('pin is not a sha', jobBody('main'), { queue: queueOf(queued('main')) }),
+        run('pin differs from the run record', jobBody(PA), { queue: queueOf(queued(hex('b'))) }),
+        run('canonical id malformed', jobBody(PA, { canonical_finding_id: 'abc' }), { queue: q }),
+        run('canonical row missing', jobBody(PA, { canonical_finding_id: FID }), { queue: q }),
+        run(
+          'canonical row names another task',
+          jobBody(PA, { canonical_finding_id: FID }),
+          { queue: q },
+          {
+            files: triageRow('crq-other-F1'),
+          },
+        ),
+        run(
+          'canonical row delivered',
+          jobBody(PA, { canonical_finding_id: FID }),
+          { queue: q },
+          {
+            files: triageRow(ID),
+          },
+        ),
+        run(
+          'canonical minor finding is repaired',
+          jobBody(PA, { canonical_finding_id: FID, finding: finding({ severity: 'minor' }) }),
+          { queue: q },
+          {
+            files: triageRow(ID),
+          },
+        ),
+        run('bound at the pin', jobBody(PA), { queue: q }),
+        run('path absent at the pin', jobBody(PA, { finding: finding({ path: 'src/gone.ts' }) }), {
+          queue: q,
+        }),
+        run('source changed on the default branch', jobBody(PA), { queue: q, seed: moved }),
+        run(
+          'resumed job keeps a moved default branch',
+          jobBody(PA),
+          { queue: q, seed: moved },
+          { files: started },
+        ),
+        run(
+          'resumed job with the path gone',
+          jobBody(PA, { finding: finding({ path: 'src/gone.ts' }) }),
+          { queue: q },
+          {
+            files: started,
+          },
+        ),
+        run(
+          'prepared job, resumed',
+          jobBody(PA, { revalidation: { source_blob_sha: 'x' } }),
+          { queue: q },
+          {
+            files: started,
+          },
+        ),
+        run('open PR already on the default branch', jobBody(PA), {
+          queue: queueOf(open('fix/x', PA)),
+          seed: branched,
+        }),
+        run('open PR branch gone', jobBody(PX), {
+          queue: queueOf(open('fix/gone')),
+          seed: branched,
+        }),
+        run('open PR branch at the pin', jobBody(PX), {
+          queue: queueOf(open('fix/x')),
+          seed: branched,
+        }),
+        run('open PR branch changed the source', jobBody(PX), {
+          queue: queueOf(open('fix/y')),
+          seed: branched,
+        }),
+        run('open PR branch moved, same source blob', jobBody(PX), {
+          queue: queueOf(open('fix/z')),
+          seed: branched,
+        }),
+        run('open PR branch starts with a dash', jobBody(PX), {
+          queue: queueOf(open('-x')),
+          seed: branched,
+        }),
+        run('open PR branch is not a string', jobBody(PX), {
+          queue: queueOf(open(7)),
+          seed: branched,
+        }),
+        run(
+          'open PR resumed with its branch gone',
+          jobBody(PX),
+          { queue: queueOf(open('fix/gone')), seed: branched },
+          {
+            files: started,
+          },
+        ),
+        run('clone is missing', jobBody(PA), { queue: q }, { clone: 'none' }),
+      ];
+      const python = await expectParity(cases);
+      const at = (name: string): Record<string, unknown> => {
+        const index = cases.findIndex((c) => c.name === name);
+        return (python[index]?.ok ?? { error: python[index]?.error }) as Record<string, unknown>;
+      };
+      // The oracle's own verdicts, so a case that silently stopped reaching its rule fails here.
+      expect(at('invalid id')).toMatchObject({ status: 'skip' });
+      expect(at('canonical row missing')).toMatchObject({ status: 'skip' });
+      expect(at('canonical row delivered')).toMatchObject({ status: 'run' });
+      expect(at('canonical minor finding is repaired')).toMatchObject({ status: 'run' });
+      expect(at('minor severity')).toMatchObject({ status: 'skip' });
+      expect(at('bound at the pin')).toMatchObject({ status: 'run', reason: '' });
+      expect(at('path absent at the pin')).toMatchObject({ status: 'stale' });
+      expect(at('source changed on the default branch')).toMatchObject({ status: 'stale' });
+      expect(at('resumed job keeps a moved default branch')).toMatchObject({ status: 'run' });
+      expect(at('resumed job with the path gone')).toMatchObject({
+        status: 'skip',
+        reason: 'pinned source path missing',
+      });
+      expect(at('prepared job, resumed')).toMatchObject({ status: 'run' });
+      expect(at('open PR already on the default branch')).toMatchObject({ status: 'stale' });
+      expect(at('open PR branch gone')).toMatchObject({ status: 'stale' });
+      expect(at('open PR branch at the pin')).toMatchObject({ status: 'run' });
+      expect(at('open PR branch changed the source')).toMatchObject({ status: 'stale' });
+      expect(at('open PR branch moved, same source blob')).toMatchObject({ status: 'run' });
+      expect(at('open PR branch starts with a dash')).toMatchObject({ status: 'stale' });
+      expect(at('open PR resumed with its branch gone')).toMatchObject({ status: 'run' });
+      // The bound job carries the pin the seed produced: the ids are reproducible across sides.
+      expect(at('bound at the pin').job).toMatchObject({ source_sha: PA });
+    });
+
+    it('a failing git read throws, as Python raises, instead of reporting stale', async () => {
+      const boom = new Error('git is unavailable');
+      const stateRoot = await mkdtemp(join(tmpdir(), 'crq-unit-classify-'));
+      cleanups.push(stateRoot);
+      await mkdir(join(stateRoot, 'repair', 'inbox'), { recursive: true });
+      await writeFile(
+        join(stateRoot, 'repair', 'inbox', `${ID}.json`),
+        JSON.stringify(jobBody(PA)),
+      );
+      const { drain } = fileRepairUnit({
+        stateRoot,
+        clone: '/nonexistent',
+        narrate: () => undefined,
+        runGitSync: () => {
+          throw boom;
+        },
+      });
+      await expect(drain.classifyJob(toJson(queueOf(queued(PA))), ID)).rejects.toBe(boom);
+    });
   });
 });

@@ -42,6 +42,7 @@ import { readBackfillRollout } from './backfillRollout.js';
 import type { RunGit } from './ledgerGit.js';
 import { fileRepairDispatchEffects } from './repairDispatchSource.js';
 import { fileRepairAdmissionLock, fileRepairFetchClone, type RunFetch } from './repairFetchLock.js';
+import { fileRepairClassifyJob, type RunGitSync } from './repairClassifySource.js';
 import { fileRepairHarvestEffects } from './repairHarvestSource.js';
 import { blocked, fileRepairPauseEffects } from './repairPauseSource.js';
 import { fileRepairRunOptions } from './repairRunSource.js';
@@ -67,6 +68,8 @@ export interface RepairUnitOptions {
   readonly utc?: () => string;
   /** Test seam for the bounded `git fetch`; defaults to the real one. */
   readonly runFetch?: RunFetch;
+  /** Test seam for `classifyJob`'s five synchronous git reads; defaults to hardened `git -C <clone>`. */
+  readonly runGitSync?: RunGitSync;
   /** Test seam for the registry; defaults to the central one. */
   readonly entries?: () => Promise<readonly OpRegistryEntry<unknown, unknown>[]>;
 }
@@ -83,6 +86,8 @@ export type RepairDrainBindings = Pick<
   | 'inboxItem'
   | 'readQueue'
   | 'readBacklog'
+  | 'nowMs'
+  | 'classifyJob'
   | 'unreadableResult'
   | 'pending'
   | 'markStale'
@@ -174,6 +179,11 @@ function drainBindings(options: RepairUnitOptions): RepairDrainBindings {
     tickLockWait: async () => fetchLockWait(options.config),
     ...(options.runFetch ? { runFetch: options.runFetch } : {}),
   });
+  const classifyJob = fileRepairClassifyJob({
+    stateRoot,
+    clone: options.clone,
+    ...(options.runGitSync ? { runGitSync: options.runGitSync } : {}),
+  });
   return {
     maxConcurrentItems: async () => repairSection(options.config).get('max_concurrent_items'),
     dispatchPaused: async () => {
@@ -194,6 +204,10 @@ function drainBindings(options: RepairUnitOptions): RepairDrainBindings {
     inboxItem: (jobId) => state.inboxItem(jobId),
     readQueue: () => state.readQueue(),
     readBacklog: () => state.readBacklog(),
+    // `dt.datetime.now(dt.timezone.utc)` in `hold_backfill_groups`, on the same injectable
+    // clock as `blocked`; the drain samples it only after reading the backlog file.
+    nowMs: () => (options.now ?? (() => new Date()))().getTime(),
+    classifyJob,
     unreadableResult: (jobId) => state.unreadableResult(jobId),
     pending: (jobId) => state.pending(jobId),
     markStale: (job, reason) => state.markStale(job, reason),
@@ -210,6 +224,15 @@ function drainBindings(options: RepairUnitOptions): RepairDrainBindings {
  * runner-disabled marker and `narrate` are the only two of its effects bound
  * here (`PassGateEffects`). Everything below is a binding to supply before the
  * drain can run for real; none activates anything by existing.
+ *
+ * Three effects remain, each for a stated reason:
+ * - `triage`: only the "not configured" gates are bound; the judge, context scan and
+ *   delivery transport are the cq-op path (D3), not this slice.
+ * - `processItem`: `repairItemLoop.processRepairItem` ports the serial loop, but its
+ *   `process` effect is Python's `process()`, which creates the worktree, runs the
+ *   fixer and judge, and calls `resume_worktree` recovery (held on #2342). The loop
+ *   cannot be bound without one of those, so it is left unbound rather than half-bound.
+ * - `startWorker`: process isolation (fork, private pipe, reap, never kill).
  */
 export const REPAIR_UNIT_MISSING_EFFECTS: readonly { name: string; python: string }[] = [
   {
@@ -218,13 +241,9 @@ export const REPAIR_UNIT_MISSING_EFFECTS: readonly { name: string; python: strin
       'crq_repair.triage_phase (judge, context scan, delivery; only the null gates are bound)',
   },
   {
-    name: 'RepairDrainEffects.nowMs',
-    python: 'crq_repair.hold_backfill_groups (dt.datetime.now(dt.timezone.utc) backlog age clock)',
-  },
-  { name: 'RepairDrainEffects.classifyJob', python: 'bounded.drain_job (prose reason)' },
-  {
     name: 'RepairDrainEffects.processItem',
-    python: 'crq_repair.process_item (serial findings; recover_job)',
+    python:
+      'crq_repair.process_item (serial findings; its `process` runs the fixer/judge and resume_worktree recovery)',
   },
   {
     name: 'RepairDrainEffects.startWorker',

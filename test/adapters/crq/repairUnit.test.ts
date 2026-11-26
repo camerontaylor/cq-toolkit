@@ -101,8 +101,6 @@ describe('fileRepairUnit', () => {
   it('lists only the drain effects the unit still leaves unbound', () => {
     expect(REPAIR_UNIT_MISSING_EFFECTS.map((e) => e.name)).toEqual([
       'RepairDrainEffects.triage',
-      'RepairDrainEffects.nowMs',
-      'RepairDrainEffects.classifyJob',
       'RepairDrainEffects.processItem',
       'RepairDrainEffects.startWorker',
     ]);
