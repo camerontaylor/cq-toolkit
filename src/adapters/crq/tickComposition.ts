@@ -152,8 +152,10 @@ export const STAGED_GAPS: readonly TickGap[] = [
       'bound offline, none composed into the tick or routed: makeWorktree/removeWorktree, verify and ' +
       'mechanical (repairHarvestRunners.ts), requireCanonicalDelivery, saveQueue and replayBudget ' +
       '(repairHarvestState.ts), publish (repairHarvestPublish.ts); ' +
-      'still injected: the forge reads and writes (gh pr view|list|create), newItem, the clock and the ' +
-      'gitleaks binary; the admission-history compaction log is not ported',
+      'bound offline, differentially pinned, not composed or routed (repairHarvestForge.ts): the gh pr create ' +
+      'write, newItem with its clock and the save_queue admission-history compaction log (the TS loader ' +
+      'never records a pending compaction); the forge reads and the gitleaks invocation are pinned ' +
+      'against fakes but need a live gh, token and gitleaks at runtime',
   },
   {
     id: 'start-one-effects',
