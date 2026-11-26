@@ -122,6 +122,11 @@ describe('repairWorkerMain', () => {
     expect(() => e.startWorker('pr-2', [])).toThrow('nested workers');
   });
 
+  test('the config reparse accepts NaN/Infinity and duplicate keys like the config reader', () => {
+    const configText = '{"repair": {"a": NaN, "b": -Infinity, "c": Infinity}, "repair": {}}';
+    expect(() => workerEffects({ ...payload, configText })).not.toThrow();
+  });
+
   test('a bad payload exits 1 before touching the pipe', async () => {
     expect(await runRepairWorkerMain(['node', 'entry', 'garbage'])).toBe(1);
   });

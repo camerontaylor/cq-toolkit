@@ -14,9 +14,9 @@
  */
 import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { parseJsonValue } from '../../policy/crq/jsonValue.js';
 import type { RepairDrainEffects } from '../../ops/crq/internal/repairDrain.js';
 import { fdWorkerChannel, runWorkerChild } from './repairWorkerChild.js';
+import { parseRepairConfigText } from './repairCli.js';
 import { fileRepairUnit } from './repairUnit.js';
 
 export interface WorkerPayload {
@@ -52,7 +52,7 @@ export function workerEffects(payload: WorkerPayload): RepairDrainEffects {
   const unit = fileRepairUnit({
     stateRoot: payload.stateRoot,
     clone: payload.clone,
-    config: parseJsonValue(payload.configText),
+    config: parseRepairConfigText(payload.configText),
     narrate: narrateToStderr,
   });
   return {

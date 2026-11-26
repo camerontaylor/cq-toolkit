@@ -2,10 +2,10 @@
 // entry (test/helpers/repairWorkerStub.mjs). Every scenario ends with the child
 // exiting on its own; the tests await `exit` and never signal a child. The only
 // signal is a stub killing itself, to reach the signal-death branch.
-import { writeFileSync } from 'node:fs';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { existsSync, writeFileSync } from 'node:fs';
+import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, describe, expect, test } from 'vitest';
 import {
@@ -31,6 +31,8 @@ interface Scenario {
   signal?: string;
   fdsTo?: string;
   holdUntil?: string;
+  afterRelease?: string[];
+  reportTo?: string;
 }
 
 const dirs: string[] = [];
@@ -104,6 +106,36 @@ describe('startWorker process mechanism', () => {
   test('a worker that kills itself is reported by signal number', async () => {
     const h = starter({ i: { publish: ['a'], signal: 'SIGKILL' } })('i', ['j']);
     expect(await h.exit).toEqual({ kind: 'signal', signal: 9 });
+  });
+
+  test('relative stateRoot and clone reach the child absolute, and the child runs in stateRoot', async () => {
+    const dir = await tmp();
+    const report = join(dir, 'report.json');
+    const rel = relative(process.cwd(), dir);
+    const h = starter({ i: { publish: ['a'], reportTo: report } }, {}, rel)('i', ['j']);
+    await h.exit;
+    const seen = JSON.parse(await readFile(report, 'utf8')) as Record<string, string>;
+    expect(seen['stateRoot']).toBe(dir);
+    expect(seen['clone']).toBe(join(dir, 'clone'));
+    expect(await realpath(seen['cwd'] ?? '')).toBe(await realpath(dir));
+  });
+
+  test('takeRefusal sees a refusal already in the socket before the loop delivers it', async () => {
+    const dir = await tmp();
+    const release = join(dir, 'release');
+    const done = join(dir, 'done');
+    const h = starter({
+      i: { publish: ['a'], holdUntil: release, afterRelease: ['x'], reportTo: done },
+    })('i', ['j']);
+    expect(await h.admitted).toBe(true);
+    await writeFile(release, '');
+    // Wait (blocking the loop, bounded) until the child has written the byte and exited its body.
+    const cell = new Int32Array(new SharedArrayBuffer(4));
+    for (let spins = 0; spins < 400 && !existsSync(done); spins += 1) Atomics.wait(cell, 0, 0, 10);
+    expect(existsSync(done)).toBe(true);
+    // No await since the byte was written: only a direct socket read can see it.
+    expect(h.takeRefusal()).toBe(true);
+    await h.exit;
   });
 
   test('a missing entry or interpreter throws synchronously', () => {

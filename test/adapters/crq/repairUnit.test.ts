@@ -1,7 +1,9 @@
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { ownedWorkerCount } from '../../../src/adapters/crq/repairWorkerProcess.js';
 import {
   fileRepairUnit,
   REPAIR_UNIT_MISSING_EFFECTS,
@@ -103,6 +105,23 @@ describe('fileRepairUnit', () => {
     expect(() => u.drain.startWorker('pr-1', ['j1'])).toThrow(
       'repair worker launch is not configured',
     );
+  });
+
+  it('starts and reaps a stub worker through a configured unit', async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), 'repair-unit-worker-'));
+    const configured = fileRepairUnit({
+      stateRoot,
+      clone: join(stateRoot, 'clone'),
+      narrate: () => undefined,
+      configText: JSON.stringify({ 'pr-1': { publish: ['a'], exit: 0 } }),
+      workerLaunch: {
+        entry: fileURLToPath(new URL('../../helpers/repairWorkerStub.mjs', import.meta.url)),
+      },
+    });
+    const handle = configured.drain.startWorker('pr-1', ['j1']);
+    expect(await handle.admitted).toBe(true);
+    expect(await handle.exit).toEqual({ kind: 'exit', code: 0 });
+    expect(ownedWorkerCount()).toBe(0);
   });
 
   it('lists only the drain effects the unit still leaves unbound', () => {

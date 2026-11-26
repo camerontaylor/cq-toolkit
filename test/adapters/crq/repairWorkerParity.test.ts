@@ -40,6 +40,8 @@ interface PyScenario {
 }
 interface Case {
   name: string;
+  /** Whether a worker may end before the next admission (a scheduling race both sides may win). */
+  racy?: boolean;
   order: string[];
   limit: number;
   marker?: boolean;
@@ -64,10 +66,11 @@ function exitOf(spec: PyScenario): { exit?: number; signal?: string } {
   return { exit: 0 };
 }
 
-const CASES: Case[] = [
+const BASE_CASES: Case[] = [
   { name: 'clean pass, six items, limit 3', order: ['a', 'b', 'c', 'd', 'e', 'f'], limit: 3 },
   {
     name: 'rate limit stops new admission',
+    racy: true,
     order: ['a', 'b', 'c'],
     limit: 2,
     scenarios: { a: { outcome: 'rate-limit' } },
@@ -95,23 +98,35 @@ const CASES: Case[] = [
   },
   {
     name: 'death by signal is a failure',
+    racy: true,
     order: ['a', 'b'],
     limit: 2,
     scenarios: { a: { crash: 'signal' } },
   },
   {
     name: 'a raised worker exits 1 and is a failure',
+    racy: true,
     order: ['a', 'b'],
     limit: 2,
     scenarios: { a: { crash: 'raise' } },
   },
   {
     name: 'a child-gate refusal is not a failure',
+    racy: true,
     order: ['a', 'b'],
     limit: 2,
     scenarios: { a: { gate: 'refuse' } },
   },
 ];
+
+/** A racy case is run five times: the assertions must hold whichever side wins the race. */
+const CASES: Case[] = BASE_CASES.flatMap((spec) =>
+  spec.racy ? [1, 2, 3, 4, 5].map((n) => ({ ...spec, name: `${spec.name} (run ${n})` })) : [spec],
+);
+const caseNamed = (name: string): PyResult | undefined =>
+  results[CASES.findIndex((c) => c.name === name)];
+
+const results = runPython(CASES);
 
 const dirs: string[] = [];
 afterAll(async () => {
@@ -139,7 +154,7 @@ async function runTs(
   for (const item of spec.order) {
     const scripted = spec.scenarios?.[item] ?? {};
     scenarios[item] = {
-      publish: [...(py.bytes[item] ?? '')],
+      publish: [...(py.bytes[item] ?? 'a')],
       ...exitOf(scripted),
       ...(scripted.waitFor ? { holdUntil: release } : {}),
     };
@@ -174,15 +189,22 @@ async function runTs(
 }
 
 describe('startWorker parity with the forking drain_items', () => {
-  const results = runPython(CASES);
-
   CASES.forEach((spec, index) => {
     test(spec.name, async () => {
       const py = results[index];
       if (!py) throw new Error('missing oracle result');
       expect(py.error).toBeNull();
       const ts = await runTs(spec, py);
-      expect(ts.forked).toEqual(py.forked);
+      if (spec.racy) {
+        // Which later items start before the first worker is reaped is a race on both sides;
+        // each side must still have admitted a non-empty in-order prefix, never past the stop.
+        for (const forked of [ts.forked, py.forked]) {
+          expect(forked.length).toBeGreaterThan(0);
+          expect(forked).toEqual(spec.order.slice(0, forked.length));
+        }
+      } else {
+        expect(ts.forked).toEqual(py.forked);
+      }
       expect([...ts.failures].sort()).toEqual([...py.failures].sort());
       expect([...ts.narration].sort()).toEqual([...py.narration].sort());
       expect(ownedWorkerCount()).toBe(0);
@@ -190,13 +212,16 @@ describe('startWorker parity with the forking drain_items', () => {
   });
 
   test('anchors: the Python results are the ones the table claims', () => {
-    expect(results[0]?.failures).toEqual([]);
-    expect(results[2]?.failures).toEqual(['b']);
-    expect(results[3]?.forked).toEqual(['a', 'b']);
-    expect(results[4]?.forked).toEqual([]);
-    expect(results[5]?.failures).toEqual(['a']);
-    expect(results[6]?.failures).toEqual(['a']);
-    expect(results[7]?.bytes.a).toBe('x');
-    expect(results[7]?.failures).toEqual([]);
+    expect(caseNamed('clean pass, six items, limit 3')?.failures).toEqual([]);
+    expect(caseNamed('a crashed worker is a failure')?.failures).toEqual(['b']);
+    expect(caseNamed('a crash stops admission while another worker is held')?.forked).toEqual([
+      'a',
+      'b',
+    ]);
+    expect(caseNamed('the runner marker forks nothing')?.forked).toEqual([]);
+    expect(caseNamed('death by signal is a failure (run 1)')?.failures).toEqual(['a']);
+    expect(caseNamed('a raised worker exits 1 and is a failure (run 1)')?.failures).toEqual(['a']);
+    expect(caseNamed('a child-gate refusal is not a failure (run 1)')?.bytes['a']).toBe('x');
+    expect(caseNamed('a child-gate refusal is not a failure (run 1)')?.failures).toEqual([]);
   });
 });
