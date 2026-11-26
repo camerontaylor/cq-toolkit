@@ -145,7 +145,11 @@ export function makeRepairTransport(
   options: RepairTransportOptions,
 ): (key: JsonValue, request: JsonValue) => Promise<JsonValue> {
   const { files, cell, saveQueue, maxRoundsPerPin } = options;
-  return async (key, request) => {
+  // Python's call runs to completion: nothing else can read or enqueue
+  // between the ceiling check and the enqueue. The seams here are async, so
+  // acceptance is serialized to keep that atomicity.
+  let tail: Promise<unknown> = Promise.resolve();
+  const accept = async (key: JsonValue, request: JsonValue): Promise<JsonValue> => {
     const jobId = prependText('crq-backfill-', key);
     const itemId = prependText('backfill-finding-', key);
     const run = prependText('backfill-', key);
@@ -221,6 +225,11 @@ export function makeRepairTransport(
       ['acknowledgement', ledgerDigestOf(job)],
       ['repair_task', jobId],
     ]);
+  };
+  return (key, request) => {
+    const result = tail.then(() => accept(key, request));
+    tail = result.catch(() => undefined);
+    return result;
   };
 }
 
@@ -356,7 +365,7 @@ export function configuredRepairTransport(
   return makeRepairTransport({
     files,
     cell,
-    saveQueue: context.saveQueue,
+    saveQueue: (queue) => context.saveQueue(queue),
     maxRoundsPerPin,
     async scan(target, name) {
       const [base, head] = await runtime.projection(repo, target, [name]);

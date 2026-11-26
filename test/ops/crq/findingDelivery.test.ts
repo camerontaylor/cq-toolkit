@@ -9,7 +9,9 @@
  * specs run through one in-memory file tree and must reproduce every fact,
  * including that nothing outside the sandbox is addressed.
  */
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { posix } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import {
   JsonNumber,
@@ -18,11 +20,7 @@ import {
   toPlainJson,
   type JsonValue,
 } from '../../../src/policy/crq/jsonValue.js';
-import {
-  LedgerIntegrityError,
-  ledgerCanonicalBytes,
-  ledgerLoads,
-} from '../../../src/policy/crq/ledger.js';
+import { LedgerIntegrityError, ledgerLoads } from '../../../src/policy/crq/ledger.js';
 import { pythonJsonText } from '../../../src/policy/crq/pythonJson.js';
 import { pythonStr } from '../../../src/policy/crq/prReviewFindings.js';
 import {
@@ -90,9 +88,52 @@ class Trace {
   readonly entries: string[] = [];
 }
 
+const SANDBOX_ROOT = '/sandbox';
+
+/**
+ * Every path a seam addresses, resolved against the sandbox root: a path that
+ * is absolute, carries a `..` segment or resolves outside the root is an escape.
+ */
+class ContainedFiles extends Map<string, Uint8Array> {
+  readonly escapes: string[] = [];
+
+  private check(path: string): void {
+    const resolved = posix.resolve(SANDBOX_ROOT, path);
+    const inside = resolved.startsWith(`${SANDBOX_ROOT}/`);
+    if (posix.isAbsolute(path) || path.split('/').includes('..') || !inside) {
+      this.escapes.push(path);
+    }
+  }
+
+  override get(path: string): Uint8Array | undefined {
+    this.check(path);
+    return super.get(path);
+  }
+
+  override has(path: string): boolean {
+    this.check(path);
+    return super.has(path);
+  }
+
+  override set(path: string, data: Uint8Array): this {
+    this.check(path);
+    return super.set(path, data);
+  }
+}
+
 /** One sandbox: every path is relative to it, so nothing outside can exist. */
 class Sandbox {
-  readonly files = new Map<string, Uint8Array>();
+  readonly files = new ContainedFiles();
+
+  /** SHA-256 of the exact bytes of every file `tree()` lists. */
+  digests(): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const path of this.tree()) {
+      const data = this.files.get(path) as Uint8Array;
+      out[path] = createHash('sha256').update(data).digest('hex');
+    }
+    return out;
+  }
 
   /** `Path.parent.name + "/" + Path.name`, the shape the Python trace records. */
   static traceName(path: string): string {
@@ -385,7 +426,9 @@ function makeTransport(spec: JsonObject, rig: Rig, record: Recorder, mode: JsonO
       files: rig.files,
       cell: rig.cell,
       saveQueue,
-      maxRoundsPerPin: clean('max_rounds', JsonNumber.int(2)),
+      maxRoundsPerPin: mode.has('max_rounds')
+        ? plain(mode.get('max_rounds'))
+        : clean('max_rounds', JsonNumber.int(2)),
       async scan(target, name) {
         record.calls.push(['scan', target, name]);
         return clean('source_clean', true);
@@ -525,6 +568,9 @@ describe('finding delivery oracle vectors', () => {
         const want = obj(expected[index], 'expected step');
         const record: Recorder = { calls: [], queueSaves: [] };
         rig.trace.entries.length = 0;
+        for (const [fid, row] of optionalObject(step.get('seed_rows')).entries) {
+          rig.sandbox.files.set(`${FINDINGS}/triage/${fid}.json`, entryBytes(row));
+        }
         const outcome = await runStep(spec, rig, record, step);
         const label = `${name} step ${index}`;
         expect([label, outcome.raises ?? null]).toEqual([
@@ -571,13 +617,89 @@ describe('finding delivery oracle vectors', () => {
           label,
           toPlainJson(want.get('tree') as JsonValue),
         ]);
-        // The rig has one file tree rooted at the sandbox, so every path it
-        // can address is `state/...`; the recorded sentinel must be untouched.
+        // The exact bytes of every file must match, not a parsed re-render.
+        expect([label, rig.sandbox.digests()]).toEqual([
+          label,
+          toPlainJson(want.get('digests') as JsonValue),
+        ]);
+        // Every path any seam addressed resolved inside the sandbox root, and
+        // the recorded sentinel beside the Python sandbox stayed untouched.
+        expect([label, rig.sandbox.files.escapes]).toEqual([label, []]);
         expect(want.get('outside_untouched')).toBe(true);
-        expect([...rig.sandbox.files.keys()].every((path) => path.startsWith('state/'))).toBe(true);
       }
     });
   }
 });
 
-void ledgerCanonicalBytes;
+describe('repair transport seams', () => {
+  function caseSpec(name: string): JsonObject {
+    const found = cases.map((raw) => obj(raw, 'case')).find((entry) => entry.get('name') === name);
+    if (found === undefined) throw new Error(`missing case ${name}`);
+    return obj(found.get('spec'), 'spec');
+  }
+
+  test('concurrent accepts are serialized so the ceiling holds across enqueue', async () => {
+    const source = caseSpec('accept-ceiling-custom-one');
+    const spec = new JsonObject([
+      ...source.entries.filter(([key]) => key !== 'queue'),
+      ['queue', new JsonObject([['items', []]])],
+    ]);
+    const rig = await build(spec);
+    const step = obj(arr(spec.get('steps'), 'steps')[0], 'step');
+    const [key, request] = arr(step.get('args'), 'args') as [JsonValue, JsonValue];
+    const mode = obj(step.get('transport'), 'transport');
+    const record: Recorder = { calls: [], queueSaves: [] };
+    const accept = makeTransport(spec, rig, record, mode);
+    // One round of headroom per pin: Python runs two accepts one after the
+    // other, so exactly one may enqueue and the other must hit the ceiling.
+    const results = await Promise.allSettled([
+      accept('a'.repeat(64), request),
+      accept(key, request),
+    ]);
+    expect(results.map((result) => result.status).sort()).toEqual(['fulfilled', 'rejected']);
+    const rejected = results.find(
+      (result) => result.status === 'rejected',
+    ) as PromiseRejectedResult;
+    expect((rejected.reason as { pythonError?: string }).pythonError).toBe('RepairRoundCeiling');
+  });
+
+  test('the configured transport saves the queue through its context, not a detached method', async () => {
+    const source = caseSpec('accept-ceiling-custom-one');
+    const spec = new JsonObject([
+      ...source.entries.filter(([key]) => key !== 'queue'),
+      ['queue', new JsonObject([['items', []]])],
+    ]);
+    const rig = await build(spec);
+    const saved: string[] = [];
+    class Context implements ConfiguredTransportContext {
+      readonly config: JsonValue = new JsonObject([['repair', new JsonObject([])]]);
+      readonly label = 'bound';
+      async saveQueue(value: JsonValue): Promise<void> {
+        saved.push(`${this.label}:${text(value)}`);
+      }
+      async secretScan(): Promise<JsonValue> {
+        return [true, null];
+      }
+      async secretScanDiff(): Promise<JsonValue> {
+        return [true, null];
+      }
+    }
+    const runtime: ConfiguredRuntime = {
+      async projection(_repo, target) {
+        return [`base-${pythonStr(target)}`, `head-${pythonStr(target)}`];
+      },
+    };
+    const transport = configuredRepairTransport(
+      new Context(),
+      'repo',
+      rig.files,
+      rig.cell,
+      runtime,
+    );
+    const step = obj(arr(spec.get('steps'), 'steps')[0], 'step');
+    const args = arr(step.get('args'), 'args');
+    await transport(args[0] as JsonValue, args[1] as JsonValue);
+    expect(saved.length).toBe(1);
+    expect(saved[0]?.startsWith('bound:')).toBe(true);
+  });
+});

@@ -128,6 +128,11 @@ def _tree(sandbox: Path) -> List[str]:
     return out
 
 
+def _digests(sandbox: Path) -> Dict[str, str]:
+    """SHA-256 of the exact bytes of every file the tree lists."""
+    return {rel: hashlib.sha256((sandbox / rel).read_bytes()).hexdigest() for rel in _tree(sandbox)}
+
+
 def _dir_text(directory: Path) -> Dict[str, str]:
     out: Dict[str, str] = {}
     if directory.exists():
@@ -222,7 +227,7 @@ def _make_transport(spec: Dict[str, Any], sandbox: Path, queue: Any, calls: List
         scans = _plain_scans(spec, calls)
         absent = mode.get("absent", [])
         return finding_delivery.repair_transport(
-            sandbox, queue, save_queue, scans["scan"], spec.get("max_rounds", 2),
+            sandbox, queue, save_queue, scans["scan"], mode.get("max_rounds", spec.get("max_rounds", 2)),
             None if "instructions" in absent else scans["scan_instructions"],
             None if "finding" in absent else scans["scan_finding"])
     if kind == "configured":
@@ -263,6 +268,8 @@ def run(spec: Dict[str, Any]) -> Dict[str, Any]:
             outbox.spool(event)
         queue = copy.deepcopy(spec.get("queue", {"items": []}))
         for step in spec["steps"]:
+            for fid, row in step.get("seed_rows", {}).items():
+                _write_file(inbox_root / "triage" / (fid + ".json"), _entry_bytes(row))
             calls: List[Any] = []
             queue_saves: List[str] = []
             trace.clear()
@@ -293,6 +300,7 @@ def run(spec: Dict[str, Any]) -> Dict[str, Any]:
                 repair_inbox=_dir_text(sandbox / "state" / "repair" / "inbox"),
                 pending=_dir_text(sandbox / "state" / "backfill" / "publication" / "pending"),
                 tree=_tree(sandbox),
+                digests=_digests(sandbox),
                 outside_untouched=(sentinel.read_text(encoding="utf-8") == "untouched"
                                    and sorted(p.name for p in outer.iterdir()) == ["sandbox", "sentinel.txt"]),
             )
@@ -306,8 +314,10 @@ def _case(name: str, steps: List[Dict[str, Any]], **spec: Any) -> Dict[str, Any]
     return {"name": name, "spec": {"steps": steps, **spec}}
 
 
-def _deliver(fid: str = FID, at: str = AT, **transport: Any) -> Dict[str, Any]:
+def _deliver(fid: str = FID, at: str = AT, seed_rows: Any = None, **transport: Any) -> Dict[str, Any]:
     step: Dict[str, Any] = {"method": "deliver", "args": [fid, at]}
+    if seed_rows:
+        step["seed_rows"] = seed_rows
     if transport:
         step["transport"] = transport
     return step
@@ -1017,7 +1027,8 @@ def accept_cases() -> List[Dict[str, Any]]:
         queue={"items": [_item("old", [1])]}, max_rounds=9)
     acc("accept-supersede-item-not-dict-attributeerror", queue={"items": ["x"]}, max_rounds=9)
     acc("accept-supersede-partial-mutation-then-typeerror-is-kept",
-        queue={"items": [_item("old", {"r1": _run_record(["j1"]), "r2": _run_record([5])})]}, inbox={"j1": _old_job("j1")}, max_rounds=9)
+        queue={"items": [_item("old", {"r1": _run_record(["j1"], pin="other"), "r2": _run_record([5], pin="other")})]},
+        inbox={"j1": _old_job("j1")}, max_rounds=9)
     acc("accept-supersede-run-record-list-attributeerror",
         queue={"items": [_item("old", {"r1": [1]})]}, max_rounds=9)
     acc("accept-supersede-items-mutated-in-place-before-save-then-saved",
@@ -1050,7 +1061,7 @@ def combined_cases() -> List[Dict[str, Any]]:
     cases.append(_case("e2e-deliver-real-ceiling-leaves-request-saved", [_deliver(**real)], rows={FID: good},
                        max_rounds=0))
     cases.append(_case("e2e-deliver-real-ceiling-then-raised-limit-succeeds",
-                       [_deliver(**real), _deliver(**real)], rows={FID: good},
+                       [_deliver(**real), _deliver(**real, max_rounds=9)], rows={FID: good},
                        queue={"items": [_item("i", {"r1": _run_record(["j1"]), "r2": _run_record(["j2"])})]},
                        inbox={"j1": _old_job("j1"), "j2": _old_job("j2")}))
     cases.append(_case("e2e-deliver-real-finding-scan-rejected", [_deliver(**real)], rows={FID: good}, finding_clean=False))
@@ -1080,6 +1091,11 @@ def combined_cases() -> List[Dict[str, Any]]:
                        repair_files=files))
     cases.append(_case("e2e-retry-after-delivery-two-confirmations",
                        [_deliver(**real), _deliver(**real)], rows={FID: good}))
+    # A second confirmation (new previous_event_id, prior receipt kept) must
+    # derive a new key and a distinct repair task.
+    again = _confirmed(receipt={"acknowledgement": ACK, "repair_task": JOB}, previous_event_id="p1")
+    cases.append(_case("e2e-redelivery-after-second-confirmation-new-key-and-task",
+                       [_deliver(**real), _deliver(seed_rows={FID: again}, **real)], rows={FID: good}))
     return cases
 
 
@@ -1089,7 +1105,10 @@ def build() -> Dict[str, Any]:
         if case is None:
             continue
         try:
-            cases.append({**case, "result": run(case["spec"])})
+            # Run the spec exactly as the replay will read it (keys sorted), so
+            # dict iteration order cannot differ between oracle and port.
+            spec = json.loads(json.dumps(case["spec"], sort_keys=True))
+            cases.append({**case, "spec": spec, "result": run(spec)})
         except Trap as error:
             raise Trap(f"{case['name']}: {error}") from error
     names = [case["name"] for case in cases]
