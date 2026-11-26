@@ -146,7 +146,8 @@ function verifyFixingCommit(
   report: JsonObject,
   verdict: 'fixed' | 'superseded',
 ): string {
-  const commit = repo.resolve(report.get('fixing_commit'));
+  // Python `report.get('fixing_commit')` yields None for a missing key.
+  const commit = repo.resolve(report.get('fixing_commit') ?? null);
   const reachable = pythonSplitlines(decodeStrict(repo.git('rev-list', rangeOf(row, tip))));
   if (!reachable.includes(commit)) throw new TriageGitFailure('ValueError', 'commit not ancestor');
   const target = rowField(row, 'target') as string;

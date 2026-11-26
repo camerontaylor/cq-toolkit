@@ -104,8 +104,8 @@ def flatten_cases() -> list[dict]:
         ("astral", "x\U0001f600y\nz"), ("nul", "a\u0000b"), ("plus and minus lead", "+x\n-y"),
     ):
         add("splitlines: " + label, ctx(region=[text]))
-    add("empty context strings give an empty hunk", {"current_path": "p", "finding": {}})
-    add("only non-string leaves give an empty hunk", {"current_path": "p", "n": 1, "t": True, "z": None})
+    add("empty context strings give an empty hunk", {"finding": {}})
+    add("only non-string leaves give an empty hunk", {"finding": {}, "n": 1, "t": True, "z": None})
     add("empty string values keep their join newlines", {"current_path": "p", "a": "", "b": "", "c": "x"})
     # error_reason through ContextScanError.
     for label, kind, message in (

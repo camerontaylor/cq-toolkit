@@ -51,8 +51,18 @@ class TriageDecisionVectorsTest(unittest.TestCase):
             emitter.run_python(spec)
 
     def test_fixture_contains_no_host_paths(self) -> None:
-        text = emitter.render(emitter.build())
-        self.assertNotIn(tempfile.gettempdir(), text)
+        # A test-owned root with a unique marker: any temp path the emitter
+        # leaks into the fixture carries the marker, whatever TMPDIR is.
+        with tempfile.TemporaryDirectory(prefix="crq-host-path-marker-") as root:
+            marker = Path(root).name
+            previous = tempfile.tempdir
+            tempfile.tempdir = root
+            try:
+                text = emitter.render(emitter.build())
+            finally:
+                tempfile.tempdir = previous
+        self.assertNotIn(marker, text)
+        self.assertNotIn(root, text)
         self.assertNotIn("/tmp/", text)
 
 

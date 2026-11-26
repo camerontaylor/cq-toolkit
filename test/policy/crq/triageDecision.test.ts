@@ -65,7 +65,8 @@ function answer(table: Record<string, Fact>, name: string, what: string): Fact {
 function fakeRepo(spec: DecisionCase, calls: unknown[][]): TriageDecisionRepo {
   return {
     resolve(value) {
-      calls.push(['resolve', toPlainJson(value ?? null) as string]);
+      // Record the raw argument: a missing key must arrive as null (Python None), never undefined.
+      calls.push(['resolve', value === undefined ? '<undefined>' : (toPlainJson(value) as string)]);
       return answer(spec.resolve, key(value), 'resolve').result as string;
     },
     git(...args) {

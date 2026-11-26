@@ -71,7 +71,11 @@ function json(text: string): JsonValue {
 const REFUSED = new Set(['KeyError', 'TypeError', 'AttributeError']);
 
 /** The recording scanner Python's oracle uses, as a TS seam. */
-function recordingScanner(spec: ScannerSpec, calls: string[]): TriageContextScanner {
+function recordingScanner(
+  spec: ScannerSpec,
+  calls: string[],
+  thrown: unknown[] = [],
+): TriageContextScanner {
   return (patch) => {
     calls.push(patch);
     if (spec === 'clean' || spec === 'dirty') return spec === 'clean';
@@ -80,7 +84,9 @@ function recordingScanner(spec: ScannerSpec, calls: string[]): TriageContextScan
     }
     // Every other class is outside the OSError/RuntimeError family: Python
     // never catches it, so the port's seam throws something unrelated.
-    throw new RangeError(spec.raises);
+    const unrelated = new RangeError(spec.raises);
+    thrown.push(unrelated);
+    throw unrelated;
   };
 }
 
@@ -88,7 +94,8 @@ describe('triageContextScan oracle (flatten, verdict, typed refusal)', () => {
   for (const item of fixture.flatten) {
     test(item.name, async () => {
       const calls: string[] = [];
-      const scanner = recordingScanner(item.scanner, calls);
+      const thrown: unknown[] = [];
+      const scanner = recordingScanner(item.scanner, calls, thrown);
       const outcome = await triageContextScan(json(item.context_json), scanner).then(
         (verdict) => ({ verdict }) as { verdict: boolean; error?: undefined },
         (error: unknown) => ({ error }) as { verdict?: undefined; error: unknown },
@@ -108,6 +115,8 @@ describe('triageContextScan oracle (flatten, verdict, typed refusal)', () => {
         expect(outcome.error).toBeInstanceOf(TriageContextScanRefusal);
       } else {
         // A non-OSError/RuntimeError scanner failure propagates unchanged, never wrapped.
+        expect(thrown).toHaveLength(1);
+        expect(outcome.error).toBe(thrown[0]);
         expect(outcome.error).toBeInstanceOf(RangeError);
         expect(outcome.error).not.toBeInstanceOf(ContextScanError);
         expect((outcome.error as RangeError).message).toBe(expected.raises);

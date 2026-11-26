@@ -672,22 +672,22 @@
    "scanner": "clean"
   },
   {
-   "context_json": "{\"current_path\": \"p\", \"finding\": {}}",
+   "context_json": "{\"finding\": {}}",
    "name": "empty context strings give an empty hunk",
    "result": {
     "output_passed_through": true,
-    "patch": "diff --git a/p b/p\n@@ -0,0 +1 @@\n+p\n",
+    "patch": "diff --git a/triage-context.txt b/triage-context.txt\n@@ -0,0 +1 @@\n\n",
     "scanner_calls": 1,
     "verdict": true
    },
    "scanner": "clean"
   },
   {
-   "context_json": "{\"current_path\": \"p\", \"n\": 1, \"t\": true, \"z\": null}",
+   "context_json": "{\"finding\": {}, \"n\": 1, \"t\": true, \"z\": null}",
    "name": "only non-string leaves give an empty hunk",
    "result": {
     "output_passed_through": true,
-    "patch": "diff --git a/p b/p\n@@ -0,0 +1 @@\n+p\n",
+    "patch": "diff --git a/triage-context.txt b/triage-context.txt\n@@ -0,0 +1 @@\n\n",
     "scanner_calls": 1,
     "verdict": true
    },
