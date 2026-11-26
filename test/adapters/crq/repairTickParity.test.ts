@@ -413,11 +413,17 @@ async function run(spec: Spec, queue: JsonObject) {
  *    the other direction: a swapped inbox `job` (`harvest-inbox-job-swapped`) or an inbox `item`
  *    that differs from the queue id (`harvest-inbox-item-differs`) is harvested normally by
  *    Python and terminalised by TS. For these seeds the harvest queue document is not compared
- *    (only the error class and the `invalid repair inbox: ` text); the log, calls, events and
- *    tree ARE compared against Python's, and the cases are listed in `PINNED_PHASE`.
+ *    (only the error class and the `invalid repair inbox: ` text). Events and tree are compared
+ *    with Python's; log and calls are pinned to the terminal path's fixed TS values (`[]`,
+ *    `['save_queue']`) because Python's differ by definition. The cases are listed in `PINNED_PHASE`.
  *    NOT COVERED: the TS-only replay arm in `repairHarvest.ts` (a FAILED verdict whose reason
  *    starts `invalid repair inbox: `). No Python verdict can carry that reason, so no seed can
- *    reach it; `repairHarvestReplay.test.ts` and `repairHarvest.test.ts` pin it.
+ *    reach it. The arm itself is pinned only in `repairHarvest.test.ts`; `repairHarvestReplay.test.ts`
+ *    covers the terminalising side (a malformed inbox ending the run).
+ *    ALSO NOT CAUGHT HERE: an exception-class mutation in the harvest reads (`JSONDecodeError` or
+ *    `UnicodeDecodeError` degraded to `ValueError`) passes this file, because harvest catches
+ *    `ValueError` and the wording normaliser erases the text; `repairHarvest.test.ts` pins it.
+ * (Items 6 and 7 below are disclosed gaps, not pinned deviations: five pinned deviations, two gaps.)
  * 6. Array items in `queue.items`: `liveItems` (`tickSchedule.ts`, held) silently drops an array
  *    item where Python raises `AttributeError` on `.get`. A scalar item reaches the harvest guard
  *    and matches Python (`error-item-not-a-dict`); an array item is not seeded.
