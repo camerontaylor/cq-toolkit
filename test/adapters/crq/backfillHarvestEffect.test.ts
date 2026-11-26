@@ -134,7 +134,7 @@ const repo: BackfillRepo = {
   verifyReview: () => undefined,
 };
 
-async function replay(c: Case) {
+async function replay(c: Case, shape_?: (queue: { items: unknown[] }) => Record<string, unknown>) {
   const root = await mkdtemp(join(tmpdir(), 'backfill-harvest-effect-'));
   dirs.push(root);
   const state = join(root, 'state');
@@ -177,7 +177,7 @@ async function replay(c: Case) {
     ].join(' ');
   };
   const queue = structuredClone(c.input.queue) as { items: Record<string, unknown>[] };
-  const item = queue.items[0] as Record<string, unknown>;
+  const item = shape_ ? shape_(queue) : (queue.items[0] as Record<string, unknown>);
   const effect = backfillHarvestEffect({
     stateRoot: state,
     durableRoot: durable,
@@ -299,5 +299,32 @@ describe('backfillHarvest effect: documented constants', () => {
       'backfill terminal unverified scope; quarantine and retain evidence',
     );
     expect(UNBOUND_QUOTA_OUTCOME).toMatch(/quota failure/);
+  });
+});
+
+describe('backfillHarvest effect: queue write-back', () => {
+  const base = fixture.cases.find((c) => c.name === 'generic failure');
+  const pick = (): Case => {
+    const found = base ?? fixture.cases.find((c) => c.expected.result === 'backfill pending');
+    if (!found) throw new Error('no pending case in the fixture');
+    return found;
+  };
+
+  it('keeps a null items slot and still syncs the caller queue', async () => {
+    const got = await replay(pick(), (queue) => {
+      queue.items.push(null, { id: 'other', kind: 'review' });
+      return queue.items[0] as Record<string, unknown>;
+    });
+    expect(got.error).toBeNull();
+    expect(got.result).toBe(pick().expected.result);
+    expect(got.queue.items[1]).toBeNull();
+    expect(got.queue.items[0]).toBe(got.item);
+    expect(got.log).toEqual(pick().expected.log);
+  });
+
+  it('refuses an item that is not in the queue before any effect runs', async () => {
+    const got = await replay(pick(), () => ({ id: 'stray' }));
+    expect(got.error).toBe('IntegrityError');
+    expect(got.log).toEqual([]);
   });
 });

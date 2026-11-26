@@ -32,6 +32,9 @@
  *   is not `rate_limited`, Python returns a retain-ownership string or terminals with that
  *   outcome; the ops port leaves the queue untouched. This effect throws `LedgerIntegrityError`
  *   rather than silently skip it.
+ * - For a non-quota failure Python trusts the passed `cls` for `outcome`, `retry_after` and
+ *   `message` (`backfill_runtime.py:408-409`); the failure port uses the re-classified bytes
+ *   (the same values whenever `cls` describes those bytes, the only case the oracle can drive).
  * - A missing reservation is a `TypeError` here where Python returns the unverified string.
  * - On a quota+hard-cause mix Python saves the new cooldown before the terminal; the ops port
  *   saves once, at the end.
@@ -126,7 +129,14 @@ export function backfillHarvestEffect(
     // Python mutates `queue` and `item` in place and the caller keeps using both.
     const rebuilt = toPlainJsonRetainingNumbers(next) as Plain;
     const oldItems = plainQueue.items as Plain[];
-    (rebuilt.items as Plain[]).forEach((row, i) => replaceContents(oldItems[i] as Plain, row));
+    const isRecord = (v: unknown): v is Plain =>
+      typeof v === 'object' && v !== null && !Array.isArray(v);
+    (rebuilt.items as unknown[]).forEach((row, i) => {
+      // Slots the schedule never visits (null, scalars) have no identity to keep: take the new value.
+      const slot: unknown = oldItems[i];
+      if (isRecord(slot) && isRecord(row)) replaceContents(slot, row);
+      else oldItems[i] = row as Plain;
+    });
     replaceContents(plainQueue, { ...rebuilt, items: oldItems });
     return message ?? `backfill ${String(item.state)}`;
   };
