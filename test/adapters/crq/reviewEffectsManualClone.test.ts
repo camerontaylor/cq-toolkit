@@ -233,12 +233,11 @@ describe('retained review records', () => {
     return pending;
   }
 
-  test('corrupt or non-object files are skipped and the scan still reaches a later valid record', async () => {
+  test('corrupt files are skipped (a non-object file escapes like Python; see retainedRecordsParity) and the scan still reaches a later valid record', async () => {
     const { root, effects } = await fixture();
     const pending = await pendingDir(root);
     await writeFile(join(pending, 'a-truncated.json'), '{"event_type":"review","id":');
     await writeFile(join(pending, 'b-badutf8.json'), Buffer.from([0x7b, 0xff, 0xfe, 0x7d]));
-    await writeFile(join(pending, 'c-array.json'), '[1]');
     await writeFile(join(pending, 'z-valid.json'), record('ok'));
     const records = await effects.retainedRecords();
     expect(records).toHaveLength(1);
