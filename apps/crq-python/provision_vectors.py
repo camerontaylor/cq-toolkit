@@ -89,7 +89,7 @@ def build_scenarios() -> None:
     add("fail: a sibling clone survives a failed one", "missing/repo",
         pre=[["state/review-repos/missing/repo.partial/.git", "dir"]])
     add("fail: no origin remote on the primary clone", "other/repo", origin=None)
-    add("fail: an empty origin url", "other/repo", origin="")
+    add("fail: an empty origin url", "other/repo", origin="", rewrite=True)
     add("fail: the swapped url is not a repository", "other/repo", remotes=["org/primary"])
     # --- the origin URL: where the primary slug sits ------------------------------------
     add("origin: no primary slug in the url falls back to the forge url, rewritten locally", "other/repo",

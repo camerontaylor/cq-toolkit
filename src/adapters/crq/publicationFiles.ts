@@ -36,8 +36,9 @@
  * - Numbers read from a journal are plain JavaScript values (integers beyond the
  *   safe range stay `bigint`), so a Python float with an integral value (`2.0`)
  *   is rewritten as `2`. The Python writers never emit one.
- * - `save_queue`'s admission-history compaction log is not reproduced: the TS
- *   queue loader refuses a queue needing compaction, so there is none to log.
+ * - `save_queue`'s admission-history compaction log is not reproduced here
+ *   (it is in `fileRepairSaveQueue`, `repairHarvestForge.ts`): the production TS queue loader
+ *   refuses a queue needing compaction, so there is none to log on this path.
  */
 import { mkdir, open } from 'node:fs/promises';
 import { dirname, join } from 'node:path';

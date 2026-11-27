@@ -153,8 +153,9 @@ export const STAGED_GAPS: readonly TickGap[] = [
       'mechanical (repairHarvestRunners.ts), requireCanonicalDelivery, saveQueue and replayBudget ' +
       '(repairHarvestState.ts), publish (repairHarvestPublish.ts); ' +
       'bound offline, differentially pinned, not composed or routed (repairHarvestForge.ts): the gh pr create ' +
-      'write, newItem with its clock and the save_queue admission-history compaction log (the TS loader ' +
-      'never records a pending compaction); the forge reads and the gitleaks invocation are pinned ' +
+      'write, newItem with its clock and the save_queue admission-history compaction log (its loader half, ' +
+      'pendingCompactionLoader, is bound offline and pinned too, but the production loadQueueDocument ' +
+      'still refuses a queue needing compaction, so no runtime caller records one); the forge reads and the gitleaks invocation are pinned ' +
       'against fakes but need a live gh, token and gitleaks at runtime',
   },
   {
@@ -162,7 +163,7 @@ export const STAGED_GAPS: readonly TickGap[] = [
     phases: ['admit.startOne'],
     python: 'start_one, launch (crq.py:3198/:2004)',
     missing:
-      'fileLaunchEffects binds the launch effects and fileLaunchBindings (differentially pinned) binds its scans, blocked receipt, author lease, on-demand clone and queue save, but the caller must still compose them (the admission-history compaction log, gitleaks discovery stays unbound; `provision` is not part of launch: it belongs to the review-v1 submit path and is bound by createReviewEffects, differentially pinned), and CoverageEffects select is still injected (makeCoverageEffects binds buildSynthetic only when its synthetic git deps are supplied, the clocks, liveItems, compareItems and depsMet only when its tick input is supplied, backfillDispatchConfigured only when its dispatch input is supplied (coverageTickSeams.ts, differentially pinned), plus mergeQueueSha, diffNameOnly, measureMerged, coverageCandidate, legacyOrigins, legacyRetryAllowed, rank4Gate, bindRun and cancelBeforeVendor; the clock, ordinary eligibility, usage refresh, outbox and queue writer arrive as Rank4Collaborators)',
+      'fileLaunchEffects binds the launch effects and fileLaunchBindings (differentially pinned) binds its scans, blocked receipt, author lease, on-demand clone and queue save, but the caller must still compose them (gitleaks discovery stays unbound; `provision` is not part of launch: it belongs to the review-v1 submit path and is bound by createReviewEffects, differentially pinned; the admission-history compaction log is bound offline (fileRepairSaveQueue and pendingCompactionLoader, differentially pinned) but the fileLaunchBindings queue save does not use it), and CoverageEffects select is still injected (makeCoverageEffects binds buildSynthetic only when its synthetic git deps are supplied, the clocks, liveItems, compareItems and depsMet only when its tick input is supplied, backfillDispatchConfigured only when its dispatch input is supplied (coverageTickSeams.ts, differentially pinned), plus mergeQueueSha, diffNameOnly, measureMerged, coverageCandidate, legacyOrigins, legacyRetryAllowed, rank4Gate, bindRun and cancelBeforeVendor; the clock, ordinary eligibility, usage refresh, outbox and queue writer arrive as Rank4Collaborators)',
   },
   {
     id: 'shadow-d2',

@@ -21,8 +21,9 @@
  *
  * NOT bound (stays Python-only or caller-owned):
  * - `save_queue`'s admission-history compaction log (`admission_history.log_compaction`,
- *   the `_pending_admission_compaction` global): there is no TS equivalent, so a
- *   queue that still needs the compaction pass is refused at load, never saved here;
+ *   the `_pending_admission_compaction` global): this `saveQueue` does not log
+ *   (`fileRepairSaveQueue` and `pendingCompactionLoader` hold the pinned halves, uncomposed
+ *   here), and the production loader still refuses a queue needing the compaction pass;
  * - gitleaks discovery: the caller supplies the binding (`fileReviewGitleaks`);
  * - `provision` (the on-demand `git clone`): not part of `launch`; its only caller is the
  *   review-v1 `submit` path, bound by `createReviewEffects` (`provisionRepo`, pinned by
