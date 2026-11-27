@@ -96,8 +96,12 @@ PROPERTY_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*")
 PID_RE = re.compile(r"[0-9]+")
 # ``\xHH`` is systemd's C-style escape inside a unit name.
 CRQ_NAME_RE = re.compile(r"crq-(?:[A-Za-z0-9_.@:-]|\\x[0-9A-Fa-f]{2})+")
+# ``PropagatesStopTo`` and ``StopPropagatedFrom`` (systemd v257) are the
+# stop-propagation pair: stopping a cotenant that names the selected unit
+# stops it too, so both directions must be scanned.
 DEPENDENCY_RE = re.compile(
     r"(?P<directive>Wants|Requires|Requisite|BindsTo|PartOf|Conflicts|"
+    r"PropagatesStopTo|StopPropagatedFrom|"
     r"WantedBy|RequiredBy|Also|Upholds|OnFailure|OnSuccess|Triggers|"
     r"TriggersBy|Unit|Service)\s*=\s*(?P<value>.*)")
 UNIT_SUFFIXES = {".service", ".timer", ".path"}

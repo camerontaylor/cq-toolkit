@@ -34,7 +34,7 @@ def _summary(record):
         return record
     keys = ("schema_version", "transaction_id", "operation", "unit", "runtime",
             "prior_runtime", "outcome", "phase", "reason", "completions",
-            "record_path")
+            "record_path", "journal_durability_uncertain")
     summary = {key: record[key] for key in keys if key in record}
     snapshot = record.get("snapshot")
     if isinstance(snapshot, dict):
