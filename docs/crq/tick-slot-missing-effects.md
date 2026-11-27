@@ -47,15 +47,15 @@ imports it, `crq.ts` routes neither `tick` nor `slot`, and `LIVE_UNIT_COMMANDS`
 (`['watchdog', 'publish', 'backfill inventory']`) and the capabilities are
 untouched.
 
-| Phase                                                           | Binding                                                                                                                                             |
-| --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `backfillPublish`, `backfillInventoryMode`, `backfillInventory` | `fileLocalReviewPublishEffects`, `tickBackfillInventory`; always bound (a gap there would be swallowed by `backfill_halted`)                        |
-| `discovery`, `enrollPrimary`, `enrollOthers`                    | `tickDiscoveryBinding`                                                                                                                              |
-| `resetFixPrBacklog`, `refreshFixPrBacklog`                      | `FixPrBacklog` (one `TICK_BACKLOG`, returned for the publisher) plus `fileFixPrBacklogEffects`                                                      |
-| `repairBackfill`, `archiveLegacy`                               | `fileRepairBackfillEffects` over a plain-queue bridge                                                                                               |
-| `harvestItems`, `reconcileCompleted`, `collectFinished`         | `createHarvestPhases`; run artifacts of a Python `_review` child (`review.pid`, `review.ndjson`, `exit.json`, `meta.json`) by `fileHarvestRunReads` |
-| `reconcile`                                                     | `fileReconcilePhaseEffects`; its new `onSaved` hook returns the reconciled queue                                                                    |
-| `writeStatus`, `publishLocalReviewPr`, `recordClientHealth`     | `fileReportingPhases`                                                                                                                               |
+| Phase                                                           | Binding                                                                                                                                                                                                                                      |
+| --------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `backfillPublish`, `backfillInventoryMode`, `backfillInventory` | `fileLocalReviewPublishEffects`, `tickBackfillInventory`; always bound (a gap there would be swallowed by `backfill_halted`)                                                                                                                 |
+| `discovery`, `enrollPrimary`, `enrollOthers`                    | `tickDiscoveryBinding`                                                                                                                                                                                                                       |
+| `resetFixPrBacklog`, `refreshFixPrBacklog`                      | `FixPrBacklog` (one `TICK_BACKLOG`, returned for the publisher) plus `fileFixPrBacklogEffects`                                                                                                                                               |
+| `repairBackfill`, `archiveLegacy`                               | `fileRepairBackfillEffects` over a plain-queue bridge                                                                                                                                                                                        |
+| `harvestItems`, `reconcileCompleted`, `collectFinished`         | `createHarvestPhases`; run artifacts of a Python `_review` child (`review.pid`, `review.ndjson`, `exit.json`, `meta.json`) by `fileHarvestRunReads`; findings, worktree removal, receipt and PR-review request by `fileHarvestReviewEffects` |
+| `reconcile`                                                     | `fileReconcilePhaseEffects`; its new `onSaved` hook returns the reconciled queue                                                                                                                                                             |
+| `writeStatus`, `publishLocalReviewPr`, `recordClientHealth`     | `fileReportingPhases`                                                                                                                                                                                                                        |
 
 A phase whose caller input is absent is bound to a function that rejects with
 `TickGapError` (never a no-op), because Python abandons a tick on a phase error
@@ -64,12 +64,14 @@ work no adapter does whatever the caller supplies; `complete` is true only when
 both are empty. `TICK_MISSING_EFFECTS` (`src/queue-runner/tick.ts`) repeats
 `STAGED_GAPS` (a test keeps them in step):
 
-- `harvest-review-effects`: `harvest_review` effects beyond the run-artifact reads (findings.md for non-local kinds, `removeWorktree`, `writeReceipt`, `repairEnqueue`, `backfillHarvest`, `requestPrReview`, coverage).
-- `repair-harvest-effects`: `repair_tick.harvest` queue side (worktree, verify, mechanical, `markFindingOutcome`, `cleanupHarvested`, publish); only the reads are file-backed.
-- `start-one-effects`: per-kind `LaunchEffects` and `CoverageEffects` for `admit.startOne`.
-- `review-child`: `_review` is not routed in the TS runner; Node needs `--foreground`, the tick kick and backfill proof, or the tick spawns the Python child.
-- `repair-parity`: repair-side tick passes have no seeded differential against Python.
-- `shadow-d2`: only the plan is shadowed, not the composed phases.
+- `harvest-review-effects`: `fileHarvestReviewEffects` (`src/adapters/crq/harvestReviewEffects.ts`) binds findings.md for non-local kinds, `removeWorktree`, `writeReceipt` and `requestPrReview`, each differentially pinned against Python. `repairEnqueue` is bound from the repair-backfill input (`crq_repair.findings` is ported in `src/queue-runner/repairFindings.ts` and read from `RUNS/<run>/review.ndjson`; git, the repair config and the merged-current flag stay injected), `backfillHarvest` is bound by `backfillHarvestEffect` (`src/adapters/crq/backfillHarvestEffect.ts`, differentially pinned, not routed) over the injected git, outbox, inbox, store, `state_event`, queue save and cleanup, but not Python's unverified-terminal retain strings or its quota-cause/no-cooldown outcomes, which throw, and the coverage seam has no harvest-side implementation (start-one `CoverageEffects`).
+- `repair-harvest-effects`: `repair_tick.harvest` queue side. `markFindingOutcome` and `recordUnpublishedFixedSibling` (`fileRepairOutcomeEffects`, `src/adapters/crq/repairOutcomeEffects.ts`) and `cleanupHarvested` (`fileRepairCleanup`, `src/adapters/crq/repairCleanupEffects.ts`) are file-backed and differentially pinned against Python (`apps/crq-python/repair_harvest_effects_vectors.py`); none is composed into the tick. The job/result reads (`readJob`, `readResult`, `resultExists`) are bound in `src/adapters/crq/repairHarvestReads.ts`, not by `fileRepairHarvestEffects`, and this emitter does not pin them. Bound offline but not composed into the tick or routed: `makeWorktree`/`removeWorktree`, `verify` and `mechanical` (`src/adapters/crq/repairHarvestRunners.ts`), `requireCanonicalDelivery`, `saveQueue` and `replayBudget` (`repairHarvestState.ts`), and `publish` with its leased push (`repairHarvestPublish.ts`, exercised against a local bare remote). Bound offline, differentially pinned (`repair_harvest_rest_vectors.py`), not composed or routed (`src/adapters/crq/repairHarvestForge.ts`): the `gh pr create` write (`ghCreateRepairPr`), `newItem` with its clock (`fileRepairNewItem`) and the `save_queue` admission-history compaction log (`fileRepairSaveQueue`; its loader half is `pendingCompactionLoader` (`src/adapters/crq/pendingCompactionLoader.ts`, differentially pinned against `crq.load_queue`, sharing one `QueueCompaction` with `fileRepairSaveQueue`); neither is composed, and the production `loadQueueDocument` still refuses a queue needing compaction, so no runtime caller records one). The forge reads and the gitleaks invocation are exercised against identical fake `gh` and `gitleaks` binaries but still need a live `gh`, token and gitleaks at runtime; the 600 s bound is not waited for in tests. The row stays open until the slots are composed into the tick.
+- `start-one-effects`: `fileLaunchEffects` (`src/adapters/crq/launchEffects.ts`) binds the clock, repo identity, band, run directory, worktree, `meta.json`, work record, event and `_review` spawn effects. `fileLaunchBindings` (`src/adapters/crq/launchBindings.ts`, differentially pinned by `launch_bindings_vectors.py`) binds the scans (`secret_scan`, `secret_scan_diff`, exemptions), blocked receipt, author lease, on-demand clone and queue save, but nothing composes it into the tick yet; gitleaks discovery semantics are pinned (`gitleaksDiscovery.ts`, `findGitleaksOnPath`, differentially pinned by `gitleaks_discovery_vectors.py` against Python 3.14 `shutil.which`, one helper behind `fileReviewGitleaks`, `repairPreparation` and `authorSnapshotInstall`), but the production binding stays unbound: which PATH and scratch root a caller passes is caller-owned and held; `provision` is not part of launch: it belongs to the review-v1 submit path and is bound by createReviewEffects, differentially pinned; the `save_queue` admission-history compaction log is bound offline (`fileRepairSaveQueue` and `pendingCompactionLoader`, differentially pinned) but the `fileLaunchBindings` queue save does not use it. `CoverageEffects` `select` (`backfill_runtime.py:162`) is bound over `src/adapters/crq/coverageSelect.ts` (differentially pinned by `coverage_select_vectors.py`) only when `makeCoverageEffects` is given its `select` input; the live collaborators it takes stay unbound: `c.launch` (the reviewer process spawn), `services`/`GitLedger.fetch` (the real ArtifactStore, Outbox, Spool and publisher), the file-backed `coverage.load`/`coverage.request` and the publication-failure file probe (nothing supplies them yet). `makeCoverageEffects` (`src/adapters/crq/coverageEffects.ts`) binds `buildSynthetic` (`crq.py:1102`, `src/adapters/crq/buildSynthetic.ts`, differentially pinned by `build_synthetic_vectors.py`, only when the `synthetic` git deps are supplied), `mergeQueueSha`, `diffNameOnly`, `measureMerged`, `coverageCandidate`, `legacyOrigins`, `legacyRetryAllowed`, the clocks (`nowMs`, `parseIsoMs`) and queue helpers (`liveItems`, `compareItems`, `depsMet`) when the `tick` input supplies the injected clock and scheduling config, `backfillDispatchConfigured` (`backfill_runtime.py:37`) when the `dispatch` input supplies the state root and policy loader (all over `src/adapters/crq/coverageTickSeams.ts`, differentially pinned by `coverage_tick_seams_vectors.py`), and, over `src/adapters/crq/coverageBackfillSeams.ts` (differentially pinned by `coverage_backfill_vectors.py`), `rank4Gate` (`backfill_runtime.py:123`), `bindRun` and `cancelBeforeVendor` (`backfill_jobs.py:165`/`:173`). The rank4 gate's clock, ordinary eligibility, usage refresh, state-event outbox and queue writer stay injected as `Rank4Collaborators`.
+- `shadow-d2`: the composed tick is shadowed offline (`runComposedShadow`, `test/adapters/crq/composedShadow.test.ts`) but not the slot, the XDG summary.json, the paseo schedule probe, merged discovery, gh-backed enrollment or start_one (stubbed alike on both sides), and one divergence is explained rather than fixed (the superseded-open retirement is not persisted). See [shadow-run-plan.md](shadow-run-plan.md#composed-tick-shadow).
+
+Closed: `repair-parity`. `test/adapters/crq/repairTickParity.test.ts` replays seeded on-disk states through the composed `repairBackfill`, `archiveLegacy` and `harvestItems` phases against `apps/crq-python/fixtures/crq-repair-tick-parity/cases.json`, produced by the real `repair_tick` passes (`apps/crq-python/repair_tick_parity_vectors.py`). Effects not composed into this differential (worktree, verify, mechanical, canonical delivery, queue save, publish; the replay budget is the real TS class with only its clock stubbed) use the same deterministic stub on both sides. Five pinned deviations and two disclosed gaps are listed in the test header, including the malformed-inbox family and the identity guard. Not covered: the TS-only `invalid repair inbox: ` replay arm in `repairHarvest.ts` (no Python verdict can carry that reason), which `repairHarvest.test.ts` pins, and array items in `queue.items`, which the held `liveItems` drops where Python raises. It is not routed.
+
+Closed: `review-child`. `_review <run_id>` is routed in `crq.ts` through `runReviewChildMain` as an internal command. It is not in `LIVE_UNIT_COMMANDS`, because no systemd unit runs it. `tick` and `slot` stay unrouted.
 
 Partly closed in S6-h (`publish`'s recovery arm, inactive): `recoverPublication`
 (`src/queue-runner/publicationRecovery.ts`) is the decision and effect binding
@@ -84,12 +86,11 @@ the prepared head is published but the later open-PR read is still at the
 journaled `target`, and the stale and finalize outcomes. What
 `repair-harvest-effects` still lacks for publication:
 
-- The real `push` binding: `leasedPush` (`src/adapters/git/leasedPush.ts`)
-  takes the same `(branch, expected, sha)` but needs a resolved
-  `PushDestination` and a checkout path, and its not-fast-forward message
-  differs from the one Python raises (`recoverPublication` refuses first with
-  Python's text). Unlike Python's `git push origin`, it also treats a remote
-  already at `sha` after a failed push as success.
+- The `push` binding is `repairHarvestPublish.ts`: Python's exact
+  `git push origin --force-with-lease=refs/heads/<b>:<expected> <sha>:refs/heads/<b>`,
+  failing with `c.git`'s RuntimeError text, not `leasedPush` (whose
+  not-fast-forward message and already-at-`sha` success differ). It is only
+  exercised against a local bare remote.
 - The real bindings of `finalize_publication`'s effects (below): its state
   transitions are ported, see S6-i.
 - The first-publication arm of `publish` (journal absent): its decision
@@ -428,35 +429,41 @@ renders as CPython does because the real `createPr` binding does not exist yet.
 
 S5b resume candidate (inactive, decision only): `src/queue-runner/repairResume.ts`
 models `resume_worktree` and the missing-candidate refusal at the top of
-`crq_repair.process` (`crq_repair.py:472-483,508-521`) over injected read-only probes
-(`resolve`, `is_dir`, `exists`). It answers with the tree to carry on with (the
-recorded `-A2` checkout is adopted only when it resolves differently, is a directory and
-has a `.git` entry; there is no ownership check) or a typed
+`crq_repair.process` (`crq_repair.py`, `resume_worktree` and the pending-stage refusal in
+`process`) over injected read-only probes (`resolve`, `is_dir`, `exists`) and the job's
+owner identity (`worktreeRoot`, `itemId`, `jobId`; Python's `config['worktree_root']`,
+`job['item']`, `job['job']`). It answers with the tree to carry on with or a typed
 `refuse-missing-candidate` naming the pending `judge` (reported first) or `mechanical`
 stage. It saves nothing, runs no judge or mechanical gate and mutates no worktree or
 queue; the caller still owns Python's `atomic(result.json)`.
-`test/queue-runner/repairResume.test.ts` replays 63 named fake-fixture differential
-scenarios against the real `resume_worktree` and `process` (with `atomic` and `retain`
-stubbed to record the first effect and stop), comparing the chosen tree, the refusal, the Python
-`TypeError`/`ValueError` text and the ordered `resolve`/`is_dir`/`exists` probe trace.
-The file holds 71 tests: those 63 scenarios plus 8 that never run Python (the
-scenario-uniqueness guard, the path-coverage guard, a snapshot-discrimination test and
-5 synthetic-probe tests).
-Relative recorded paths are not modelled (resolution is the probe's cwd).
 
-S5b resume ownership gap (evidence only, no behavior change):
-`test/queue-runner/repairResumeOwnership.test.ts` (17 synthetic tests, no filesystem,
-Git, Python, judge or network) feeds the same recorded worktrees to
-`decideRepairCleanup`, used as the ownership oracle, and to `decideResumeCandidate`.
-The established contract (`recovery.py:70-72`, `retain.py:29`) owns only
-`crq-repair-<item>-<job>` and `...-A2` directly under the resolved `WT_ROOT`; the harvest
-validator also accepts the legacy `crq-repair-<item>`. The owned base and `-A2` controls
-agree, but the selector adopts every foreign job or item, legacy, unrelated, `-A2-A2`,
-outside-root, nested and `WT_ROOT` record that has a `.git` entry (9 pinned divergences),
-and refuses only a missing candidate. Open gate before any wiring: the policy for a
-resumed tree is undecided (adopt as Python does, or require the owned name), and no
-Python contract for Git registration exists (nothing runs `git worktree list`), so a
-registration flag in the fixtures is synthetic and provably inert.
+Resume ownership (Python and TS change together): the recorded tree is adopted only when
+it resolves differently from the tree in hand, is owned, is a directory and has a `.git`
+entry. Owned is the rule `recovery.py:70-72` and `retain.cleanup_harvested` already apply:
+the resolved tree sits directly under the resolved worktree root and is named
+`crq-repair-<item>-<job>` or that name plus `-A2`. A foreign job or item, the legacy
+`crq-repair-<item>` name, an `-A2-A2` or `-A3` name, a tree outside or nested below the
+root, the root itself, and an owned-looking symlink whose target is not so named are not
+adopted. Because the tree in hand then differs from the recorded one, a pending judge or
+mechanical stage is refused with the existing `pending <stage> worktree unavailable; needs
+human` result (never judged or verified in a foreign tree), and `dispatch_pending` alone
+keeps the tree in hand and so never retains a foreign tree. A foreign-named symlink whose
+target is the owned `-A2` tree still resolves to it and is adopted. Nothing reads `git
+worktree list`: `.git` existence remains the only registration evidence, and a registration
+flag in the fixtures is synthetic and provably inert.
+
+Evidence: `test/queue-runner/repairResume.test.ts` replays named fake-fixture differential
+scenarios against the real `resume_worktree` and `process` (with `atomic` and `retain`
+stubbed to record the first effect and stop), comparing the chosen tree, the refusal, the
+Python `TypeError`/`ValueError` text and the ordered `resolve`/`is_dir`/`exists` probe
+trace (the worktree-root resolve is part of the trace); every formerly adopted foreign,
+outside, nested, legacy and `-A2-A2` name is replayed as a judge, mechanical,
+`dispatch_pending` and running-in-`-A2` case. `test/queue-runner/repairResumeOwnership.test.ts`
+feeds synthetic records to `decideRepairCleanup`, used as the ownership oracle, and to
+`decideResumeCandidate`, which now agree on every record.
+`apps/crq-python/test_repair_resume_ownership.py` pins the same names and the refusal and
+fallback effects on the Python side with throwaway directories. Relative recorded paths are
+not modelled (resolution is the probe's cwd).
 
 Still unwired after S6-l through S6-t: `push` (the leased remote write),
 `createPr` (forge write) and `hackDetector`, plus the binding of any of these, or
@@ -524,12 +531,12 @@ Sizes are rough estimates of adapter and glue code over the existing pure logic.
 
 ### Admission and launch (about 1.5k–2k lines)
 
-| Gap                                  | Python                                                                                           | TypeScript pieces                                                                                                                                      | What is missing                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| ------------------------------------ | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `admit.startOne`                     | `start_one` (`crq.py:3198`)                                                                      | selection loop `startOne` (`src/queue-runner/startOne.ts:116`)                                                                                         | A `StartOneEffects` implementation. That means a `planItem` dispatcher by kind over `planOpen`/`planDelta` (`ordinaryPlan.ts:92`/`:144`), `planMerged`/`planAuthor` (`mergedAuthorPlan.ts`), `prepareCurrent`, `preparePushCurrent` and the local-review prepare (`preparePasses.ts`), plus the PR lookup and quiet gate. `ensure_commit`, `measure_merged` and `build_synthetic` exist only as effect members.                  |
-| `launch`                             | `launch` (`crq.py:2004`)                                                                         | `reserveAndSpawnReview` (`src/queue-runner/reviewLaunch.ts:64`), `prepareOrdinaryReview` (`src/queue-runner/reviewPreparation.ts:48`, open/delta only) | Meta, scan and `cmd` for receipt, push-current, local-review, author, merged/coverage and backfill. Also the secret scan with exemptions and a blocked-scan receipt. `ReviewLaunchEffects` is unbound.                                                                                                                                                                                                                           |
-| Detached review child                | `cmd_review_child` (`crq.py:2202`), spawned as `python3 crq.py _review <run_id>` (`crq.py:2150`) | `runReviewChild` (`src/adapters/crq/reviewProcess.ts:103`), no runtime caller                                                                          | `_review` is in the runner's command set (`src/queue-runner/runner.ts:31`) but not routed. `runReviewChild` differs from Python in three ways. It runs `timeout` without `--foreground`. It does not start `crq-tick.service` (`--no-block`) when the child finishes. It refuses backfill submission proof. An interim TS launch could spawn the Python child (same artifact names: `review.pid`, `review.ndjson`, `exit.json`). |
-| Coverage fallback and backfill usage | `_coverage_fallback` (`crq.py:3131`), `backfill_runtime.usage_context`                           | `coverageFallback`, `usageContext` (`src/queue-runner/coverageUsage.ts`)                                                                               | Effect binding (17 members; `measureMerged`, `buildSynthetic` and `legacyOrigins` have no implementation). `bindAdmit` calls the `backfillGate.ts` `usageContext` since S6-g (this row's `coverageUsage.ts` copy stays test-only).                                                                                                                                                                                               |
+| Gap                                  | Python                                                                                           | TypeScript pieces                                                                                                                                      | What is missing                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `admit.startOne`                     | `start_one` (`crq.py:3198`)                                                                      | selection loop `startOne` (`src/queue-runner/startOne.ts:116`)                                                                                         | A `StartOneEffects` implementation. That means a `planItem` dispatcher by kind over `planOpen`/`planDelta` (`ordinaryPlan.ts:92`/`:144`), `planMerged`/`planAuthor` (`mergedAuthorPlan.ts`), `prepareCurrent`, `preparePushCurrent` and the local-review prepare (`preparePasses.ts`), plus the PR lookup and quiet gate. `ensure_commit`, `measure_merged` and `build_synthetic` exist only as effect members.                                                                  |
+| `launch`                             | `launch` (`crq.py:2004`)                                                                         | `reserveAndSpawnReview` (`src/queue-runner/reviewLaunch.ts:64`), `prepareOrdinaryReview` (`src/queue-runner/reviewPreparation.ts:48`, open/delta only) | Meta, scan and `cmd` for receipt, push-current, local-review, author, merged/coverage and backfill. Also the secret scan with exemptions and a blocked-scan receipt. `ReviewLaunchEffects` is unbound.                                                                                                                                                                                                                                                                           |
+| Detached review child                | `cmd_review_child` (`crq.py:2202`), spawned as `python3 crq.py _review <run_id>` (`crq.py:2150`) | `runReviewChild` (`src/adapters/crq/reviewProcess.ts:103`), no runtime caller                                                                          | `_review` is in the runner's command set (`src/queue-runner/runner.ts:31`) but not routed. `runReviewChild` differs from Python in three ways. It runs `timeout` without `--foreground`. It does not start `crq-tick.service` (`--no-block`) when the child finishes. It refuses backfill submission proof. An interim TS launch could spawn the Python child (same artifact names: `review.pid`, `review.ndjson`, `exit.json`).                                                 |
+| Coverage fallback and backfill usage | `_coverage_fallback` (`crq.py:3131`), `backfill_runtime.usage_context`                           | `coverageFallback`, `usageContext` (`src/queue-runner/coverageUsage.ts`)                                                                               | Effect binding (17 members; `select` is bound only with the `select` input (`coverageSelect.ts`), `buildSynthetic` is bound only with `synthetic` deps, and the clocks, queue helpers and `backfillDispatchConfigured` only with the `tick`/`dispatch` inputs; `rank4Gate`, `bindRun` and `cancelBeforeVendor` are bound in `coverageBackfillSeams.ts`). `bindAdmit` calls the `backfillGate.ts` `usageContext` since S6-g (this row's `coverageUsage.ts` copy stays test-only). |
 
 ### Discovery, enrollment, delivery and reporting (about 1k–1.4k lines)
 

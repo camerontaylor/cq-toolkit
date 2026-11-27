@@ -264,7 +264,6 @@ describe('status.json projection', () => {
       'id',
       'kind',
       'state',
-      'repo',
       'prior_cycles',
       'cycles',
       'operator_priority',
@@ -273,6 +272,7 @@ describe('status.json projection', () => {
       'last_error',
       'wait_reason',
       'gate_stalled_at',
+      'repo',
     ]);
     expect(statusItems[0]!['repo']).toBe('owner/main');
     expect('extra' in statusItems[0]!).toBe(false);

@@ -108,7 +108,7 @@ export interface RepairProgressSelectionRequest {
   readonly worktree: string;
 }
 
-function pyTypeName(value: unknown): string {
+export function pyTypeName(value: unknown): string {
   if (value === null || value === undefined) return 'NoneType';
   if (typeof value === 'boolean') return 'bool';
   if (value instanceof JsonNumber) return value.kind;
@@ -139,7 +139,7 @@ function truthy(value: unknown): boolean {
 }
 
 /** `value.get(key)`: absent is `None`, and a non-dict receiver is `AttributeError`. */
-function get(value: unknown, key: string): unknown {
+export function get(value: unknown, key: string): unknown {
   if (!isDict(value)) {
     throw new PyError('AttributeError', `'${pyTypeName(value)}' object has no attribute 'get'`);
   }
@@ -147,7 +147,7 @@ function get(value: unknown, key: string): unknown {
 }
 
 /** `value[key]` for a string key: `KeyError` when absent, `TypeError` on a non-dict. */
-function subscript(value: unknown, key: string): unknown {
+export function subscript(value: unknown, key: string): unknown {
   if (isDict(value)) {
     if (!Object.hasOwn(value, key)) throw new PyError('KeyError', pyStrRepr(key));
     return value[key];
@@ -174,7 +174,7 @@ const NOT_PRINTABLE = /^[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}\p{Zs}]$/u;
  * `\\`, the quote, `\n`, `\r`, `\t` escaped; other non-printable code points as
  * `\xNN`, `\uNNNN` or `\UNNNNNNNN`; printable Unicode kept as is.
  */
-function pyStrRepr(text: string): string {
+export function pyStrRepr(text: string): string {
   const quote = text.includes("'") && !text.includes('"') ? '"' : "'";
   let out = quote;
   for (const char of text) {

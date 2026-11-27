@@ -60,15 +60,8 @@ export function makeStartOneEffects(
         ignoreQuiet: run.ignoreQuiet,
       }),
     launch: runLaunch,
-    coverageFallback: async (options) => {
-      const result = await coverageFallback(
-        queue as Queue,
-        run.log,
-        run.dry,
-        run.only,
-        options.ordinaryEligible,
-        coverage,
-      );
+    coverageFallback: async () => {
+      const result = await coverageFallback(queue as Queue, run.log, run.dry, run.only, coverage);
       return { started: result.started, hasCoverage: result.available };
     },
     event: (kind, data) => bundle.event(kind, data),
@@ -83,7 +76,7 @@ export function makeStartOneEffects(
  * `1e20`, and a non-finite number is a float by definition: keep both floats
  * instead of failing the admission after it ran.
  */
-function keepUnsafeFloats(value: unknown): unknown {
+export function keepUnsafeFloats(value: unknown): unknown {
   if (typeof value === 'number')
     // NaN and ±Infinity (Python `json` accepts them) round-trip as floats too:
     // `fromPlainJson` would reject them after the admission already ran.

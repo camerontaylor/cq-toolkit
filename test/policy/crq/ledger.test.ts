@@ -265,6 +265,26 @@ describe('B1 ledger vectors (Python oracle)', () => {
     });
   }
 
+  // `assertExpected` compares the Python error class only; these pin the message
+  // text of the two rules ported from `review_ledger.py` (report-producer
+  // exemption and credited-import linkage) against what the oracle recorded.
+  test.each(['vendor-run-completed-unauthenticated', 'import-credited-non-creditable-review'])(
+    '%s fails with the Python message',
+    (name) => {
+      const vector = vectors.find((entry) => entry.name === name);
+      if (vector === undefined) throw new Error(`${name} vector missing`);
+      const outcome = capture(() => run(vector));
+      expect(outcome.ok).toBe(false);
+      expect(outcome).toMatchObject({ message: stringAt(vector.expect, 'message') });
+    },
+  );
+
+  test('a manual or agent report producer completes without authenticated scope', () => {
+    const vector = vectors.find((entry) => entry.name === 'record-completed-with-evidence');
+    if (vector === undefined) throw new Error('record-completed-with-evidence vector missing');
+    expect(capture(() => run(vector)).ok).toBe(true);
+  });
+
   test('a changed canonical byte fails the differential', () => {
     const vector = vectors.find((entry) => entry.name === 'nested-unicode');
     if (vector === undefined) throw new Error('nested-unicode vector missing');

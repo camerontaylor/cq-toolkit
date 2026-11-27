@@ -123,11 +123,11 @@ class FixedRevalidationTest(unittest.TestCase):
             git=mock.Mock(side_effect=lambda *args: 'd' * 40 if args[0] == 'rev-parse' else 'src/a.py\0'),
             pr_info=mock.Mock(return_value=self.info), ensure_commit=mock.Mock(return_value=True),
             is_ancestor=mock.Mock(return_value=True), save_queue=mock.Mock())
-        self.entry = mock.Mock(return_value=('100644', 'blob', '1' * 40))
+        self.entry = mock.Mock(return_value=('100644', '1' * 40))
         patcher = mock.patch.object(repair_tick, 'repair_source_entry', self.entry)
         patcher.start()
         self.addCleanup(patcher.stop)
-        sources = {'src/a.py': {k: ['100644', 'blob', '1' * 40]
+        sources = {'src/a.py': {k: ['100644', '1' * 40]
                               for k in ('published', 'actual', 'current')}}
         self.evidence = {'job': self.job_id, 'item': 'item', 'run': 'run',
             'finding_sha256': bounded.identity(self.job['finding']), 'pr': 99,
@@ -195,7 +195,7 @@ class FixedRevalidationTest(unittest.TestCase):
     def test_changed_observations_refuse_replay_without_rewriting(self):
         self.attest()
         self.c.save_queue.reset_mock()
-        self.entry.return_value = ('100644', 'blob', '2' * 40)
+        self.entry.return_value = ('100644', '2' * 40)
         self.assert_refused('fixed revalidation binding changed')
 
     def test_advanced_row_refuses_replay(self):

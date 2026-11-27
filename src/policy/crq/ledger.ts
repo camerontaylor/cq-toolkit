@@ -773,7 +773,13 @@ function validateReview(record: JsonObject, payload: JsonObject): void {
     }
   }
 
-  if (payload.get('outcome') === 'completed' && !ledgerCreditable(record)) {
+  // Manual/agent reports are exempt: they can never satisfy the vendor credit
+  // gate, so their completion is judged by validate_provenance instead.
+  if (
+    payload.get('outcome') === 'completed' &&
+    !ledgerReportProducer(record) &&
+    !ledgerCreditable(record)
+  ) {
     fail('completed review lacks authenticated scoped completion');
   }
 }
@@ -898,6 +904,14 @@ export function ledgerValueEqual(left: JsonValue, right: JsonValue): boolean {
   return left === right;
 }
 
+/** `review_ledger.report_producer`: true for manual/agent (S3b) review records. */
+export function ledgerReportProducer(value: JsonValue): boolean {
+  if (!(value instanceof JsonObject) || value.get('event_type') !== 'review') return false;
+  const source = ledgerSubscript(ledgerSubscript(value, 'payload'), 'source');
+  const type = ledgerSubscript(source, 'type');
+  return type === 'manual' || type === 'agent';
+}
+
 /** `review_ledger.creditable`: the only completion authority for a review. */
 export function ledgerCreditable(value: JsonValue): boolean {
   if (!(value instanceof JsonObject) || value.get('event_type') !== 'review') return false;
@@ -944,7 +958,7 @@ export function ledgerRecordPath(value: JsonValue): string {
 export function ledgerValidateSequence(values: readonly JsonValue[]): Map<string, JsonValue> {
   const sources = new Map<string, string>();
   const ids = new Map<string, JsonValue>();
-  const reviews = new Set<string>();
+  const reviews = new Map<string, JsonValue>();
   const findings = new Map<string, string>();
   const tips = new Map<string, string | null>();
 
@@ -963,7 +977,7 @@ export function ledgerValidateSequence(values: readonly JsonValue[]): Map<string
     const payload = objectField(record, 'payload');
     switch (stringField(record, 'event_type')) {
       case 'review': {
-        reviews.add(ident);
+        reviews.set(ident, value);
         for (const row of arrayField(payload, 'findings')) {
           const finding = requireObject(row, 'finding');
           const findingId = stringField(finding, 'id');
@@ -995,6 +1009,12 @@ export function ledgerValidateSequence(values: readonly JsonValue[]): Map<string
             : payload.get('duplicate_id');
         if (pythonTruthy(linked) && (typeof linked !== 'string' || !reviews.has(linked))) {
           fail('import references missing review');
+        }
+        if (payload.get('result') === 'credited') {
+          const linkedReview = typeof linked === 'string' ? reviews.get(linked) : undefined;
+          if (linkedReview === undefined || !ledgerCreditable(linkedReview)) {
+            fail('credited import references a non-creditable review');
+          }
         }
         break;
       }

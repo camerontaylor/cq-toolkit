@@ -684,6 +684,16 @@ class DiscoveryTests(PortFixture):
         self.assertIn("Service names crq-tick.service",
                       " ".join(evidence["foreign"]))
 
+    def test_percent_i_upper_service_is_not_expanded(self):
+        declared = self.declare()
+        # systemd v257 parses ``Service=`` with ``unit_name_printf``, whose
+        # table has no ``%I``: the assignment is ignored, so no ``crq-tick``
+        # edge may be invented from the unescaped instance.
+        self.write("ingress@crq\\x2dtick.socket",
+                   "[Socket]\nListenStream=1\nService=%I.service\n")
+        evidence = self.discover(declared)
+        self.assertNotIn("crq-tick.service", " ".join(evidence["foreign"]))
+
     def test_uninstantiated_socket_expands_an_empty_instance(self):
         declared = self.declare()
         # ``ingress.socket`` has no instance, so systemd expands ``%i`` to the
@@ -907,7 +917,8 @@ class DiscoveryTests(PortFixture):
 
     def test_cotenant_symlink_naming_the_expected_unit_is_unsupported(self):
         declared = self.declare()
-        for directive in ("Wants", "Requires", "PartOf"):
+        for directive in ("Wants", "Requires", "PartOf", "PropagatesStopTo",
+                          "StopPropagatedFrom"):
             with self.subTest(directive=directive):
                 outside = self.base / ("repos/%s.service"
                                        % directive.lower())

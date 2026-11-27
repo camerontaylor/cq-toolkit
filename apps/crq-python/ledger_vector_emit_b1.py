@@ -551,6 +551,16 @@ def validate_vectors() -> Dict[str, Any]:
              {"outcome": "completed",
               "completion": {"terminal": True, "skipped": False, "scope_verified": False,
                              "exit_code": 0, "errors": []}}))),
+        # S3b: a completed manual/agent report passes the vendor-credit gate
+        # because report_producer() records are exempt from creditable().
+        ("record-completed-with-evidence",
+         _regenerated(record, lambda v: (v["payload"].update(
+             {"outcome": "completed",
+              "completion": {"terminal": True, "skipped": False, "scope_verified": True,
+                             "exit_code": 0, "errors": []}}),
+             v["payload"]["provenance"].__setitem__("completion_evidence", "reviewer log")))),
+        ("vendor-run-completed-unauthenticated",
+         _regenerated(review, lambda v: v["payload"]["source"].__setitem__("authenticated", False))),
         ("missing-evidence", _regenerated(finding_event, lambda v: v["payload"].__setitem__("evidence", {}))),
         ("fixed-without-verification",
          _regenerated(finding_event, lambda v: v["payload"].update(
@@ -817,6 +827,16 @@ def sequence_vectors() -> Dict[str, Any]:
         "action": "dismissed", "evidence": {"reason": "fork"}, "actor": "operator"})
     imported = _import(result="credited", review_id=review_id)
     missing = _import(result="credited", review_id="f" * 64)
+    report = _record(source="note-2", outcome="completed",
+                     completion={"terminal": True, "skipped": False, "scope_verified": True,
+                                 "exit_code": 0, "errors": []},
+                     provenance={"authenticated_submitter": "queue-client",
+                                 "claimed_reviewer": "helper-agent",
+                                 "forge_evidence": "off-forge-import",
+                                 "completion_evidence": "reviewer log",
+                                 "scope_confidence": "unknown",
+                                 "independence": "agent lane: separate session, unverified"})
+    credited_report = _import(result="credited", review_id=report["id"], ident="2")
 
     def ids(values: List[Dict[str, Any]]) -> List[str]:
         return sorted(ledger.validate_sequence(values))
@@ -843,6 +863,8 @@ def sequence_vectors() -> Dict[str, Any]:
                  {"values": [review, collision_review]}, lambda: ids([review, collision_review])),
         _capture("import-credited-links-review", "review_ledger.validate_sequence",
                  {"values": [review, imported]}, lambda: ids([review, imported])),
+        _capture("import-credited-non-creditable-review", "review_ledger.validate_sequence",
+                 {"values": [report, credited_report]}, lambda: ids([report, credited_report])),
         _capture("import-missing-review", "review_ledger.validate_sequence",
                  {"values": [missing]}, lambda: ids([missing])),
         _capture("unknown-finding", "review_ledger.validate_sequence",

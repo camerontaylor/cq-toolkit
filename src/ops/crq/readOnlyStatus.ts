@@ -339,7 +339,16 @@ async function loadEvents(effects: ReadOnlyStatusEffects): Promise<unknown[]> {
   try {
     text = await effects.readEvents();
   } catch (error) {
-    throw new StatusRouteError('events-invalid', `events.jsonl unavailable: ${messageOf(error)}`);
+    const refusal = new StatusRouteError(
+      'events-invalid',
+      `events.jsonl unavailable: ${messageOf(error)}`,
+    );
+    // Python's `recent_events` lets `open()` raise: the writer's `summary_failed` event
+    // records that class name, so a missing log keeps it.
+    if ((error as { code?: unknown }).code === 'ENOENT') {
+      Object.assign(refusal, { pythonError: 'FileNotFoundError' });
+    }
+    throw refusal;
   }
   const events: unknown[] = [];
   for (const { line, terminated, number } of pythonTextLines(text)) {

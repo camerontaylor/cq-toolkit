@@ -9,6 +9,9 @@
  * `item["state"]`, any seam error outside the repair-harvest `try`) propagate
  * and abandon the rest of the pass; here they throw.
  */
+import { JsonNumber } from '../policy/crq/jsonValue.js';
+import { PyError } from './pyErrors.js';
+
 export type Item = Record<string, unknown>;
 export type Queue = Record<string, unknown> & { items: Item[] };
 
@@ -55,7 +58,7 @@ export interface HarvestLoopEffects {
 }
 
 function stateOf(item: Item): unknown {
-  if (!('state' in item)) throw new TypeError('item.state missing');
+  if (!('state' in item)) throw new PyError('KeyError', "'state'");
   return item.state;
 }
 
@@ -66,6 +69,14 @@ export async function harvestLoop(
   fx: HarvestLoopEffects,
 ): Promise<void> {
   for (const item of [...fx.liveItems(q)]) {
+    // `item.get(...)`/`item["state"]` on a non-dict; a retained `JsonNumber` is an int/float.
+    if (
+      typeof item !== 'object' ||
+      item === null ||
+      Array.isArray(item) ||
+      item instanceof JsonNumber
+    )
+      throw new PyError('AttributeError', 'item must be a dict');
     if (!dry && item.kind === fx.localReviewKind && truthy(item.publication_pending))
       await fx.republish(q, item);
     if (stateOf(item) === 'reviewing') {
@@ -82,7 +93,7 @@ export async function harvestLoop(
         log.push(...(await fx.repairHarvest(q, item)));
       } catch (error) {
         // Python reads item["kind"] inside the handler: a missing kind is a KeyError that escapes.
-        if (!('kind' in item)) throw new TypeError('item.kind missing');
+        if (!('kind' in item)) throw new PyError('KeyError', "'kind'");
         const key = item.kind === fx.reviewReceiptKind ? 'repair_error' : 'last_error';
         item[key] = 'repair harvest failed: ' + pyPrefix(message(error), 300);
       }

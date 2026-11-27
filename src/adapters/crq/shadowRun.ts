@@ -1,8 +1,9 @@
 /**
  * Read-only shadow-run harness for the CRQ tick and slot (plan: docs/crq/shadow-run-plan.md).
- * Inactive: nothing imports this module, and it never runs either implementation. It only
- * freezes a state root into two scratch copies, proves the live root was not touched, and
- * compares the artefacts the Python and TypeScript sides left behind.
+ * Inactive: nothing imports this module. It freezes a state root into two scratch copies, proves
+ * the live root was not touched, and compares the artefacts the Python and TypeScript sides left
+ * behind. `runComposedShadow` also drives both sides, but only through runners the caller injects;
+ * this module spawns nothing and imports neither implementation.
  *
  * Safety: the live root is opened for reading only (`readFileSync`),
  * never locked and never written. The pre/post `queue.json` digest is the abort signal.
@@ -12,6 +13,8 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  readdirSync,
+  rmSync,
   readFileSync,
   realpathSync,
   unlinkSync,
@@ -135,11 +138,22 @@ export type FileVerdict = 'same' | 'differs' | 'missing-a' | 'missing-b';
 
 export interface ShadowDiff {
   readonly queue: FileVerdict;
+  /** Composed runs only: the extra state-root artefacts and the tick log. */
+  readonly composed?: ComposedVerdicts;
   /** `events.jsonl`: first differing line (1-based) when it differs. */
   readonly events: { readonly verdict: FileVerdict; readonly line?: number };
   readonly heartbeat: FileVerdict;
   readonly phaseCalls: 'same' | 'differs';
   readonly slotDecision: 'same' | 'differs';
+}
+
+/** What only a composed-phase run leaves behind (`crq.tick` writes these; the plan never does). */
+export const COMPOSED_FILES = ['status.json', 'status.md', 'next-review-at'] as const;
+
+export interface ComposedVerdicts {
+  readonly files: Readonly<Record<(typeof COMPOSED_FILES)[number], FileVerdict>>;
+  /** The returned tick log, compared line by line. */
+  readonly log: 'same' | 'differs';
 }
 
 export interface Artefacts {
@@ -245,7 +259,39 @@ export function compareArtefacts(a: Artefacts, b: Artefacts, pinnedAt: string): 
   };
 }
 
+/**
+ * `compareArtefacts` plus the composed-run artefacts. `status.json`, `status.md` and `next-review-at`
+ * are all compared by bytes, so a drifting timestamp, key order or word shows. `queue.json` (by
+ * value) and `events.jsonl` (per record) are compared by `compareArtefacts`.
+ */
+export function compareComposedArtefacts(
+  a: Artefacts,
+  b: Artefacts,
+  pinnedAt: string,
+  logs: { readonly a: readonly string[]; readonly b: readonly string[] },
+): ShadowDiff {
+  const read = (artefacts: Artefacts, name: string): Uint8Array | null =>
+    readOptional(join(artefacts.root, name));
+  return {
+    ...compareArtefacts(a, b, pinnedAt),
+    composed: {
+      files: {
+        'status.json': compareBytes(read(a, 'status.json'), read(b, 'status.json')),
+        'status.md': compareBytes(read(a, 'status.md'), read(b, 'status.md')),
+        'next-review-at': compareBytes(read(a, 'next-review-at'), read(b, 'next-review-at')),
+      },
+      log:
+        logs.a.length === logs.b.length && logs.a.every((line, i) => line === logs.b[i])
+          ? 'same'
+          : 'differs',
+    },
+  };
+}
+
 export const identical = (diff: ShadowDiff): boolean =>
+  (diff.composed === undefined ||
+    (diff.composed.log === 'same' &&
+      COMPOSED_FILES.every((name) => diff.composed?.files[name] === 'same'))) &&
   diff.queue === 'same' &&
   diff.events.verdict === 'same' &&
   diff.heartbeat === 'same' &&
@@ -297,4 +343,123 @@ export function summarize(reports: readonly SampleReport[]): ShadowSummary {
     unexplained: count('unexplained'),
     aborted: count('aborted'),
   };
+}
+
+/** The gap rows a composed run left open (`composeFullTick`'s `unbound` and `staged`). */
+export interface ComposedGaps {
+  readonly complete: boolean;
+  readonly unbound: readonly string[];
+  readonly staged: readonly string[];
+}
+
+export interface ComposedRunResult {
+  /** The tick's returned log lines. */
+  readonly log: readonly string[];
+  /** Ordered calls to the stubbed (unbound) effects, recorded by the runner. */
+  readonly phaseCalls: readonly string[];
+  /** The TS side reports its composition's open rows; the Python side has none. */
+  readonly gaps?: ComposedGaps;
+}
+
+/** Runs one implementation's whole tick over a frozen copy and resolves when it is done. */
+export type ComposedRunner = (root: string) => Promise<ComposedRunResult>;
+
+/**
+ * Live-root entries a composed sample may hold besides `SHADOW_FILES`: outputs the tick overwrites
+ * without reading them (`status.json`, `status.md`, `next-review-at`) and the lock file. Any other
+ * entry (`backfill-rollout.json`, `ledger`, `runs`, `receipts`, `reconcile`, `backfill/findings`
+ * and whatever is added later) is an input the composed phases may read and the freeze does not
+ * copy: both sides would run with that phase silently switched off and still report `identical`,
+ * so the sample is refused (default-deny).
+ */
+export const COMPOSED_HARMLESS_ENTRIES: readonly string[] = [
+  'status.json',
+  'status.md',
+  'next-review-at',
+  'tick.lock',
+];
+
+export interface ComposedShadowOptions {
+  readonly liveRoot: string;
+  readonly scratch: string;
+  readonly pinnedAt: string;
+  readonly sample: string;
+  /** Runs Python's `crq.tick` against copy `a`. Injected: this module never spawns it. */
+  readonly python: ComposedRunner;
+  /** Runs the TS composed `runTick` against copy `b`. */
+  readonly ts: ComposedRunner;
+  readonly allowList?: readonly ExplainedDivergence[];
+}
+
+export interface ComposedShadowReport {
+  readonly report: SampleReport;
+  readonly python: ComposedRunResult;
+  readonly ts: ComposedRunResult;
+  /** False while the TS composition has an open `unbound` or `staged` row; never silently true. */
+  readonly complete: boolean;
+  /** Every open row id, so a clean diff never reads as "the whole tick is shadowed". */
+  readonly openRows: readonly string[];
+}
+
+/**
+ * The composed-phase shadow: freeze the live root into two byte-identical copies, run Python's
+ * `tick` on `a` and the composed TS tick on `b` (both injected, serially, so a fault on one side
+ * cannot be mistaken for the other), then compare the state-root artefacts. The live root is only
+ * read: it is digested before and after, and a change aborts the sample.
+ */
+export async function runComposedShadow(
+  options: ComposedShadowOptions,
+): Promise<ComposedShadowReport> {
+  const allowed = new Set<string>([...SHADOW_FILES, ...COMPOSED_HARMLESS_ENTRIES]);
+  const strays = (dir: string): string[] =>
+    existsSync(dir)
+      ? readdirSync(dir)
+          .filter((name) => !allowed.has(name))
+          .sort()
+      : [];
+  const unfrozen = strays(options.liveRoot);
+  if (unfrozen.length > 0) {
+    throw new Error(
+      `composed shadow refuses a live root holding inputs it does not freeze: ${unfrozen.join(', ')}`,
+    );
+  }
+  // Validate both scratch destinations before anything is deleted: a live root nested under, or
+  // aliased by, a copy would otherwise be removed as a "stray" before the freeze's own overlap
+  // check runs, and a copy that is itself a symbolic link would redirect the deletion elsewhere.
+  const sides = [join(options.scratch, 'a'), join(options.scratch, 'b')];
+  rejectLiveOverlap(options.liveRoot, sides);
+  for (const side of sides) {
+    if (lstatOrNull(side)?.isSymbolicLink()) {
+      throw new Error(`scratch destination ${side} is a symbolic link; refusing to clear it`);
+    }
+  }
+  // A reused scratch is cleared of everything outside the same set, before either runner starts:
+  // a copy keeping `receipts/`, `runs/` or `ledger/` from an earlier run (Python's tick creates
+  // some itself) would feed one side an input the other lacks. `rmSync` never follows a link.
+  for (const side of sides)
+    for (const name of strays(side)) rmSync(join(side, name), { recursive: true, force: true });
+  const frozen = freezeStateRoot(options.liveRoot, options.scratch);
+  // The overwritten outputs of an earlier run are cleared on both sides, so each run starts equal.
+  for (const dir of [frozen.a, frozen.b])
+    for (const name of COMPOSED_HARMLESS_ENTRIES)
+      rmSync(join(dir, name), { recursive: true, force: true });
+  // `slotDecision` is '' on both sides: no slot runs in a composed shadow, so it is always 'same'.
+  const python = await options.python(frozen.a);
+  const ts = await options.ts(frozen.b);
+  const diff = compareComposedArtefacts(
+    { root: frozen.a, phaseCalls: python.phaseCalls, slotDecision: '' },
+    { root: frozen.b, phaseCalls: ts.phaseCalls, slotDecision: '' },
+    options.pinnedAt,
+    { a: python.log, b: ts.log },
+  );
+  const report = classifySample(
+    options.sample,
+    diff,
+    liveUnchanged(options.liveRoot, frozen),
+    options.allowList ?? [],
+  );
+  const gaps = ts.gaps;
+  const openRows =
+    gaps === undefined ? ['<no composition report>'] : [...gaps.unbound, ...gaps.staged];
+  return { report, python, ts, complete: gaps?.complete === true, openRows };
 }

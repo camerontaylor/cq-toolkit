@@ -6,6 +6,8 @@ import {
   type LaunchPlan,
   type LaunchScanDecision,
 } from '../../src/queue-runner/launch.js';
+import { JsonObject, toPlainJsonDeep } from '../../src/policy/crq/jsonValue.js';
+import { reviewProfile } from '../../src/ops/crq/reviewCapability.js';
 import { ReviewSpawnError } from '../../src/queue-runner/reviewLaunch.js';
 import { ReviewCheckoutError } from '../../src/queue-runner/reviewPreparation.js';
 import { StartAuthorRefused, type StartRecord } from '../../src/queue-runner/startOne.js';
@@ -74,6 +76,10 @@ function harness(
       calls.push('scan');
       scans.push(request);
       return Promise.resolve(CLEAN);
+    },
+    revParse: (spec) => {
+      calls.push(`revParse:${spec}`);
+      return Promise.resolve(spec === 'pre-push' ? 'c'.repeat(40) : spec);
     },
     scanBackfillContext: () => {
       calls.push('scanBackfillContext');
@@ -291,6 +297,82 @@ describe('launch: foreign repos and scan classes', () => {
     expect(h.metas[0]?.profile).toEqual({ flags: ['--plain', '--x'] });
   });
 
+  it('a normal review with a plan profile runs the profile flags alone, as Python does', async () => {
+    const h = harness();
+    const it1 = item({});
+    await launch(
+      h.queue,
+      it1,
+      plan({ profile: { flags: ['--plain', '--x'] }, config_digest: 'd' }),
+      h.fx,
+    );
+    expect(h.metas[0]?.cmd).toEqual(['coderabbit', 'review', '--plain', '--x']);
+  });
+
+  it('launches the real default review profile with its own range flags, once', async () => {
+    const profile = toPlainJsonDeep(reviewProfile(new JsonObject([]), BASE)) as { flags: string[] };
+    const subject = { base: BASE, head: HEAD };
+    for (const it1 of [
+      item({}),
+      item({ kind: 'author' }),
+      item({ kind: 'merged-current', capture: { c: 1 }, subject }),
+      item({ kind: 'push-current', repo: 'o/other', subject }),
+    ]) {
+      const h = harness({}, repos);
+      await launch(h.queue, it1, plan({ profile: profile as never, config_digest: 'd' }), h.fx);
+      expect(h.metas[0]?.cmd).toEqual([
+        'coderabbit',
+        'review',
+        '--agent',
+        '--deep',
+        '--committed',
+        '--base-commit',
+        BASE,
+      ]);
+    }
+  });
+
+  it('a ranged launch refuses a foreign review scope or base before allocating anything', async () => {
+    const subject = { base: BASE, head: HEAD };
+    const kinds: [string, StartRecord, Partial<LaunchPlan>][] = [
+      ['range_policy', item({}), {}],
+      ['author', item({ kind: 'author' }), { range_policy: undefined }],
+      [
+        'receipt',
+        item({ kind: 'merged-current', capture: { c: 1 }, subject }),
+        { range_policy: undefined },
+      ],
+      [
+        'push',
+        item({ kind: 'push-current', repo: 'o/other', subject }),
+        { range_policy: undefined },
+      ],
+    ];
+    const bad: [string[], string][] = [
+      [['--uncommitted'], 'review profile must not set a review scope'],
+      [['--type=uncommitted'], 'review profile must not set a review scope'],
+      [['-t'], 'review profile must not set a review scope'],
+      [['--include-untracked'], 'review profile must not set a review scope'],
+      [['--base-commit', 'c'.repeat(40)], 'review profile must not set a base selector'],
+      [['--base=main'], 'review profile must not set a base selector'],
+    ];
+    for (const [name, it1, over] of kinds)
+      for (const [flags, message] of bad) {
+        const h = harness({}, repos);
+        await expect(
+          launch(
+            h.queue,
+            it1,
+            plan({ ...over, profile: { flags: ['--plain', ...flags] }, config_digest: 'd' }),
+            h.fx,
+          ),
+          name,
+        ).rejects.toThrow(message);
+        expect(h.calls.filter((c) => c !== 'checkAuthor')).toEqual([]);
+        expect(h.metas).toEqual([]);
+      }
+  });
+
   it('push items use the projection scan in the configured clone; unconfigured is an error', async () => {
     const h = harness({}, repos);
     const push = item({
@@ -332,6 +414,47 @@ describe('launch: receipts, backfill, merged, author', () => {
     expect(h.scans[0]?.mode).toBe('projection');
     expect(h.metas[0]).toMatchObject({ capture: { c: 1 }, source: { base: BASE } });
     expect(h.metas[0]?.cmd).toContain('--committed');
+  });
+
+  it('projection scans read exemptions from the subject base or merge first parent, never the projection base (5891f7a48)', async () => {
+    const push = harness({}, { 'o/other': { clone: '/clones/other', scanExtraClasses: [] } });
+    await launch(
+      push.queue,
+      item({ kind: 'push-current', repo: 'o/other', subject: { base: 'pre-push', head: HEAD } }),
+      plan(),
+      push.fx,
+    );
+    expect(push.calls).toContain('revParse:pre-push');
+    expect(push.scans[0]?.exemptionBase).toBe('c'.repeat(40));
+    expect(push.scans[0]?.exemptionBase).not.toBe(BASE);
+
+    const merged = harness();
+    await launch(
+      merged.queue,
+      item({ kind: 'merged-current', capture: {}, subject: { merge_sha: 'd'.repeat(40) } }),
+      plan(),
+      merged.fx,
+    );
+    expect(merged.calls).toContain(`revParse:${'d'.repeat(40)}^1`);
+    // rev-parse echoed the spec: not a full object id, so no exemptions.
+    expect(merged.scans[0]?.exemptionBase).toBeNull();
+
+    const bare = harness();
+    await launch(
+      bare.queue,
+      item({ kind: 'merged-current', capture: {}, subject: { base: BASE } }),
+      plan(),
+      bare.fx,
+    );
+    expect(bare.calls.some((call) => call.startsWith('revParse:'))).toBe(false);
+    expect(bare.scans[0]?.exemptionBase).toBeNull();
+  });
+
+  it('a range scan reads exemptions from the range base', async () => {
+    const h = harness();
+    await launch(h.queue, item(), plan(), h.fx);
+    expect(h.scans[0]).toMatchObject({ mode: 'range', exemptionBase: BASE });
+    expect(h.calls.some((call) => call.startsWith('revParse:'))).toBe(false);
   });
 
   it('backfill scans the synthetic context only after a clean main scan', async () => {

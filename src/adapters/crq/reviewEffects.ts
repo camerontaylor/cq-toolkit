@@ -12,17 +12,23 @@ import { appendFile, mkdir, mkdtemp, readFile, readdir, rename, rm, stat } from 
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { JsonNumber, JsonObject as ObjectValue } from '../../policy/crq/jsonValue.js';
-import type { JsonObject } from '../../policy/crq/jsonValue.js';
+import type { JsonObject, JsonValue } from '../../policy/crq/jsonValue.js';
 import { parseJsonValue } from '../../policy/crq/jsonValue.js';
 import {
   ledgerCanonicalBytes,
+  ledgerLoads,
   ledgerValidate,
   LedgerIntegrityError,
+  LedgerJsonDecodeError,
+  LedgerUnicodeDecodeError,
 } from '../../policy/crq/ledger.js';
 import { pythonJsonText, sha256Hex } from '../../policy/crq/pythonJson.js';
 import { GitUnavailable, type GitFn } from '../../policy/crq/reviewHistory.js';
+import { casefold } from '../../policy/crq/triagePlan.js';
+import { pythonStrip } from '../../policy/crq/repairBinding.js';
+import { PyError } from '../../queue-runner/pyErrors.js';
 import { ValueError } from '../../policy/crq/reviewAdmission.js';
-import { MAX_EVENT_BYTES } from '../../policy/crq/reviewRecord.js';
+import { MAX_EVENT_BYTES, PythonRetainedError } from '../../policy/crq/reviewRecord.js';
 import { MAX_RECEIPT_BYTES } from '../../policy/crq/queueReceipt.js';
 import type { ReviewCapabilityEffects } from '../../ops/crq/reviewCapability.js';
 import { atomicWrite } from './atomic.js';
@@ -78,6 +84,39 @@ function isoNow(clock: () => Date): string {
   return isoUtc(clock());
 }
 
+/** Python `sorted()` over `str`: code point order, not UTF-16 unit order. */
+function compareCodePoints(left: string, right: string): number {
+  const a = Array.from(left);
+  const b = Array.from(right);
+  for (let i = 0; i < Math.min(a.length, b.length); i += 1) {
+    const x = a[i]!.codePointAt(0)!;
+    const y = b[i]!.codePointAt(0)!;
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  return a.length - b.length;
+}
+
+/** The `seen`-set identity of a loaded `id`: Python hashing, `True == 1`, unhashables raise. */
+function pythonSetKey(id: JsonValue): string {
+  if (id === null) return 'n';
+  if (typeof id === 'string') return `s${id}`;
+  if (typeof id === 'boolean') return `i${id ? 1 : 0}`;
+  if (id instanceof JsonNumber && id.integer !== null) return `i${id.integer}`;
+  throw new PythonRetainedError('TypeError', 'unhashable type');
+}
+
+/** `value["id"]`: a missing key is a `KeyError`, an explicit null is a value. */
+function requiredId(value: ObjectValue): JsonValue {
+  const id = value.get('id');
+  if (id === undefined) throw new PythonRetainedError('KeyError', "'id'");
+  return id;
+}
+
+/** Python `str(x)` for a loaded JSON value, as far as a `record:` prefix test can tell. */
+function pythonStr(value: JsonValue): string {
+  return typeof value === 'string' ? value : '\0not-a-string';
+}
+
 function objectOrNull(value: unknown): JsonObject | null {
   return value instanceof ObjectValue ? value : null;
 }
@@ -105,11 +144,38 @@ export function manualClonePath(stateRoot: string, repo: string): string | null 
   return join(stateRoot, 'review-repos', owner, name);
 }
 
-/** `review_transport.clone_url`: the primary origin with the repository swapped in. */
+/**
+ * `review_transport.clone_url` after the origin lookup: the primary origin with
+ * the repository swapped in. Python finds the slug in the CASEFOLDED origin and
+ * slices the ORIGINAL by that code-point index, so a character whose fold
+ * changes the length (a sharp s) before the slug shifts the cut; this mirrors
+ * that, over code points, rather than correcting it.
+ */
 export function manualCloneUrl(primaryOrigin: string, primaryRepo: string, repo: string): string {
-  const at = primaryOrigin.toLowerCase().lastIndexOf(primaryRepo.toLowerCase());
+  const folded = Array.from(casefold(primaryOrigin));
+  const needle = Array.from(casefold(primaryRepo));
+  let at = -1;
+  for (let i = folded.length - needle.length; i >= 0; i -= 1) {
+    if (needle.every((character, offset) => folded[i + offset] === character)) {
+      at = i;
+      break;
+    }
+  }
   if (at < 0) return `https://github.com/${repo}.git`;
-  return primaryOrigin.slice(0, at) + repo + primaryOrigin.slice(at + primaryRepo.length);
+  const original = Array.from(primaryOrigin);
+  return (
+    original.slice(0, at).join('') +
+    repo +
+    original.slice(at + Array.from(primaryRepo).length).join('')
+  );
+}
+
+/** The `OSError` subclass Python raises for a failed `mkdir`; other codes stay as thrown. */
+function osError(error: unknown): unknown {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  if (code === 'EEXIST') return new PyError('FileExistsError', String(error));
+  if (code === 'ENOTDIR') return new PyError('NotADirectoryError', String(error));
+  return error;
 }
 
 async function isDirectory(path: string): Promise<boolean> {
@@ -206,22 +272,29 @@ export function createReviewEffects(options: ReviewEffectsOptions): ReviewEffect
       const path = manualClonePath(state, repo);
       if (path === null) return false;
       if (await isDirectory(join(path, '.git'))) return true;
-      const primary = cloneFor(options.repo);
-      const origin = await gitCall(pool, primary, ['remote', 'get-url', 'origin']);
-      if (origin.code !== 0) return false;
-      const url = manualCloneUrl(
-        new TextDecoder().decode(origin.stdout).trim(),
-        options.repo,
-        repo,
-      );
       // A unique scratch directory under `.tmp`, outside the owner/name
       // namespace (a slug never starts with a dot), so a failed clone can
-      // never collide with or delete another repository's clone.
+      // never collide with or delete another repository's clone. Python makes
+      // it before reading the origin URL, so a failed lookup leaves `.tmp`.
       const scratchRoot = join(state, 'review-repos', '.tmp');
-      await mkdir(scratchRoot, { recursive: true });
+      try {
+        await mkdir(scratchRoot, { recursive: true });
+      } catch (error) {
+        throw osError(error);
+      }
       const scratch = await mkdtemp(join(scratchRoot, 'clone-'));
       const partial = join(scratch, 'clone');
       try {
+        const origin = await gitCall(pool, cloneFor(options.repo), ['remote', 'get-url', 'origin']);
+        if (origin.code !== 0) return false;
+        let originUrl: string;
+        try {
+          originUrl = new TextDecoder('utf-8', { fatal: true }).decode(origin.stdout);
+        } catch {
+          // `.decode()` of non-UTF-8 bytes escapes `provision` (not an OSError).
+          throw new PyError('UnicodeDecodeError', 'invalid utf-8 in the origin url');
+        }
+        const url = manualCloneUrl(pythonStrip(originUrl), options.repo, repo);
         const result = await gitCall(
           pool,
           scratch,
@@ -231,7 +304,8 @@ export function createReviewEffects(options: ReviewEffectsOptions): ReviewEffect
         if (result.code !== 0) return false;
         await mkdir(join(path, '..'), { recursive: true });
         await rename(partial, path);
-      } catch {
+      } catch (error) {
+        if (error instanceof PyError) throw error;
         return false;
       } finally {
         await rm(scratch, { recursive: true, force: true });
@@ -340,6 +414,12 @@ export function createReviewEffects(options: ReviewEffectsOptions): ReviewEffect
     },
     historyGit,
     async retainedRecords() {
+      // `review_transport._retained_records`, exactly: only `retained_loads` and the
+      // read can skip a file (IntegrityError, OSError). There is no validate call, no
+      // object check and no string check on `id`; whatever else Python lets escape
+      // (`.get` on a non-dict, a missing or unhashable `id`) escapes here as the same
+      // named class. Downstream, `importRecord` mirrors Python's own escapes on the
+      // loosely shaped records this now returns (see its duplicate predicate).
       const roots = [join(state, 'backfill/publication'), join(state, 'record-outbox')];
       const seen = new Set<string>();
       const records: JsonObject[] = [];
@@ -347,35 +427,46 @@ export function createReviewEffects(options: ReviewEffectsOptions): ReviewEffect
         const directory = join(root, 'pending');
         let names: string[];
         try {
-          names = (await readdir(directory)).filter((name) => name.endsWith('.json')).sort();
+          names = (await readdir(directory))
+            .filter((name) => name.endsWith('.json'))
+            .sort(compareCodePoints);
         } catch (error) {
-          if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+          // `directory.is_dir()` is false for a missing path or a regular file, and
+          // pathlib's glob swallows OSError: both yield no records.
+          if (typeof (error as NodeJS.ErrnoException).code === 'string') continue;
           throw error;
         }
         for (const name of names) {
-          let value: JsonObject;
+          let value: JsonValue;
           try {
-            const parsed = parseJsonValue(await readFile(join(directory, name), 'utf8'), {
-              duplicates: 'error',
-            });
-            if (!(parsed instanceof ObjectValue)) continue;
-            ledgerValidate(parsed);
-            value = parsed;
-          } catch {
-            continue;
+            // review_ledger.retained_loads: strict UTF-8 (a lone 0xff is refused, not
+            // decoded to U+FFFD), BOM strip, duplicate keys and floats refused.
+            value = ledgerLoads(await readFile(join(directory, name)));
+          } catch (error) {
+            // IntegrityError or OSError (EISDIR, EACCES, ...); anything else escapes.
+            if (
+              error instanceof LedgerIntegrityError ||
+              error instanceof LedgerJsonDecodeError ||
+              error instanceof LedgerUnicodeDecodeError ||
+              typeof (error as NodeJS.ErrnoException).code === 'string'
+            ) {
+              continue;
+            }
+            throw error;
           }
-          const id = value.get('id');
-          if (value.get('event_type') === 'review' && typeof id === 'string' && !seen.has(id)) {
-            seen.add(id);
+          if (!(value instanceof ObjectValue)) {
+            throw new PythonRetainedError('AttributeError', 'retained record is not a dict');
+          }
+          const eventType = value.get('event_type');
+          if (eventType === 'review' && !seen.has(pythonSetKey(value.get('id') ?? null))) {
+            seen.add(pythonSetKey(requiredId(value)));
             records.push(value);
           } else if (
-            value.get('event_type') === 'import-result' &&
-            typeof value.get('source_key') === 'string' &&
-            (value.get('source_key') as string).startsWith('record:') &&
-            typeof id === 'string' &&
-            !seen.has(id)
+            eventType === 'import-result' &&
+            pythonStr(value.get('source_key') ?? '').startsWith('record:') &&
+            !seen.has(pythonSetKey(value.get('id') ?? null))
           ) {
-            seen.add(id);
+            seen.add(pythonSetKey(requiredId(value)));
             records.push(value);
           }
         }

@@ -96,8 +96,12 @@ PROPERTY_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*")
 PID_RE = re.compile(r"[0-9]+")
 # ``\xHH`` is systemd's C-style escape inside a unit name.
 CRQ_NAME_RE = re.compile(r"crq-(?:[A-Za-z0-9_.@:-]|\\x[0-9A-Fa-f]{2})+")
+# ``PropagatesStopTo`` and ``StopPropagatedFrom`` (systemd v257) are the
+# stop-propagation pair: stopping a cotenant that names the selected unit
+# stops it too, so both directions must be scanned.
 DEPENDENCY_RE = re.compile(
     r"(?P<directive>Wants|Requires|Requisite|BindsTo|PartOf|Conflicts|"
+    r"PropagatesStopTo|StopPropagatedFrom|"
     r"WantedBy|RequiredBy|Also|Upholds|OnFailure|OnSuccess|Triggers|"
     r"TriggersBy|Unit|Service)\s*=\s*(?P<value>.*)")
 UNIT_SUFFIXES = {".service", ".timer", ".path"}
@@ -150,7 +154,7 @@ def _also_words(value):
 
 
 def _expand_instance(path, value):
-    """Substitute ``%i``/``%I`` with the unit's instance name.
+    """Substitute ``%i`` with the unit's instance name.
 
     An instance unit such as ``ingress@crq-tick.socket`` can name its target
     as ``Service=%i.service``; without expansion the CRQ name is invisible to
@@ -162,19 +166,29 @@ def _expand_instance(path, value):
     ``crq-tick.service``, and leaving ``%i`` unexpanded there would hide the
     activation edge.
 
-    A unit without an instance is not exempt: systemd expands ``%i``/``%I``
-    to the empty string there, so ``Service=crq%i-tick.service`` on
-    ``ingress.socket`` names ``crq-tick.service``. Leaving the specifier in
-    place would keep that CRQ reference invisible to the scan.
+    A unit without an instance is not exempt: systemd expands ``%i`` to the
+    empty string there, so ``Service=crq%i-tick.service`` on ``ingress.socket``
+    names ``crq-tick.service``.
+
+    ``%I`` is deliberately left alone. Every directive this scan reads is
+    parsed with systemd v257's ``unit_name_printf`` (``config_parse_unit_deps``,
+    ``config_parse_socket_service``, ``config_parse_trigger_unit``) or its
+    install-time counterpart ``install_name_printf``; neither specifier table
+    defines ``%I`` (only ``unit_full_printf`` does, and none of these use it).
+    systemd therefore rejects such a value, so expanding it would invent an
+    edge. The failure differs by route, and every route fails closed: the
+    runtime parsers (``Wants=``, ``Service=``, ``Unit=``) drop the
+    assignment, ``Also=`` fails the whole ``[Install]`` section, and
+    ``WantedBy=``/``RequiredBy=`` fail at install time. The leftover ``%`` is
+    reported by the unpredictable-specifier check instead.
     """
     name = path.name
     if path.parent.name.endswith(".d"):
         name = path.parent.name[:-2]
     found = re.match(r"[^@]*@(?P<instance>.*)\.[^.]+\Z", name)
     if found is None:
-        return value.replace("%i", "").replace("%I", "")
-    instance = found.group("instance")
-    return value.replace("%i", instance).replace("%I", instance)
+        return value.replace("%i", "")
+    return value.replace("%i", found.group("instance"))
 
 
 class LiveBindingRefused(RuntimeError):

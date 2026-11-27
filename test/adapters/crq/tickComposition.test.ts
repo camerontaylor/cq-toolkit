@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { composeSlot } from '../../../src/adapters/crq/composeTick.js';
+import { GitPool } from '../../../src/adapters/crq/gitExec.js';
 import { fileHarvestRunReads } from '../../../src/adapters/crq/harvestRunReads.js';
 import {
   composeFullTick,
@@ -535,6 +536,7 @@ describe('Python child harvest (run artifacts)', () => {
           reconcileCompleted: async (q) => q,
         },
         reviewReceiptKind: 'review-receipt',
+        worktree: { pool: new GitPool(), worktreePrefix: 'wt-' },
         review: harvestEffects(sink),
         repairHarvest: async () => [],
       },
@@ -588,6 +590,7 @@ describe('Python child harvest (run artifacts)', () => {
           reconcileCompleted: async (q) => q,
         },
         reviewReceiptKind: 'review-receipt',
+        worktree: { pool: new GitPool(), worktreePrefix: 'wt-' },
         review: harvestEffects(sink),
         repairHarvest: async () => [],
       },
@@ -614,6 +617,178 @@ describe('Python child harvest (run artifacts)', () => {
     expect(saved.cooldown_until).toBe('2027-01-15T08:20:00Z');
     // Admission is gated by the cooldown the harvest just set, so nothing starts.
     expect(s.calls).not.toContain('startOne');
+  });
+});
+
+describe('composed repairEnqueue binding (harvest of a completed review with a finding)', () => {
+  const finding = JSON.stringify({
+    type: 'finding',
+    severity: 'major',
+    fileName: 'a.py',
+    comment: 'bad at line 4',
+    title: 'T',
+    id: 'x1',
+  });
+
+  function completedRig(opts: { backfill: boolean; reviewOverride?: Record<string, unknown> }) {
+    const queue = {
+      items: [
+        {
+          id: 'a',
+          kind: 'open',
+          state: 'reviewing',
+          pr: 5,
+          repo: 'o/r',
+          run: { run_id: 'r-9', band: 'fast', started_at: '2027-01-15T07:40:00Z' },
+          cycles: [
+            {
+              run_id: 'r-9',
+              band: 'fast',
+              started_at: '2027-01-15T07:40:00Z',
+              base: 'b',
+              head: 'h',
+              worktree: '/w/r-9',
+              wt_branch: 'crq/r-9',
+            },
+          ],
+        },
+      ],
+      starts: [],
+      last_tick: '2027-01-15T07:59:00Z',
+    };
+    const s = rig(queue);
+    const rd = join(s.root, 'runs', 'r-9');
+    mkdirSync(rd, { recursive: true });
+    const files: Record<string, string> = {
+      'exit.json': '{"exit": 0, "ended_at": "2027-01-15T07:50:00Z", "timed_out": false}',
+      'meta.json': JSON.stringify({
+        worktree: '/w/r-9',
+        wt_branch: 'crq/r-9',
+        head: 'h',
+        base: 'b',
+        cycle: 1,
+        kind: 'review',
+        pr: 5,
+        pr_branch: 'br',
+        repo: 'o/r',
+        run_id: 'r-9',
+      }),
+      'review.ndjson': `${finding}\n{"type":"complete","status":"review_completed","reviewedFiles":["a.py"]}\n`,
+      'review.pid': JSON.stringify({
+        pid: DEAD_PID,
+        pgid: DEAD_PID,
+        sid: DEAD_PID,
+        group_owner: 'foreground-v1',
+        run_id: 'r-9',
+      }),
+    };
+    for (const [name, body] of Object.entries(files)) writeFileSync(join(rd, name), body);
+    const gitCalls: string[] = [];
+    const composed = composeFullTick({
+      ...s.input,
+      ...(opts.backfill
+        ? {
+            repairBackfill: {
+              ledgerRoot: join(s.root, 'ledger'),
+              defaultRef: 'origin/main',
+              mergedCurrentEnabled: false,
+              maxRoundsPerPin: 2,
+              git: async (...a: string[]) => {
+                gitCalls.push(a[0] as string);
+                return a[0] === 'rev-list' ? '' : a[0] === 'diff' ? 'DIFF' : 'tip';
+              },
+            },
+          }
+        : {}),
+      harvest: {
+        local: {
+          kind: 'local-review',
+          harvest: async (q) => ({ queue: q, message: null }),
+          republish: async (q) => q,
+          reconcileCompleted: async (q) => q,
+        },
+        reviewReceiptKind: 'review-receipt',
+        worktree: { pool: new GitPool(), worktreePrefix: 'wt-' },
+        review: {
+          kinds: {
+            localReview: 'local-review',
+            reviewReceipt: 'review-receipt',
+            pushCurrent: 'push-current',
+            backfill: 'backfill',
+            author: 'author',
+          },
+          config: { maxItemFailures: 3, errorBackoffMin: 5, rateLimitDefaultBackoffMin: 30 },
+          writeFindings: async () => undefined,
+          event: async () => undefined,
+          saveQueue: async () => undefined,
+          removeWorktree: async () => undefined,
+          nowMs: () => NOW,
+          iso: (ms: number = NOW) => `${new Date(ms).toISOString().slice(0, 19)}Z`,
+          itemRepo: () => 'o/r',
+          isPrimaryRepo: () => true,
+          cloneFor: () => null,
+          coverage: {
+            newLedger: () => ({ runs: {} }),
+            legacyOrigins: () => undefined,
+            recordReview: (ledger: unknown, args: unknown) => ({
+              ...(ledger as object),
+              last: args,
+            }),
+            recordLegacySuccess: () => undefined,
+            recordLegacyFailure: () => undefined,
+          },
+          requestPrReview: async () => undefined,
+          mergedCurrentEnabled: () => false,
+          ...opts.reviewOverride,
+        } as unknown as Omit<HarvestReviewEffects, keyof ReturnType<typeof fileHarvestRunReads>>,
+        repairHarvest: async () => [],
+      },
+    });
+    return { s, composed, gitCalls };
+  }
+  const harvest = (r: ReturnType<typeof completedRig>) =>
+    r.composed.phases.harvestItems(
+      parseJsonValue(readFileSync(r.s.queuePath, 'utf8')) as JsonObject,
+      false,
+    );
+
+  it('with the repairBackfill input, enqueues the parsed finding and moves the item to repairing', async () => {
+    const r = completedRig({ backfill: true });
+    const out = await harvest(r);
+    expect(plain(out.queue).items[0]).toMatchObject({ state: 'repairing' });
+    const job = JSON.parse(
+      readFileSync(join(r.s.root, 'repair', 'inbox', 'crq-r-9-F1.json'), 'utf8'),
+    ) as Record<string, unknown>;
+    expect(job.finding).toEqual({
+      severity: 'major',
+      path: 'a.py',
+      line: 4,
+      body: 'bad at line 4',
+    });
+    expect(job.source).toEqual({ id: 'x1', finding_number: 1, run: 'r-9' });
+    expect(new Set(r.gitCalls)).toEqual(new Set(['rev-list', 'diff']));
+  });
+
+  it('an injected review.repairEnqueue wins over the file-backed binding', async () => {
+    const calls: string[] = [];
+    const r = completedRig({
+      backfill: true,
+      reviewOverride: {
+        repairEnqueue: async (_q: unknown, _item: unknown, _meta: unknown, runId: string) => {
+          calls.push(runId);
+          return true;
+        },
+      },
+    });
+    await harvest(r);
+    expect(calls).toEqual(['r-9']);
+    expect(existsSync(join(r.s.root, 'repair', 'inbox', 'crq-r-9-F1.json'))).toBe(false);
+  });
+
+  it('without the repairBackfill input nothing is bound: the harvest fails, no inbox job is written', async () => {
+    const r = completedRig({ backfill: false });
+    await expect(harvest(r)).rejects.toThrow(/repairEnqueue/);
+    expect(existsSync(join(r.s.root, 'repair', 'inbox'))).toBe(false);
   });
 });
 
@@ -717,6 +892,7 @@ describe('interruption and restart', () => {
           reconcileCompleted: async (q) => q,
         },
         reviewReceiptKind: 'review-receipt',
+        worktree: { pool: new GitPool(), worktreePrefix: 'wt-' },
         review: {
           kinds: {
             localReview: 'local-review',

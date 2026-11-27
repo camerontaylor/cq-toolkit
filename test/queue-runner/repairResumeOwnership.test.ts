@@ -1,28 +1,30 @@
 /**
- * Ownership gap in the resumed-repair candidate selection, pinned offline.
+ * Resume selection follows the established worktree ownership contract, pinned
+ * offline.
  *
- * Python's `resume_worktree` (apps/crq-python/crq_repair.py:472-483) adopts the
- * recorded `worktree` when it resolves differently, is a directory and holds a
- * `.git` entry. It never asks whether the tree is the job's. Three established
- * contracts do:
+ * Python's `resume_worktree` (apps/crq-python/crq_repair.py) adopts the recorded
+ * `worktree` only when it resolves differently, is owned by this job, is a
+ * directory and holds a `.git` entry. Ownership is the rule two established
+ * contracts already apply:
  *
- * - `crq_repair/recovery.py:70-72`: the resolved tree must sit directly under
- *   the resolved `WT_ROOT` and be named `crq-repair-<item>-<job>` or `...-A2`;
+ * - `crq_repair/recovery.py:70-72`: the resolved tree must sit directly under the
+ *   resolved `WT_ROOT` and be named `crq-repair-<item>-<job>` or `...-A2`;
  * - `crq_repair/retain.py:29` (`cleanup_harvested`), ported as the
- *   `worktree-not-owned` refusal of `decideRepairCleanup`;
- * - the harvest validator (`repairHarvest.ts`), which additionally tolerates the
- *   legacy `crq-repair-<item>` name.
+ *   `worktree-not-owned` refusal of `decideRepairCleanup`.
+ *
+ * (The harvest validator additionally tolerates the legacy `crq-repair-<item>`
+ * name; resume does not, matching recovery and cleanup.)
  *
  * No Git-registration contract exists anywhere in Python: nothing runs
  * `git worktree list`, and `.git` existence is the only registration evidence
  * the selector uses. A registration flag below is therefore SYNTHETIC fixture
  * data, carried only to show it changes nothing.
  *
- * This file changes no selector behavior. It reuses `decideRepairCleanup` as the
- * ownership oracle (no new policy is written) and feeds the same synthetic
- * recorded worktrees to `decideResumeCandidate`, so the divergence is a
- * recorded fact: owned base and `-A2` controls agree, every foreign,
- * outside-root, nested, legacy or unregistered record is adopted anyway.
+ * `decideRepairCleanup` is the ownership oracle (no new policy is written) and
+ * the same synthetic recorded worktrees go to `decideResumeCandidate`, so the two
+ * agree on every record: owned base and `-A2` controls are adopted, and every
+ * foreign, outside-root, nested, legacy or `-A2-A2` record is not, and is refused
+ * for a pending stage rather than judged or verified in its place.
  * Fully synthetic: no filesystem, Git, queue, judge, provider or network.
  */
 import { describe, expect, it } from 'vitest';
@@ -33,12 +35,14 @@ import {
 } from '../../src/queue-runner/repairCleanup.js';
 import {
   decideResumeCandidate,
+  type RepairResumeOwner,
   type RepairResumeProbes,
 } from '../../src/queue-runner/repairResume.js';
 
 const ROOT = '/wt';
 const ITEM = 'pr1-merged';
 const JOB = 'crq-R-F1';
+const OWNER: RepairResumeOwner = { worktreeRoot: ROOT, itemId: ITEM, jobId: JOB };
 const BASE = `${ROOT}/crq-repair-${ITEM}-${JOB}`;
 const A2 = `${BASE}-A2`;
 
@@ -136,7 +140,7 @@ describe('resume selection against the established worktree ownership contract',
   });
 
   it.each(RECORDS.map((r) => [r.name, r] as const))(
-    'adopts %s whatever the ownership contract says',
+    'selects %s exactly when the ownership contract says it is owned',
     async (_name, r) => {
       const { probes, calls } = resumeProbes();
       // The caller's tree is the owned base tree: the control the recorded
@@ -145,24 +149,46 @@ describe('resume selection against the established worktree ownership contract',
         { pending_judge: true, worktree: r.path },
         BASE,
         probes,
+        OWNER,
       );
-      expect(decision).toEqual({
-        kind: 'proceed',
-        worktree: r.path,
-        adopted: r.path !== BASE,
-      });
-      // Selection asks only the three filesystem questions: there is no
-      // ownership, `git worktree list` or registration probe to ask.
+      if (r.owned) {
+        expect(decision).toEqual({ kind: 'proceed', worktree: r.path, adopted: r.path !== BASE });
+      } else {
+        expect(decision).toEqual({
+          kind: 'refuse-missing-candidate',
+          pending: 'judge',
+          reason: 'pending judge worktree unavailable; needs human',
+        });
+      }
+      // Selection asks only filesystem questions: there is no `git worktree
+      // list` or registration probe to ask.
       expect(calls.every((c) => /^(resolve|is_dir|exists) /.test(c))).toBe(true);
+      // A foreign tree is refused before it is asked about as a directory.
+      if (!r.owned) expect(calls.some((c) => /^(is_dir|exists) /.test(c))).toBe(false);
     },
   );
 
-  it('is blind to ownership and registration together: the decision is a function of the path alone', async () => {
+  it.each(RECORDS.map((r) => [r.name, r] as const))(
+    'keeps the tree in hand for %s under dispatch_pending alone, adopting only owned',
+    async (_name, r) => {
+      const { probes } = resumeProbes();
+      const decision = await decideResumeCandidate(
+        { dispatch_pending: true, worktree: r.path },
+        A2,
+        probes,
+        OWNER,
+      );
+      const expected = r.owned && r.path !== A2 ? r.path : A2;
+      expect(decision).toEqual({ kind: 'proceed', worktree: expected, adopted: expected !== A2 });
+    },
+  );
+
+  it('is blind to registration: the decision is a function of the path alone', async () => {
     const byPath = new Map<string, string>();
     for (const r of RECORDS) {
       const { probes } = resumeProbes();
       const seen = JSON.stringify(
-        await decideResumeCandidate({ pending_judge: true, worktree: r.path }, BASE, probes),
+        await decideResumeCandidate({ pending_judge: true, worktree: r.path }, BASE, probes, OWNER),
       );
       const prior = byPath.get(r.path);
       if (prior !== undefined) expect(seen, `${r.name} vs same path`).toBe(prior);
@@ -173,7 +199,7 @@ describe('resume selection against the established worktree ownership contract',
     expect(byPath.size).toBeLessThan(RECORDS.length);
   });
 
-  it('records which selections diverge from ownership (the gap)', async () => {
+  it('no longer diverges from ownership: every adopted record is owned', async () => {
     const divergent: string[] = [];
     for (const r of RECORDS) {
       const { probes } = resumeProbes();
@@ -181,36 +207,51 @@ describe('resume selection against the established worktree ownership contract',
         { pending_mechanical: true, worktree: r.path },
         BASE,
         probes,
+        OWNER,
       );
       const adopts = decision.kind === 'proceed' && decision.worktree === r.path;
-      if (adopts && !r.owned) divergent.push(r.name);
+      if (adopts !== r.owned) divergent.push(r.name);
     }
-    expect(divergent).toEqual([
-      'foreign job id',
-      'foreign item id',
-      'legacy name (harvest accepts, cleanup refuses)',
-      'unrelated name under WT_ROOT',
-      '-A2 of -A2',
-      'owned name outside WT_ROOT',
-      'owned name nested below WT_ROOT',
-      'WT_ROOT itself',
-      'foreign, unregistered',
-    ]);
+    expect(divergent).toEqual([]);
   });
 
-  it('refuses an owned-looking tree only when it is missing, never for being foreign', async () => {
+  it('refuses an owned tree that is missing and a foreign tree alike', async () => {
     const probes: RepairResumeProbes = {
       resolve: (p) => Promise.resolve(p),
       isDirectory: (p) => Promise.resolve(p !== A2),
       exists: () => Promise.resolve(true),
     };
-    const owned = await decideResumeCandidate({ pending_judge: true, worktree: A2 }, BASE, probes);
+    const owned = await decideResumeCandidate(
+      { pending_judge: true, worktree: A2 },
+      BASE,
+      probes,
+      OWNER,
+    );
     expect(owned).toMatchObject({ kind: 'refuse-missing-candidate', pending: 'judge' });
     const foreign = await decideResumeCandidate(
       { pending_judge: true, worktree: `${ROOT}/scratch` },
       BASE,
       probes,
+      OWNER,
     );
-    expect(foreign).toEqual({ kind: 'proceed', worktree: `${ROOT}/scratch`, adopted: true });
+    expect(foreign).toMatchObject({ kind: 'refuse-missing-candidate', pending: 'judge' });
+  });
+
+  it('rejects a recorded tree owned by another item or job even when it is the sibling -A2', async () => {
+    const { probes } = resumeProbes();
+    const otherItem = await decideResumeCandidate(
+      { pending_mechanical: true, worktree: `${ROOT}/crq-repair-pr2-merged-${JOB}-A2` },
+      BASE,
+      probes,
+      OWNER,
+    );
+    expect(otherItem).toMatchObject({ kind: 'refuse-missing-candidate', pending: 'mechanical' });
+    const otherJob = await decideResumeCandidate(
+      { pending_mechanical: true, worktree: `${ROOT}/crq-repair-${ITEM}-crq-R-F2-A2` },
+      BASE,
+      probes,
+      OWNER,
+    );
+    expect(otherJob).toMatchObject({ kind: 'refuse-missing-candidate', pending: 'mechanical' });
   });
 });

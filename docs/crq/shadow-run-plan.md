@@ -40,6 +40,35 @@ state, before any cutover is proposed.
 5. **Report.** One JSON diff per sample, written to a scratch directory; a
    summary count of identical, explained-divergence and unexplained samples.
 
+## Composed tick shadow (offline, still not activated)
+
+The plan shadow above compares the scheduling pass only. `runComposedShadow`
+(`src/adapters/crq/shadowRun.ts`) also compares what the composed phases write:
+after the real Python `crq.tick` runs over frozen copy `a` and the TS
+`composeFullTick` + `runTick` over byte-identical copy `b`, it compares
+`queue.json` (by value), `events.jsonl` (record by record, the pinned `at`
+normalised and blank lines dropped), `heartbeat.json`, `status.json`, `status.md`
+and `next-review-at` (these four by bytes), the tick log and the phase calls. Both sides are injected runners; the harness is not imported from a
+routed path and keeps the live-root digest abort. It refuses (default-deny) a live root
+holding any entry other than the frozen `SHADOW_FILES` and the overwritten outputs
+(`status.json`, `status.md`, `next-review-at`, `tick.lock`), such as
+`backfill-rollout.json`, `ledger`, `runs`, `receipts`, `reconcile` or
+`backfill/findings`, so a switched-off phase cannot read as `identical`. It always reports
+`complete: false` with the open `STAGED_GAPS` rows.
+
+Both sides stub the same effects: `start_one` (nothing started), `fetch`, `enroll`,
+usage (one slot), `notify_owner`, and the clock; discovery, the paseo schedule
+probe and the forge are off or empty. Not compared: the slot, the XDG
+`summary.json` (Python stamps it with the real clock), the stubbed effects, and
+whatever the phases write outside the six compared files (`ledger/`, `runs/`,
+`receipts/`, `reconcile/`). The report's `slotDecision` is always `same` for a
+composed run: no slot runs on either side, so it carries no signal.
+Known divergence, explained: Python's `load_queue` retires a pending `open`
+item with a completed cycle and the tick persists it; the TS composed queue
+leaves it pending. Fixed in TS by this slice: `status.json` item key order
+(`repo` last), the stray blank line in the `status.md` repair block, and the
+`summary_failed` class name for a missing `events.jsonl` (`FileNotFoundError`).
+
 ## Safety (read-only guarantees)
 
 - The harness never opens the live state root for writing and never takes

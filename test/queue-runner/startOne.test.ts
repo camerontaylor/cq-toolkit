@@ -23,7 +23,7 @@ interface Harness {
   readonly effects: StartOneEffects;
   readonly planned: string[];
   readonly launched: string[];
-  readonly coverage: Array<{ ordinaryEligible?: boolean }>;
+  readonly coverage: Array<Record<string, never>>;
   readonly events: Array<Record<string, string>>;
   starts: number;
 }
@@ -56,8 +56,8 @@ function harness(
       h.starts += 1;
       return `run-${String(item.id)}`;
     },
-    coverageFallback: async (options) => {
-      h.coverage.push(options);
+    coverageFallback: async () => {
+      h.coverage.push({});
       return answers.shift() ?? { started: null, hasCoverage: false };
     },
     event: async (_kind, data) => {
@@ -228,25 +228,36 @@ describe('startOne selection', () => {
     expect(q2.backfill_ordinary_exhausted).toBe(false);
   });
 
-  it('background turn tries rank 2-3 work before interactive work, then flips to coverage', async () => {
+  const turnHistory = (): StartRecord => ({
+    id: 'hist',
+    kind: 'open',
+    state: 'done',
+    attempts: [
+      { run_id: 'x-1', started_at: '2023-11-14T20:00:00Z', band: 'interactive' },
+      { run_id: 'x-2', started_at: '2023-11-14T21:00:00Z', band: 'interactive' },
+    ],
+  });
+
+  it('background turn tries rank 2-3 work first and never reaches backfill ahead of a launched rank 0-1 item (f5cd311ad)', async () => {
     const q = queueOf(
       open('inter'),
       { id: 'back', kind: 'delta', followup: 'merged', state: 'pending', order: 5 },
-      {
-        id: 'hist',
-        kind: 'open',
-        state: 'done',
-        attempts: [
-          { run_id: 'x-1', started_at: '2023-11-14T20:00:00Z', band: 'interactive' },
-          { run_id: 'x-2', started_at: '2023-11-14T21:00:00Z', band: 'interactive' },
-        ],
-      },
+      turnHistory(),
     );
     const h = harness(() => ({ outcome: 'none', logNoStart: false }));
     await startOne({ queue: q, log: [], dry: false }, h.effects);
-    // Rank 2-3 first; reaching rank 0 after the lane ended gives coverage its single turn.
+    // Rank 2-3 first, then the rank 0 item; coverage is reached once, at the end of the loop.
     expect(h.planned).toEqual(['back', 'inter']);
-    expect(h.coverage[0]).toEqual({ ordinaryEligible: false });
+    expect(h.coverage).toEqual([{}]);
+    expect(q.backfill_ordinary_exhausted).toBe(true);
+  });
+
+  it('a launched interactive item stops a background turn before coverage is consulted', async () => {
+    const q = queueOf(open('inter'), turnHistory());
+    const h = harness(() => ok(), { coverage: [{ started: 'bf-run', hasCoverage: true }] });
+    const result = await startOne({ queue: q, log: [], dry: false }, h.effects);
+    expect(result.started).toBe('run-inter');
+    expect(h.coverage).toEqual([]);
   });
 
   it('records planner outcomes: skipped, wait, none', async () => {

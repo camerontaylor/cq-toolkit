@@ -167,6 +167,17 @@ interface Outcome {
   readonly calls: string;
 }
 
+/**
+ * The item as a restarted tick would see it if the settled flags were lost (the crash
+ * between the ledger write and the queue save): `siblings_recorded` is stripped so the
+ * terminal replay path still runs. A persisted flag skips it; see the settled-replay tests.
+ */
+function unsettled(o: Outcome): Record<string, unknown> {
+  const parsed = JSON.parse(o.queue) as { repair_runs?: Record<string, Record<string, unknown>> };
+  for (const record of Object.values(parsed.repair_runs ?? {})) delete record.siblings_recorded;
+  return parsed;
+}
+
 function runPython(spec: Spec): Outcome {
   const root = mkdtempSync(join(tmpdir(), 'repair-hv-py-'));
   dirs.push(root);
@@ -287,10 +298,21 @@ async function runTs(spec: Spec): Promise<Outcome> {
   };
 }
 
+/**
+ * The queue without the settled-replay bookkeeping. Which jobs are flagged legitimately
+ * differs around a rejected inbox (the port terminalizes and settles it, Python skips it);
+ * the flags are compared strictly in the settled-replay describe instead.
+ */
+function noFlags(queue: string): string {
+  const parsed = JSON.parse(queue) as { repair_runs?: Record<string, Record<string, unknown>> };
+  for (const record of Object.values(parsed.repair_runs ?? {})) delete record.siblings_recorded;
+  return JSON.stringify(parsed);
+}
+
 async function same(spec: Spec): Promise<Outcome> {
   const py = runPython(spec);
   const ts = await runTs(spec);
-  expect(ts.queue).toBe(py.queue);
+  expect(noFlags(ts.queue)).toBe(noFlags(py.queue));
   expect(ts.calls).toBe(py.calls);
   expect(ts.error).toBe(py.error);
   expect(ts.messages).toEqual(py.messages);
@@ -884,7 +906,7 @@ describe('repairHarvest result validation (differential)', () => {
       // The J2 sibling is a verified FIXED result of a dead run: it gets its own decision.
       expect(first.calls).toContain('"sibling","F2"');
       const replay = await runTs({
-        item: JSON.parse(first.queue) as Record<string, unknown>,
+        item: unsettled(first),
         files: files(
           [J1, '[]', fixed(J1)],
           [J2, job(J2, { canonical_finding_id: 'F2' }), fixed(J2)],
@@ -1310,8 +1332,7 @@ describe('repairHarvest terminal runs (differential)', () => {
 describe('repairHarvest rejected-inbox replay across ticks (Python vs port)', () => {
   const calls = (o: Outcome): string[][] => JSON.parse(o.calls) as string[][];
   const names = (o: Outcome): string[] => calls(o).map((c) => c[0] as string);
-  const carry = (o: Outcome): Record<string, unknown> =>
-    JSON.parse(o.queue) as Record<string, unknown>;
+  const carry = unsettled;
   const marksOf = (o: Outcome): string[][] => calls(o).filter((c) => c[0] === 'mark');
   const both = item({}, { jobs: [J1, J2] });
   const valid1 = [J1, job(J1, { canonical_finding_id: 'F1' }), verdict(J1, 'NOT-FIXED')] as [
@@ -1385,13 +1406,13 @@ describe('repairHarvest rejected-inbox replay across ticks (Python vs port)', ()
     // "invalid repair result: ") and its sibling replay skips the unreadable inbox.
     const second = await same({ item: carry(first), files: files1, cleanup: true });
     expect(second.error).toBeUndefined();
-    expect(second.queue).toBe(first.queue);
+    expect(noFlags(second.queue)).toBe(noFlags(first.queue));
     expect(marksOf(second)).toHaveLength(1);
     expect(marksOf(second)[0]).toEqual(marksOf(first)[0]);
     // Cleanup runs for both retained verdicts; the real cleanup refuses the rejected one.
     expect(names(second)).toEqual(['mark', 'cleanup', 'cleanup', 'cleanup', 'cleanup']);
     const third = await same({ item: carry(second), files: files1, cleanup: true });
-    expect(third.queue).toBe(first.queue);
+    expect(noFlags(third.queue)).toBe(noFlags(first.queue));
     expect(third.calls).toBe(second.calls);
   });
 
@@ -1434,11 +1455,11 @@ describe('repairHarvest rejected-inbox replay across ticks (Python vs port)', ()
     };
     const py = runPython(spec);
     expect(py.error).toBeUndefined();
-    expect(py.queue).toBe(first.queue);
+    expect(noFlags(py.queue)).toBe(noFlags(first.queue));
     expect(py.calls).toContain('"sibling","FSWAP","crq-R-F2"');
     const ts = await runTs(spec);
     expect(ts.error).toBeUndefined();
-    expect(ts.queue).toBe(first.queue);
+    expect(noFlags(ts.queue)).toBe(noFlags(first.queue));
     expect(names(ts)).toEqual(['mark']);
     expect(marksOf(ts)[0]).toEqual(marksOf(first)[0]);
     expect(ts.calls).not.toContain('FSWAP');
@@ -1462,11 +1483,11 @@ describe('repairHarvest rejected-inbox replay across ticks (Python vs port)', ()
     const spec: Spec = { item: carry(first), files: repaired };
     const py = runPython(spec);
     expect(py.error).toBeUndefined();
-    expect(py.queue).toBe(first.queue);
+    expect(noFlags(py.queue)).toBe(noFlags(first.queue));
     expect(py.calls).toContain('"mark","crq-R-F2"'); // Python's late sibling write
     const ts = await runTs(spec);
     expect(ts.error).toBeUndefined();
-    expect(ts.queue).toBe(first.queue);
+    expect(noFlags(ts.queue)).toBe(noFlags(first.queue));
     expect(names(ts)).toEqual(['mark']);
     expect(ts.calls).not.toContain('crq-R-F2');
     expect(ts.calls).not.toContain('"canonical"');
@@ -1556,8 +1577,7 @@ describe('repairHarvest rejected-inbox replay across ticks (Python vs port)', ()
 describe('repairHarvest sibling retry timing across ticks (Python vs port)', () => {
   const calls = (o: Outcome): string[][] => JSON.parse(o.calls) as string[][];
   const names = (o: Outcome): string[] => calls(o).map((c) => c[0] as string);
-  const carry = (o: Outcome): Record<string, unknown> =>
-    JSON.parse(o.queue) as Record<string, unknown>;
+  const carry = unsettled;
   const marksOf = (o: Outcome, id: string): string[][] =>
     calls(o).filter((c) => c[0] === 'mark' && c[1] === id);
   const both = item({}, { jobs: [J1, J2] });
@@ -1700,8 +1720,7 @@ describe('repairHarvest sibling retry timing across ticks (Python vs port)', () 
 describe('repairHarvest canonical delivery check ahead of a retry_after wait (Python vs port)', () => {
   const calls = (o: Outcome): string[][] => JSON.parse(o.calls) as string[][];
   const names = (o: Outcome): string[] => calls(o).map((c) => c[0] as string);
-  const carry = (o: Outcome): Record<string, unknown> =>
-    JSON.parse(o.queue) as Record<string, unknown>;
+  const carry = unsettled;
   const runOf = (o: Outcome): Record<string, unknown> =>
     (JSON.parse(o.queue) as { repair_runs: { R: Record<string, unknown> } }).repair_runs.R;
   const inbox1 = job(J1, { canonical_finding_id: 'F1' });
@@ -1808,12 +1827,15 @@ describe('repairHarvest with the file reads', () => {
     );
     await expect(reads.resolvePath('a\0b')).rejects.toMatchObject({ kind: 'ValueError' });
     expect(await reads.resultExists('crq-none')).toBe(false);
-    await expect(reads.readResult('crq-none')).rejects.toMatchObject({ kind: 'OSError' });
+    await expect(reads.readResult('crq-none')).rejects.toMatchObject({
+      kind: 'FileNotFoundError',
+      message: expect.stringContaining('[Errno 2] No such file or directory:') as string,
+    });
     mkdirSync(join(root, 'repair', 'crq-bad'), { recursive: true });
     writeFileSync(join(root, 'repair', 'crq-bad', 'result.json'), Buffer.from([0xff]));
-    await expect(reads.readResult('crq-bad')).rejects.toMatchObject({ kind: 'ValueError' });
+    await expect(reads.readResult('crq-bad')).rejects.toMatchObject({ kind: 'UnicodeDecodeError' });
     writeFileSync(join(root, 'repair', 'crq-bad', 'result.json'), '{nope');
-    await expect(reads.readResult('crq-bad')).rejects.toMatchObject({ kind: 'ValueError' });
+    await expect(reads.readResult('crq-bad')).rejects.toMatchObject({ kind: 'JSONDecodeError' });
   });
 
   it('resolves components in filesystem order, like Path.resolve (a ".." after a symlink)', async () => {
@@ -1987,8 +2009,8 @@ describe('repairHarvest JSON integer digit limit (Python vs port)', () => {
       // The oracle is not simply accepting everything: a bare sign is an error on both sides.
       const out = await readBoth('-');
       expect(out.py.outcome).toBe('JSONDecodeError');
-      expect(out.job).toMatchObject({ kind: 'ValueError' });
-      expect(out.result).toMatchObject({ kind: 'ValueError' });
+      expect(out.job).toMatchObject({ kind: 'JSONDecodeError' });
+      expect(out.result).toMatchObject({ kind: 'JSONDecodeError' });
     });
   });
 

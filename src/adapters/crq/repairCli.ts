@@ -254,6 +254,11 @@ const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 /** `json.loads((ROOT / 'config.json').read_text())`: duplicates keep the last value. */
 async function readConfig(root: string): Promise<JsonValue> {
   const text = utf8.decode(await readFile(join(root, 'config.json')));
+  return parseRepairConfigText(text);
+}
+
+/** `json.loads` of the repair config text: duplicate keys keep the last value; NaN/Infinity parse. */
+export function parseRepairConfigText(text: string): JsonValue {
   return parseJsonValue(text, {
     duplicates: 'last',
     parseConstant: (raw) =>

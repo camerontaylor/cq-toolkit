@@ -1,10 +1,12 @@
 /**
  * File-backed effects for the repair enqueue, backfill and archive passes
  * (repair_tick.py:175-272, 848-892). Inactive: nothing imports this outside
- * tests. The review.ndjson parser, git and the repair config stay injected:
- * `crq_repair.findings` has no TS port and git is not owned here.
+ * tests. Git and the repair config stay injected; `crq_repair.findings` is read
+ * from `RUNS/<run>/review.ndjson` here (`repairFindings.ts`) unless a test
+ * injects its own.
  */
 import { mkdir, readFile, readdir, rename, stat } from 'node:fs/promises';
+import { PyError, pyOsError } from '../../queue-runner/pyErrors.js';
 import { join } from 'node:path';
 
 import { parseJsonValue, toPlainJson } from '../../policy/crq/jsonValue.js';
@@ -15,6 +17,7 @@ import {
   type RepairBackfillEffects,
   type SourcedFinding,
 } from '../../queue-runner/repairBackfill.js';
+import { parseRepairFindings } from '../../queue-runner/repairFindings.js';
 import { atomicWrite } from './atomic.js';
 
 export interface FileRepairBackfillInput {
@@ -29,7 +32,8 @@ export interface FileRepairBackfillInput {
   readonly mergedCurrentEnabled: boolean;
   readonly maxRoundsPerPin: number;
   readonly git: (...args: string[]) => Promise<string>;
-  readonly findings: (run: string, provenance: boolean) => Promise<SourcedFinding[]>;
+  /** Overrides the bound `crq_repair.findings` reader (tests). */
+  readonly findings?: (run: string, provenance: boolean) => Promise<SourcedFinding[]>;
   readonly iso: () => string;
 }
 
@@ -67,7 +71,23 @@ const resultExists = (path: string): Promise<boolean> =>
 
 async function readJson(path: string): Promise<unknown> {
   // Python's strict utf-8 decode raises; so does a fatal decoder.
-  return toPlainJson(parseJsonValue(decoder.decode(await readFile(path))), { bigints: true });
+  let bytes: Uint8Array;
+  try {
+    bytes = await readFile(path);
+  } catch (e) {
+    throw pyOsError(e, path);
+  }
+  let text: string;
+  try {
+    text = decoder.decode(bytes);
+  } catch (e) {
+    throw new PyError('UnicodeDecodeError', e instanceof Error ? e.message : String(e));
+  }
+  try {
+    return toPlainJson(parseJsonValue(text), { bigints: true });
+  } catch (e) {
+    throw new PyError('JSONDecodeError', e instanceof Error ? e.message : String(e));
+  }
 }
 
 export function fileRepairBackfillEffects(
@@ -81,7 +101,18 @@ export function fileRepairBackfillEffects(
     mergedCurrentEnabled: input.mergedCurrentEnabled,
     maxRoundsPerPin: input.maxRoundsPerPin,
     git: input.git,
-    findings: input.findings,
+    findings:
+      input.findings ??
+      (async (run, provenance) => {
+        const path = join(input.runsRoot, run, 'review.ndjson');
+        let bytes: Uint8Array;
+        try {
+          bytes = await readFile(path);
+        } catch (e) {
+          throw pyOsError(e, path);
+        }
+        return parseRepairFindings(bytes, provenance);
+      }),
     iso: input.iso,
     async readReceipt(receiptId) {
       return (await readJson(join(input.stateRoot, 'receipts', `${receiptId}.json`))) as Record<

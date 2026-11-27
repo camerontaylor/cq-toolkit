@@ -167,20 +167,25 @@ class CliTests(ControllerFixture):
                     for p in self.record_dir.glob("controller-*.json")]
         self.assertEqual([j["helper_sha256"] for j in journals], [helper_digest])
 
-    def test_health_cli_missing_heartbeat_refuses_with_isolated_env(self):
+    def test_health_cli_missing_heartbeat_waits_budget_then_is_unhealthy(self):
         # The CLI subprocess resolves WATCHDOG_HOME from its own environment:
         # an isolated XDG_STATE_HOME means the actual user heartbeat is never
-        # consulted, and no queue tick can substitute for it.
+        # consulted, and no queue tick can substitute for it. A heartbeat the
+        # runner has not published yet is waited for within the first-tick
+        # budget (exhausted here) and then reported unhealthy (exit 1), never
+        # a refusal (exit 2).
         self.write_state("queue.json", {"last_tick": "2026-10-28T00:00:00Z"})
         result = self.run_cli("health", "--interval-seconds", "0",
+                              "--first-tick-timeout-seconds", "0",
                               env={"XDG_STATE_HOME": str(self.base / "cli-xdg")})
-        self.assertEqual(result.returncode, 2)
-        self.assertIn("refused:", result.stderr)
-        self.assertIn("completion heartbeat", result.stderr)
-        error = json.loads(result.stdout)["error"]
-        self.assertEqual(error["kind"], "refused")
-        self.assertEqual(error["subcommand"], "health")
-        self.assertEqual(error["exitCode"], 2)
+        self.assertEqual(result.returncode, 1)
+        artifact = json.loads(result.stdout)
+        self.assertEqual(artifact["operation"], "health")
+        self.assertFalse(artifact["healthy"])
+        self.assertIn("first observation", artifact["reason"])
+        first = artifact["observations"][0]
+        self.assertIsNone(first["observed_tick"])
+        self.assertFalse(first["advanced"])
 
     def test_health_cli_unreadable_heartbeat_exits_1_as_failed_observation(self):
         # The heartbeat exists but cannot be read: a failed observation keeps
@@ -316,6 +321,84 @@ class CliTests(ControllerFixture):
         self.assertEqual(error["kind"], "refused")
         self.assertEqual(error["subcommand"], "switch")
         self.assertEqual(error["exitCode"], 2)
+
+
+class SwitchModeSelectionTests(unittest.TestCase):
+    """Switch mode is chosen by option presence; main() runs with mocked effects.
+
+    Helper loading, the live binding, `Effects` and both dispatch targets are
+    mocked, so nothing touches a host. Invalid options must answer as a usage
+    artifact before any of them is reached."""
+    SHA, TAG, UNIT = "a" * 40, "crq-runner/20261028-2", "crq-tick.service"
+
+    def invoke(self, *flags):
+        import contextlib
+        import io
+        helper = mock.Mock()
+        helper.load_overlay.return_value = ({}, b"")
+        live = mock.Mock()
+        live.production_adapter.return_value = ("adapter", "selection")
+        plan = {"preflight": {"target": "t"}, "automatic_rollback_permitted": False, "steps": []}
+        self.mocks = {
+            "load_helper": mock.Mock(return_value=(helper, "digest")),
+            "load_live": mock.Mock(return_value=live),
+            "switch_unit": mock.Mock(return_value={"operation": "unit_switch"}),
+            "deploy_plan": mock.Mock(return_value=plan),
+            "effects": mock.Mock(return_value="effects"),
+        }
+        self.live = live
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(dc, "_load_helper", self.mocks["load_helper"]), \
+                mock.patch.object(dc, "_load_live_binding", self.mocks["load_live"]), \
+                mock.patch.object(dc, "switch_unit", self.mocks["switch_unit"]), \
+                mock.patch.object(dc, "deploy_plan", self.mocks["deploy_plan"]), \
+                mock.patch.object(dc, "Effects", self.mocks["effects"]), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            argv = ["--json", "--root", tmp, "--overlay", tmp + "/overlay.json",
+                    "--record-dir", tmp + "/records", "switch", *flags]
+            try:
+                code = dc.main(argv)
+            except SystemExit as exit_:
+                code = exit_.code
+        return code, stdout.getvalue()
+
+    def test_empty_or_conflicting_options_are_usage_errors_before_any_effect(self):
+        cases = {
+            "empty runtime beside checkout options": ("--runtime", "", "--sha", self.SHA, "--tag", self.TAG),
+            "empty sha in unit mode": ("--unit", self.UNIT, "--runtime", "r", "--sha", ""),
+            "empty tag in unit mode": ("--unit", self.UNIT, "--runtime", "r", "--tag", ""),
+            "empty sha and tag in unit mode": ("--unit", self.UNIT, "--runtime", "r", "--sha", "", "--tag", ""),
+            "empty runtime with unit": ("--unit", self.UNIT, "--runtime", ""),
+            "unit without runtime": ("--unit", self.UNIT),
+            "empty required checkout value": ("--sha", "", "--tag", self.TAG),
+            "checkout missing tag": ("--sha", self.SHA),
+        }
+        for name, flags in cases.items():
+            with self.subTest(name):
+                code, out = self.invoke(*flags)
+                self.assertEqual(code, 2)
+                error = json.loads(out)["error"]
+                self.assertEqual((error["kind"], error["subcommand"]), ("usage", "switch"))
+                for mocked in self.mocks.values():
+                    mocked.assert_not_called()
+
+    def test_valid_unit_mode_still_dispatches_the_unit_switch(self):
+        code, out = self.invoke("--unit", self.UNIT, "--runtime", "python")
+        self.assertEqual(code, 0)
+        self.mocks["load_helper"].assert_called_once()
+        self.mocks["switch_unit"].assert_called_once_with("effects", "adapter", self.UNIT, "python")
+        self.mocks["deploy_plan"].assert_not_called()
+        self.assertEqual(json.loads(out), {"operation": "unit_switch"})
+
+    def test_valid_checkout_mode_still_dispatches_the_plan(self):
+        code, out = self.invoke("--sha", self.SHA, "--tag", self.TAG)
+        self.assertEqual(code, 0)
+        self.mocks["deploy_plan"].assert_called_once()
+        self.assertEqual(self.mocks["deploy_plan"].call_args.args[2:4], (self.SHA, self.TAG))
+        self.mocks["switch_unit"].assert_not_called()
+        self.mocks["load_live"].assert_not_called()
+        self.assertEqual(json.loads(out)["operation"], "switch")
 
 
 class RecordDirResolutionTests(unittest.TestCase):

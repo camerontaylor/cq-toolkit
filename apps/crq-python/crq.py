@@ -593,6 +593,15 @@ def secret_scan(base: str, head: str, out: Path, *, classes: Optional[frozenset]
                             exemptions=exemptions, exemption_error=exemption_error)
 
 
+def _diff_lines(diff: str) -> List[str]:
+    """Split a diff on the only terminator git emits, ``\\n``. A trailing ``\\r`` stays in
+    the line, and U+2028/U+0085 and the other Unicode boundaries are ordinary content."""
+    lines = diff.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
 def secret_scan_diff(diff: str, out: Path, *, base=None, head=None,
                      classes: Optional[frozenset] = None, exemptions=None,
                      exemption_error: Optional[str] = None) -> Tuple[bool, Dict[str, Any]]:
@@ -605,7 +614,7 @@ def secret_scan_diff(diff: str, out: Path, *, base=None, head=None,
     line_paths: Dict[int, str] = {}
     path = None
     in_header = False  # ---/+++ are headers only between "diff --git" and the first "@@"
-    for n, line in enumerate(diff.splitlines(), 1):
+    for n, line in enumerate(_diff_lines(diff), 1):
         if line.startswith("diff --git"):
             m = re.match(r"diff --git a/(.*) b/(.*)$", line)
             path = m.group(2) if m else None
@@ -3591,6 +3600,7 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
     # cleared before the read and after the pass, so a publication outside the
     # pass never sees another tick's count (an unread count holds creation).
     repair_tick.reset_fix_pr_backlog()
+    repair_tick.begin_tick(sys.modules[__name__])
     if not dry and repair_tick.backfill_repair_present(q):
         # Before the first publish: the hard cap on backfill fix PRs reads this
         # and the drain reads the file it writes. One forge request under its
