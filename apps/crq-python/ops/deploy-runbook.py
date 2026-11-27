@@ -390,16 +390,42 @@ class Hold:
         self.path = Path(root) / MARKER_RELPATH
         self.token = (uuid.uuid4().hex + "-" + str(os.getpid()) + "\n").encode()
         # ``created`` tracks a marker that exists on disk; ``acquired``
-        # additionally requires this run's token to be persisted.
+        # additionally requires this run's token to be persisted and the
+        # marker's directory entry synced.
         self.created = False
         self.acquired = False
 
     def acquire(self):
+        # Directories this call creates: each one's entry lives in its
+        # parent, so every such parent must be synced before the hold counts
+        # as durable.
+        created_dirs = []
+        probe = self.path.parent
+        while not os.path.lexists(probe) and probe != probe.parent:
+            created_dirs.append(probe)
+            probe = probe.parent
         self.path.parent.mkdir(parents=True, exist_ok=True)
         try:
             descriptor = os.open(self.path, os.O_CREAT | os.O_EXCL
                                  | os.O_WRONLY, 0o600)
         except FileExistsError as exc:
+            owner = self.ownership()
+            if owner is None:
+                raise Refused(
+                    "admission is already held by " + str(self.path)
+                    + "; its ownership could not be read, so it may be "
+                    "this run's own marker or another's, and it was left "
+                    "untouched") from exc
+            if owner is True:
+                raise Refused(
+                    "admission is already held by " + str(self.path)
+                    + " with this run's token; it was left untouched"
+                ) from exc
+            if not os.path.lexists(self.path):
+                raise Refused(
+                    "the admission marker " + str(self.path)
+                    + " was no longer present when it was read back; this "
+                    "run wrote nothing, and a retry is fine") from exc
             raise Refused(
                 "admission is already held by " + str(self.path)
                 + "; another deploy or a manual hold owns it") from exc
@@ -425,25 +451,68 @@ class Hold:
                     "verifying its contents are "
                     + self.token.decode().strip()) from exc
             # The persisted bytes match this run's token, so ownership is
-            # proven: remove the marker as release() would and refuse with
-            # the host genuinely unchanged.
+            # proven: remove the marker durably, as release() does, and
+            # refuse with the host genuinely unchanged.
             try:
-                self.path.unlink()
+                self._remove_durably()
             except OSError as removal:
                 raise RecoveryRequired(
                     "the admission marker " + str(self.path)
                     + " could not be persisted (" + repr(exc)[:200]
-                    + ") and could not be removed (" + repr(removal)[:200]
-                    + "); the marker is retained with this run's token "
-                    + self.token.decode().strip() + " and admission stays "
-                    "disabled") from removal
+                    + ") and could not be verifiably removed ("
+                    + repr(removal)[:200] + "); the marker is retained or "
+                    "its removal may not survive a reboot, and admission "
+                    "stays held by this run's token "
+                    + self.token.decode().strip()) from removal
             raise Refused(
                 "the admission marker " + str(self.path)
                 + " could not be persisted (" + repr(exc)[:200]
                 + "); its bytes matched this run's token, so ownership was "
-                "proven and the marker was removed; the host is unchanged"
+                "proven and the marker was removed with a synced directory "
+                "entry; the host is unchanged"
             ) from exc
+        # The token bytes are durable, but a created file's directory entry
+        # is not until the directory itself is synced: without it a power
+        # loss can reboot the host without the admission hold. A failed
+        # sync leaves the transition unverifiable, so the marker stays and
+        # the run reports recovery instead of proceeding.
+        try:
+            self.sync_directory()
+            # The marker directory may have been created by another step
+            # (the deploy lock), so its own parent is always synced too.
+            parents = {created.parent for created in created_dirs}
+            parents.add(self.path.parent.parent)
+            for parent in sorted(parents):
+                self._sync_path(parent)
+        except OSError as exc:
+            raise RecoveryRequired(
+                "the admission marker " + str(self.path)
+                + " was created but its directory entry could not be "
+                "synced (" + repr(exc)[:200] + "); the admission transition "
+                "could not be verified: the marker is retained with this "
+                "run's token " + self.token.decode().strip() + " and "
+                "admission stays disabled") from exc
         self.acquired = True
+
+    def sync_directory(self):
+        """fsync the marker's directory so its entry — the creation or the
+        removal — survives a power loss; raises OSError when it cannot."""
+        self._sync_path(self.path.parent)
+
+    @staticmethod
+    def _sync_path(path):
+        directory = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+    def _remove_durably(self):
+        """Remove the marker and sync its directory entry so the removal
+        cannot resurrect as a stale hold after a reboot; raises OSError
+        when either step fails."""
+        self.path.unlink()
+        self.sync_directory()
 
     def owns(self):
         return self.ownership() is True
@@ -461,8 +530,91 @@ class Hold:
     def release(self):
         require(self.owns(),
                 "cannot release the admission marker: it is not this run's")
-        self.path.unlink()
+        try:
+            self.path.unlink()
+        except OSError as exc:
+            raise RecoveryRequired(
+                "the admission marker " + str(self.path)
+                + " could not be verifiably removed (" + repr(exc)[:200]
+                + "); the admission release could not be verified: the "
+                "marker is still present and holds admission"
+            ) from exc
+        try:
+            self.sync_directory()
+        except OSError as exc:
+            # The unlink took effect but is not durable, and the caller is
+            # about to terminate in recovery: admission must not be left
+            # open. Put this run's hold back so the recovery outcome, the
+            # on-disk state and ``acquired`` all agree.
+            try:
+                self._write_marker()
+            except FileExistsError:
+                # Something took the path between the unlink and now. The
+                # bytes decide whose it is; a foreign hold is never touched.
+                present = self.ownership()
+                if present is None:
+                    # The marker exists but cannot be read back, so it may
+                    # be this run's own: leave ``acquired`` as it is (the
+                    # marker holds admission either way) and say the
+                    # ownership is unknown rather than call it foreign.
+                    raise RecoveryRequired(
+                        "the admission marker " + str(self.path)
+                        + " was removed but its removal could not be synced ("
+                        + repr(exc)[:200] + "); a marker is present at the "
+                        "path but could not be read back, so whether it is "
+                        "this run's token "
+                        + self.token.decode().strip() + " is unknown; it "
+                        "was left untouched and admission stays disabled "
+                        "under it") from exc
+                if present is False:
+                    self.acquired = False
+                    raise RecoveryRequired(
+                        "the admission marker " + str(self.path)
+                        + " was removed but its removal could not be synced ("
+                        + repr(exc)[:200] + "); a foreign hold is now "
+                        "present at the path and was preserved untouched: "
+                        "admission stays disabled under that hold, which "
+                        "this run does not own") from exc
+            except OSError as again:
+                # ``acquired`` mirrors a marker that carries this run's
+                # token: without one, fail-stop must re-acquire (or report
+                # the refusal) rather than skip it and record a hold that
+                # is not there.
+                self.acquired = self.ownership() is not False
+                raise RecoveryRequired(
+                    "the admission marker " + str(self.path)
+                    + " was removed but its removal could not be synced ("
+                    + repr(exc)[:200] + ") and the hold could not be "
+                    "re-created (" + repr(again)[:200] + "); admission may "
+                    "be open: re-create the marker with this run's "
+                    "token " + self.token.decode().strip()) from exc
+            try:
+                self.sync_directory()
+            except OSError as again:
+                raise RecoveryRequired(
+                    "the admission marker " + str(self.path)
+                    + " was removed but its removal could not be synced ("
+                    + repr(exc)[:200] + "); the hold was re-created with "
+                    "this run's token " + self.token.decode().strip()
+                    + " and is present, but its directory entry could not "
+                    "be synced (" + repr(again)[:200] + "), so it may not "
+                    "survive a power loss; admission stays disabled "
+                    "until then") from exc
+            raise RecoveryRequired(
+                "the admission marker " + str(self.path)
+                + " was removed but its removal could not be synced ("
+                + repr(exc)[:200] + "); the hold was re-established with "
+                "this run's token " + self.token.decode().strip()
+                + " and admission stays disabled") from exc
         self.acquired = False
+
+    def _write_marker(self):
+        descriptor = os.open(self.path, os.O_CREAT | os.O_EXCL
+                             | os.O_WRONLY, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(self.token)
+            handle.flush()
+            os.fsync(handle.fileno())
 
 
 class DeployLock:
@@ -769,8 +921,7 @@ class Run:
         # must be copied to its own immutable receipt first: if this process
         # dies in the drain or the switch, the receipt is what recovery reads.
         self.persist_recovery_receipt()
-        self.hold = Hold(self.root)
-        self.hold.acquire()
+        self.acquire_hold(Hold(self.root))
         self.phase("held")
         self.narrate("hold acquired; stopping triggers")
         self.stop_triggers()
@@ -1058,11 +1209,36 @@ class Run:
                                 + json.dumps(stopped, sort_keys=True))
         return result
 
+    def acquire_hold(self, hold):
+        """Acquire ``hold`` as this run's. A bare RecoveryRequired (the marker
+        exists but its durability could not be verified) goes through
+        fail_stop so deploy.json carries the receipt and the run id; the
+        marker is retained, never deleted. A Refused still propagates."""
+        self.hold = hold
+        try:
+            hold.acquire()
+        except RecoveryRequired as exc:
+            if exc.record:
+                raise
+            self.fail_stop(str(exc))
+
+    def release_hold(self):
+        """Release the marker; a recovery-required failure from the hold
+        carries no run record, so fail-stop records it (run_dir, outcome,
+        trigger map) and keeps the hold instead of letting recover() re-raise
+        a bare exception that main() cannot describe."""
+        try:
+            self.hold.release()
+        except RecoveryRequired as exc:
+            if exc.record:
+                raise
+            self.fail_stop(str(exc))
+
     # -- terminal states ----------------------------------------------
     def release_admission(self):
         require(self.hold is not None and self.hold.owns(),
                 "cannot release admission: the marker is not this run's")
-        self.hold.release()
+        self.release_hold()
         self.released = True
         self.phase("admission_released")
 
@@ -1091,13 +1267,12 @@ class Run:
         if self.hold is None or not getattr(self.hold, "acquired", False):
             hold = Hold(self.root)
             try:
-                hold.acquire()
+                self.acquire_hold(hold)
             except Refused as exc:
                 self.fail_stop(
                     "cannot reacquire admission for rollback: " + str(exc)
                     + "; the failed target is still installed and its triggers "
                     "may be running (after: " + reason[:200] + ")")
-            self.hold = hold
         require(self.hold.owns(), "hold lost before rollback")
         record = getattr(self, "post_compatibility", None)
         if record is None:
@@ -1180,7 +1355,7 @@ class Run:
                          "reason": reason[:400], "cq_bin": self.cq_bin,
                          "restored_config_sha256": sha256_bytes(live_config)}
         if self.hold.acquired:
-            self.hold.release()
+            self.release_hold()
             self.released = True
         self.write_record("rolled_back", released=True, reason=reason[:400])
         self.phase("rolled_back", triggers=self.final_triggers)
@@ -1229,7 +1404,13 @@ class Run:
         """Keep the hold (reacquiring it if this run released admission)
         and leave the host inert; owner recovery."""
         reacquire_refusal = None
-        if self.hold is not None and not getattr(self.hold, "acquired", False):
+        if self.hold is not None and (
+                not getattr(self.hold, "acquired", False)
+                or self.hold.ownership() is not True):
+            # ``acquired`` can be stale or unverifiable (an unreadable or
+            # missing marker): re-check ownership here. acquire() creates
+            # the marker exclusively, so a foreign or unreadable marker is
+            # never touched and surfaces as the reacquire refusal.
             # Admission was released for the health window: reclaim this
             # run's marker before stopping triggers so the host stays inert
             # behind it. A refusal (typically a foreign marker) still holds

@@ -958,6 +958,249 @@ class DeployTests(DeployFixture, unittest.TestCase):
                           for unit in TRIGGERS}, self.original)
         self.assertEqual(self.record(run)["outcome"], "refused")
 
+    def test_refusal_restore_with_lost_hold_recreate_reacquires_admission(self):
+        class BrokenSwitch:
+            def load_overlay(self, path):
+                return host.load_overlay(path)
+
+            def root_check(self, root, overlay):
+                return host.root_check(root, overlay)
+
+            def switch(self, *args, rollback_config=None):
+                raise ValueError("helper refused the switch")
+
+        real_sync = rb.Hold.sync_directory
+
+        def sync_fails_once_marker_is_gone(hold):
+            if not hold.path.exists():
+                raise OSError(5, "I/O error")
+            return real_sync(hold)
+
+        run = self.build(helper=BrokenSwitch())
+        with mock.patch.object(rb.Hold, "sync_directory",
+                               sync_fails_once_marker_is_gone), \
+                mock.patch.object(rb.Hold, "_write_marker",
+                                  side_effect=OSError(28, "full")):
+            with self.assertRaises(rb.RecoveryRequired):
+                run.run()
+        # fail-stop must have re-acquired the hold and reported it truthfully
+        self.assertTrue(self.marker().exists())
+        self.assertTrue(run.hold.owns())
+        self.assertTrue(self.record(run)["admission_held"])
+
+    def test_refusal_restore_with_foreign_hold_planted_keeps_it(self):
+        class BrokenSwitch:
+            def load_overlay(self, path):
+                return host.load_overlay(path)
+
+            def root_check(self, root, overlay):
+                return host.root_check(root, overlay)
+
+            def switch(self, *args, rollback_config=None):
+                raise ValueError("helper refused the switch")
+
+        real_sync = rb.Hold.sync_directory
+        planted = []
+
+        def sync(hold):
+            if not hold.path.exists() and not planted:
+                planted.append(1)
+                hold.path.write_bytes(b"operator\n")
+                raise OSError(5, "I/O error")
+            return real_sync(hold)
+
+        run = self.build(helper=BrokenSwitch())
+        with mock.patch.object(rb.Hold, "sync_directory", sync):
+            with self.assertRaises(rb.RecoveryRequired):
+                run.run()
+        self.assertEqual(self.marker().read_bytes(), b"operator\n")
+        self.assertFalse(run.hold.acquired)
+        self.assertFalse(self.record(run)["admission_held"])
+        self.assertIn("admission_reacquire_refusal", self.record(run))
+
+    def _refusal_run_with_lost_hold(self, plant, unreadable):
+        class BrokenSwitch:
+            def load_overlay(self, path):
+                return host.load_overlay(path)
+
+            def root_check(self, root, overlay):
+                return host.root_check(root, overlay)
+
+            def switch(self, *args, rollback_config=None):
+                raise ValueError("helper refused the switch")
+
+        real_sync = rb.Hold.sync_directory
+        real_ownership = rb.Hold.ownership
+        state = {"gone": False}
+
+        def sync(hold):
+            if not hold.path.exists() and not state["gone"]:
+                state["gone"] = True
+                if plant:
+                    hold.path.write_bytes(b"operator\n")
+                raise OSError(5, "I/O error")
+            return real_sync(hold)
+
+        def ownership(hold):
+            if unreadable and state["gone"] and (
+                    unreadable == "always" or not state.get("hid")):
+                state["hid"] = True
+                return None
+            return real_ownership(hold)
+
+        run = self.build(helper=BrokenSwitch())
+        patches = [mock.patch.object(rb.Hold, "sync_directory", sync),
+                   mock.patch.object(rb.Hold, "ownership", ownership)]
+        if not plant:
+            patches.append(mock.patch.object(rb.Hold, "_write_marker",
+                                             side_effect=OSError(28, "full")))
+        with contextlib.ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            with self.assertRaises(rb.RecoveryRequired):
+                run.run()
+        return run
+
+    def test_unreadable_foreign_marker_still_records_reacquire_refusal(self):
+        run = self._refusal_run_with_lost_hold(plant=True, unreadable=True)
+        self.assertEqual(self.marker().read_bytes(), b"operator\n")
+        self.assertIn("admission_reacquire_refusal", self.record(run))
+        self.assertFalse(self.record(run)["admission_held"])
+
+    def test_marker_absent_with_reads_failing_is_restored_by_fail_stop(self):
+        # Every read after the fault returns unknown, so ownership can never
+        # be confirmed; fail_stop must treat unknown as not owned and put
+        # this run's token back rather than leave no marker on disk.
+        run = self._refusal_run_with_lost_hold(plant=False,
+                                               unreadable="always")
+        self.assertTrue(self.marker().exists())
+        self.assertEqual(self.marker().read_bytes(), run.hold.token)
+        self.assertTrue(run.hold.acquired)
+
+    def test_unreadable_missing_marker_is_reacquired_by_fail_stop(self):
+        run = self._refusal_run_with_lost_hold(plant=False, unreadable=True)
+        self.assertTrue(self.marker().exists())
+        self.assertTrue(run.hold.owns())
+        self.assertTrue(self.record(run)["admission_held"])
+
+    def test_forward_release_sync_failure_is_recorded_and_exits_3(self):
+        real_sync = rb.Hold.sync_directory
+        state = {"failed": False}
+
+        def sync(hold):
+            if not hold.path.exists() and not state["failed"]:
+                state["failed"] = True
+                raise OSError(5, "I/O error")
+            return real_sync(hold)
+
+        runs = []
+
+        def factory(args):
+            runs.append(self.build())
+            return runs[0]
+
+        with mock.patch.object(rb.Hold, "sync_directory", sync), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            code = rb.main(
+                ["deploy", "--root", str(self.root),
+                 "--overlay", str(self.overlay_path),
+                 "--record-dir", str(self.record_dir),
+                 "--target-sha", self.target, "--no-fetch"],
+                run_factory=factory)
+        self.assertEqual(code, 3)
+        error = json.loads(output.getvalue())["error"]
+        run = runs[0]
+        self.assertEqual(error["kind"], "recovery_required")
+        self.assertEqual(error["run_dir"], str(run.run_dir))
+        self.assertEqual(error["outcome"], "recovery_required")
+        self.assertEqual(self.record(run)["outcome"], "recovery_required")
+        self.assertEqual(self.marker().read_bytes(), run.hold.token)
+        self.assertTrue(run.hold.acquired)
+
+    def test_rollback_release_sync_failure_is_recorded_and_exits_3(self):
+        real_sync = rb.Hold.sync_directory
+        absent_syncs = []
+
+        def sync(hold):
+            if not hold.path.exists():
+                absent_syncs.append(1)
+                # the forward release syncs first; fail the rollback's
+                if len(absent_syncs) == 2:
+                    raise OSError(5, "I/O error")
+            return real_sync(hold)
+
+        runs = []
+
+        def factory(args):
+            runs.append(self.build(
+                health=lambda: {"healthy": False, "observations": ["bad"]}))
+            return runs[0]
+
+        with mock.patch.object(rb.Hold, "sync_directory", sync), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            code = rb.main(
+                ["deploy", "--root", str(self.root),
+                 "--overlay", str(self.overlay_path),
+                 "--record-dir", str(self.record_dir),
+                 "--target-sha", self.target, "--no-fetch"],
+                run_factory=factory)
+        self.assertEqual(code, 3)
+        error = json.loads(output.getvalue())["error"]
+        run = runs[0]
+        self.assertEqual(len(absent_syncs), 2)
+        self.assertEqual(error["run_dir"], str(run.run_dir))
+        self.assertEqual(error["outcome"], "recovery_required")
+        self.assertEqual(self.record(run)["outcome"], "recovery_required")
+        self.assertEqual(self.marker().read_bytes(), run.hold.token)
+
+    def _main_failing_nth_present_sync(self, nth, health=None):
+        """Run main() with the nth directory sync issued while the marker
+        exists failing: 1 is the forward acquire, 2 the rollback re-acquire."""
+        real_sync = rb.Hold.sync_directory
+        present = []
+
+        def sync(hold):
+            if hold.path.exists():
+                present.append(1)
+                if len(present) == nth:
+                    raise OSError(5, "I/O error")
+            return real_sync(hold)
+
+        runs = []
+
+        def factory(args):
+            kwargs = {} if health is None else {"health": health}
+            runs.append(self.build(**kwargs))
+            return runs[0]
+
+        with mock.patch.object(rb.Hold, "sync_directory", sync), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            code = rb.main(
+                ["deploy", "--root", str(self.root),
+                 "--overlay", str(self.overlay_path),
+                 "--record-dir", str(self.record_dir),
+                 "--target-sha", self.target, "--no-fetch"],
+                run_factory=factory)
+        self.assertGreaterEqual(len(present), nth)
+        return code, json.loads(output.getvalue())["error"], runs[0]
+
+    def _assert_recorded_recovery(self, code, error, run):
+        self.assertEqual(code, 3)
+        self.assertIsNotNone(error["run_dir"])
+        self.assertEqual(error["run_dir"], str(run.run_dir))
+        self.assertEqual(error["outcome"], "recovery_required")
+        self.assertEqual(self.record(run)["outcome"], "recovery_required")
+        self.assertEqual(self.marker().read_bytes(), run.hold.token)
+
+    def test_forward_acquire_sync_failure_is_recorded_and_exits_3(self):
+        code, error, run = self._main_failing_nth_present_sync(1)
+        self._assert_recorded_recovery(code, error, run)
+
+    def test_rollback_reacquire_sync_failure_is_recorded_and_exits_3(self):
+        code, error, run = self._main_failing_nth_present_sync(
+            2, health=lambda: {"healthy": False, "observations": ["bad"]})
+        self._assert_recorded_recovery(code, error, run)
+
     def test_health_failure_keeps_hold_when_rollback_is_disabled(self):
         real_switch = host.switch
 
@@ -1204,15 +1447,234 @@ class HoldPersistenceTest(unittest.TestCase):
 
     def test_proven_ownership_removes_an_unsyncable_marker(self):
         # The token bytes landed but the fsync failed. The marker's bytes
-        # still prove this run's ownership, so the run removes it and
-        # refuses with the host genuinely unchanged.
+        # still prove this run's ownership, so the run removes it; the
+        # removal's directory sync fails too, so the transition is reported
+        # as unverifiable -- the marker may reappear after a reboot and
+        # hold admission -- rather than a refusal that claims the host is
+        # unchanged.
         full = OSError(28, "No space left on device")
         with mock.patch.object(rb.os, "fsync", side_effect=full):
-            with self.assertRaisesRegex(rb.Refused, "ownership was proven"):
+            with self.assertRaises(rb.RecoveryRequired):
                 self.hold.acquire()
         self.assertFalse(self.hold.path.exists())
         self.assertTrue(self.hold.created)
         self.assertFalse(self.hold.acquired)
+
+    def test_release_resyncs_hold_when_removal_sync_fails(self):
+        # The unlink succeeds but the directory fsync fails: admission must
+        # not be left open, so the hold is re-established and stays acquired.
+        self.hold.acquire()
+        outcomes = [OSError(5, "I/O error"), None]
+        with mock.patch.object(rb.Hold, "sync_directory",
+                               side_effect=outcomes):
+            with self.assertRaises(rb.RecoveryRequired) as caught:
+                self.hold.release()
+        self.assertIn("re-established", str(caught.exception))
+        self.assertTrue(self.hold.acquired)
+        self.assertEqual(self.hold.path.read_bytes(), self.hold.token)
+
+    def test_release_reports_open_admission_when_hold_cannot_return(self):
+        self.hold.acquire()
+        with mock.patch.object(rb.Hold, "sync_directory",
+                               side_effect=OSError(5, "I/O error")), \
+                mock.patch.object(rb.Hold, "_write_marker",
+                                  side_effect=OSError(28, "full")):
+            with self.assertRaises(rb.RecoveryRequired) as caught:
+                self.hold.release()
+        self.assertIn("admission may be open", str(caught.exception))
+        self.assertFalse(self.hold.path.exists())
+        self.assertFalse(self.hold.acquired)
+
+    def _sync_failing_after_planting(self, content):
+        real = rb.Hold.sync_directory
+        state = {"first": True}
+
+        def sync(hold):
+            if state["first"]:
+                state["first"] = False
+                hold.path.write_bytes(content)
+                raise OSError(5, "I/O error")
+            return real(hold)
+
+        return sync
+
+    def test_foreign_marker_planted_before_recreate_is_preserved(self):
+        self.hold.acquire()
+        with mock.patch.object(rb.Hold, "sync_directory",
+                               self._sync_failing_after_planting(b"operator\n")):
+            with self.assertRaises(rb.RecoveryRequired) as caught:
+                self.hold.release()
+        self.assertEqual(self.hold.path.read_bytes(), b"operator\n")
+        self.assertFalse(self.hold.acquired)
+        self.assertFalse(self.hold.owns())
+        self.assertIn("foreign hold", str(caught.exception))
+
+    def test_unreadable_marker_after_collision_is_unknown_not_foreign(self):
+        self.hold.acquire()
+        sync = self._sync_failing_after_planting(self.hold.token)
+        real_ownership = rb.Hold.ownership
+        calls = []
+
+        def ownership(hold):
+            # readable while the release verifies ownership, unreadable
+            # once the re-create collides with the planted marker
+            calls.append(1)
+            return real_ownership(hold) if len(calls) == 1 else None
+
+        with mock.patch.object(rb.Hold, "sync_directory", sync), \
+                mock.patch.object(rb.Hold, "ownership", ownership):
+            with self.assertRaises(rb.RecoveryRequired) as caught:
+                self.hold.release()
+        message = str(caught.exception)
+        self.assertNotIn("foreign", message)
+        self.assertIn("unknown", message)
+        self.assertTrue(self.hold.acquired)
+        self.assertEqual(self.hold.path.read_bytes(), self.hold.token)
+
+    def test_failed_recreate_with_unreadable_marker_keeps_acquired(self):
+        # No marker could be written and reads keep failing: the state is
+        # unknown, so ``acquired`` is not cleared on a guess.
+        self.hold.acquire()
+        outcomes = [OSError(5, "I/O error"), None]
+        calls = []
+        real_ownership = rb.Hold.ownership
+
+        def ownership(hold):
+            calls.append(1)
+            return real_ownership(hold) if len(calls) == 1 else None
+
+        with mock.patch.object(rb.Hold, "sync_directory",
+                               side_effect=outcomes), \
+                mock.patch.object(rb.Hold, "_write_marker",
+                                  side_effect=OSError(28, "full")), \
+                mock.patch.object(rb.Hold, "ownership", ownership):
+            with self.assertRaises(rb.RecoveryRequired):
+                self.hold.release()
+        self.assertTrue(self.hold.acquired)
+
+    def test_same_token_marker_already_present_is_tolerated(self):
+        self.hold.acquire()
+        with mock.patch.object(rb.Hold, "sync_directory",
+                               self._sync_failing_after_planting(
+                                   self.hold.token)):
+            with self.assertRaises(rb.RecoveryRequired) as caught:
+                self.hold.release()
+        self.assertNotIn("foreign", str(caught.exception))
+        self.assertTrue(self.hold.acquired)
+        self.assertTrue(self.hold.owns())
+
+    def test_acquire_collision_text_matches_verified_ownership(self):
+        self.hold.path.parent.mkdir(parents=True)
+        self.hold.path.write_bytes(b"operator\n")
+        with self.assertRaises(rb.Refused) as foreign:
+            self.hold.acquire()
+        self.assertIn("another deploy or a manual hold owns it",
+                      str(foreign.exception))
+        with mock.patch.object(rb.Hold, "ownership", return_value=None):
+            with self.assertRaises(rb.Refused) as unknown:
+                self.hold.acquire()
+        self.assertIn("could not be read", str(unknown.exception))
+        self.assertNotIn("another deploy", str(unknown.exception))
+        self.assertEqual(self.hold.path.read_bytes(), b"operator\n")
+        self.hold.path.write_bytes(self.hold.token)
+        with self.assertRaises(rb.Refused) as ours:
+            self.hold.acquire()
+        self.assertIn("this run's token", str(ours.exception))
+        self.assertNotIn("another deploy", str(ours.exception))
+
+    def test_acquire_collision_with_vanished_marker_is_not_called_foreign(self):
+        real_open = os.open
+
+        def vanishing_open(path, *args, **kwargs):
+            if str(path) == str(self.hold.path):
+                self.hold.path.unlink()
+                raise FileExistsError(17, "File exists", str(path))
+            return real_open(path, *args, **kwargs)
+
+        self.hold.path.parent.mkdir(parents=True)
+        self.hold.path.write_bytes(b"operator\n")
+        with mock.patch.object(rb.os, "open", vanishing_open):
+            with self.assertRaises(rb.Refused) as raised:
+                self.hold.acquire()
+        self.assertIn("no longer present", str(raised.exception))
+        self.assertIn("retry is fine", str(raised.exception))
+        self.assertNotIn("another deploy", str(raised.exception))
+        self.assertFalse(self.hold.path.exists())
+
+    def test_unsynced_recreated_hold_is_reported_as_present(self):
+        self.hold.acquire()
+        with mock.patch.object(rb.Hold, "sync_directory",
+                               side_effect=OSError(5, "I/O error")):
+            with self.assertRaises(rb.RecoveryRequired) as caught:
+                self.hold.release()
+        message = str(caught.exception)
+        self.assertNotIn("admission may be open", message)
+        self.assertIn("is present", message)
+        self.assertTrue(self.hold.acquired)
+        self.assertTrue(self.hold.owns())
+
+    def test_recreated_hold_syncs_its_directory(self):
+        self.hold.acquire()
+        calls = []
+
+        def failing_then_recording():
+            calls.append(1)
+            if len(calls) == 1:
+                raise OSError(5, "I/O error")
+
+        with mock.patch.object(rb.Hold, "sync_directory",
+                               side_effect=failing_then_recording):
+            with self.assertRaises(rb.RecoveryRequired):
+                self.hold.release()
+        # one failed removal sync, then one sync of the recreated entry
+        self.assertEqual(len(calls), 2)
+
+    def test_acquire_syncs_parent_of_each_created_directory(self):
+        root = Path(self.temp.name)
+        synced = []
+        real = rb.Hold._sync_path
+
+        def record(path):
+            synced.append(Path(path))
+            return real(path)
+
+        with mock.patch.object(rb.Hold, "_sync_path",
+                               side_effect=record):
+            self.hold.acquire()
+        state = self.hold.path.parent
+        self.assertIn(state, synced)
+        self.assertIn(state.parent, synced)
+        self.assertTrue(state.parent.is_relative_to(root))
+
+    def test_acquire_syncs_marker_dir_parent_when_dir_pre_exists(self):
+        self.hold.path.parent.mkdir(parents=True)
+        synced = []
+        real = rb.Hold._sync_path
+
+        def record(path):
+            synced.append(Path(path))
+            return real(path)
+
+        with mock.patch.object(rb.Hold, "_sync_path",
+                               side_effect=record):
+            self.hold.acquire()
+        self.assertIn(self.hold.path.parent.parent, synced)
+
+    def test_acquire_recovery_when_new_directory_parent_sync_fails(self):
+        real = rb.Hold._sync_path
+        marker_dir = self.hold.path.parent
+
+        def fail_parent(path):
+            if Path(path) != marker_dir:
+                raise OSError(5, "I/O error")
+            return real(path)
+
+        with mock.patch.object(rb.Hold, "_sync_path",
+                               side_effect=fail_parent):
+            with self.assertRaises(rb.RecoveryRequired):
+                self.hold.acquire()
+        self.assertFalse(self.hold.acquired)
+        self.assertTrue(self.hold.path.exists())
 
 
 if __name__ == "__main__":
