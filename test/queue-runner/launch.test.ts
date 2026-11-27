@@ -6,6 +6,8 @@ import {
   type LaunchPlan,
   type LaunchScanDecision,
 } from '../../src/queue-runner/launch.js';
+import { JsonObject, toPlainJsonDeep } from '../../src/policy/crq/jsonValue.js';
+import { reviewProfile } from '../../src/ops/crq/reviewCapability.js';
 import { ReviewSpawnError } from '../../src/queue-runner/reviewLaunch.js';
 import { ReviewCheckoutError } from '../../src/queue-runner/reviewPreparation.js';
 import { StartAuthorRefused, type StartRecord } from '../../src/queue-runner/startOne.js';
@@ -304,33 +306,71 @@ describe('launch: foreign repos and scan classes', () => {
       plan({ profile: { flags: ['--plain', '--x'] }, config_digest: 'd' }),
       h.fx,
     );
-    expect(h.metas[0]?.cmd).toEqual([
-      'coderabbit',
-      'review',
-      '--agent',
-      '--deep',
-      '--committed',
-      '--base-commit',
-      BASE,
-      '--plain',
-      '--x',
-    ]);
+    expect(h.metas[0]?.cmd).toEqual(['coderabbit', 'review', '--plain', '--x']);
   });
 
-  it('a ranged review refuses a profile that names a review scope before allocating anything', async () => {
-    for (const flag of ['--uncommitted', '--type=uncommitted', '-t', '--include-untracked']) {
-      const h = harness();
-      await expect(
-        launch(
-          h.queue,
-          item({}),
-          plan({ profile: { flags: ['--plain', flag] }, config_digest: 'd' }),
-          h.fx,
-        ),
-      ).rejects.toThrow('review profile must not set a review scope');
-      expect(h.calls).toEqual([]);
-      expect(h.metas).toEqual([]);
+  it('launches the real default review profile with its own range flags, once', async () => {
+    const profile = toPlainJsonDeep(reviewProfile(new JsonObject([]), BASE)) as { flags: string[] };
+    const subject = { base: BASE, head: HEAD };
+    for (const it1 of [
+      item({}),
+      item({ kind: 'author' }),
+      item({ kind: 'merged-current', capture: { c: 1 }, subject }),
+      item({ kind: 'push-current', repo: 'o/other', subject }),
+    ]) {
+      const h = harness({}, repos);
+      await launch(h.queue, it1, plan({ profile: profile as never, config_digest: 'd' }), h.fx);
+      expect(h.metas[0]?.cmd).toEqual([
+        'coderabbit',
+        'review',
+        '--agent',
+        '--deep',
+        '--committed',
+        '--base-commit',
+        BASE,
+      ]);
     }
+  });
+
+  it('a ranged launch refuses a foreign review scope or base before allocating anything', async () => {
+    const subject = { base: BASE, head: HEAD };
+    const kinds: [string, StartRecord, Partial<LaunchPlan>][] = [
+      ['range_policy', item({}), {}],
+      ['author', item({ kind: 'author' }), { range_policy: undefined }],
+      [
+        'receipt',
+        item({ kind: 'merged-current', capture: { c: 1 }, subject }),
+        { range_policy: undefined },
+      ],
+      [
+        'push',
+        item({ kind: 'push-current', repo: 'o/other', subject }),
+        { range_policy: undefined },
+      ],
+    ];
+    const bad: [string[], string][] = [
+      [['--uncommitted'], 'review profile must not set a review scope'],
+      [['--type=uncommitted'], 'review profile must not set a review scope'],
+      [['-t'], 'review profile must not set a review scope'],
+      [['--include-untracked'], 'review profile must not set a review scope'],
+      [['--base-commit', 'c'.repeat(40)], 'review profile must not set a base selector'],
+      [['--base=main'], 'review profile must not set a base selector'],
+    ];
+    for (const [name, it1, over] of kinds)
+      for (const [flags, message] of bad) {
+        const h = harness({}, repos);
+        await expect(
+          launch(
+            h.queue,
+            it1,
+            plan({ ...over, profile: { flags: ['--plain', ...flags] }, config_digest: 'd' }),
+            h.fx,
+          ),
+          name,
+        ).rejects.toThrow(message);
+        expect(h.calls.filter((c) => c !== 'checkAuthor')).toEqual([]);
+        expect(h.metas).toEqual([]);
+      }
   });
 
   it('push items use the projection scan in the configured clone; unconfigured is an error', async () => {
