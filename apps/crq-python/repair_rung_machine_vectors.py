@@ -408,6 +408,31 @@ def build_scenarios() -> None:
     scenario("a resume state without item in the job escapes as a KeyError",
              job_={k: v for k, v in job().items() if k != "item"},
              progress=prior(next_rung=0, dispatch_pending={"rung": "A0", "role": {}}), trees=["/T/wt"])
+    bad_root = {"repair": {"roles": roles()}, "clone": "/T/clone", "worktree_root": 5}
+    bad_item = job(item=5)
+    scenario("interrupted rung in the same tree never touches a non-string worktree_root",
+             config_=bad_root, trees=["/T/wt"],
+             progress=prior(next_rung=0, dispatch_pending={"rung": "A0", "role": {}}))
+    scenario("interrupted rung in the same tree never touches a non-string item",
+             job_=bad_item, trees=["/T/wt"],
+             progress=prior(next_rung=0, dispatch_pending={"rung": "A0", "role": {}}))
+    scenario("pending_mechanical with no recorded tree never touches a non-string item",
+             job_=bad_item, trees=["/T/wt"],
+             progress={k: v for k, v in prior(next_rung=0, attempts=[attempt("A0", "ok")],
+                       pending_mechanical={"rung": 0, "commits": [], "fixer_reason": "r"}).items() if k != "worktree"},
+             mechanical=[{"verdict": "pass"}])
+    scenario("a differing recorded tree with a non-string item is a TypeError on the concatenation",
+             job_=bad_item, trees=["/T/wt", "/T/wts/crq-repair-item-1-crq-R-F1"],
+             progress=prior(next_rung=0, dispatch_pending={"rung": "A0", "role": {}},
+                            worktree="/T/wts/crq-repair-item-1-crq-R-F1"))
+    scenario("a differing recorded tree with a non-string worktree_root is a TypeError from Path",
+             config_=bad_root, trees=["/T/wt", "/T/wts/crq-repair-item-1-crq-R-F1"],
+             progress=prior(next_rung=0, dispatch_pending={"rung": "A0", "role": {}},
+                            worktree="/T/wts/crq-repair-item-1-crq-R-F1"))
+    scenario("a non-string item is reported before a non-string worktree_root",
+             job_=bad_item, config_=bad_root, trees=["/T/wt", "/T/wts/crq-repair-item-1-crq-R-F1"],
+             progress=prior(next_rung=0, dispatch_pending={"rung": "A0", "role": {}},
+                            worktree="/T/wts/crq-repair-item-1-crq-R-F1"))
     scenario("no resume state never reads worktree_root",
              config_={"repair": {"roles": roles()}, "clone": "/T/clone"},
              dispatch=[ok()], mechanical=[{"verdict": "pass"}])
