@@ -548,10 +548,14 @@ export async function assertAddressDependencyMetadata(
       if (key === undefined || selected.has(key)) continue;
       selected.add(key);
       const selection = selectInvokedScripts(scripts[key] ?? '', scripts, byCollapsedName);
+      // An unresolved selection selects every script, so return the full set
+      // at once: queueing the remaining scripts here would re-queue entries
+      // already in `worklist`, growing the queue quadratically with the
+      // script count before the next `admit` call can run.
+      if (selection === null) return new Set(Object.keys(scripts));
       for (const target of Object.keys(scripts)) {
         if (target === key || selected.has(target)) continue;
         if (
-          selection === null ||
           selection.literal.has(target) ||
           selection.patterns.some((pattern) => matchesScriptPattern(target, pattern))
         )
