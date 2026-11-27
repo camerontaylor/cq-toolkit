@@ -107,7 +107,7 @@ class StalePinInventoryTest(RuntimeTestBase):
             result = self.inventory(prepare_only=True)
         self.assertEqual(result["retired"], [self.item["id"]])
         self.assertEqual(result["target"], tip)
-        self.assertNotIn(self.item["id"], [call.args[2]["id"] for call in event.call_args_list])
+        event.assert_not_called()
 
     def test_enqueue_stops_at_the_cap_and_leaves_the_rest_eligible(self):
         self.limits["max_files"] = 1  # one partition per file
