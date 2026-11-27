@@ -2361,55 +2361,72 @@ def activators_unknown(args):
     baseline_completions = read_completions(REPAIR_COMPLETIONS)
     cases = {}
 
-    def run_case(name, mutate, cleanup, tokens):
+    def case_paths(paths):
+        # repair_files() keeps its fixed inventory shape (the host verifier
+        # compares it with the baseline). Each case's own mutation path
+        # (rogue socket, drop-in, link) is recorded separately.
+        return {str(path): file_state(path) for path in paths}
+
+    def run_case(name, paths, mutate, cleanup, tokens):
         mutate()
         mutated_files = repair_files()
+        paths_before = case_paths(paths)
         records_before = [record_summary(path)
                           for path in records_in(REPAIR_RECORDS)]
         result = cli_activators("switch", ["--runtime", NODE_RUNTIME])
-        text = ((result.get("stdout") or "")
-                + (result.get("stderr") or "")).lower()
-        records_after = [record_summary(path)
-                         for path in records_in(REPAIR_RECORDS)]
-        completions_after = read_completions(REPAIR_COMPLETIONS)
-        units_after = repair_units()
-        cleanup()
-        require(result["rc"] == 2, name + " refusal did not exit 2")
-        require(all(token in text for token in tokens),
-                name + " refusal text does not name the inventory defect")
-        require([item["sha256"] for item in records_before]
-                == [item["sha256"] for item in records_after],
-                name + " wrote a controller record before refusing")
-        require(len(completions_after) == len(baseline_completions),
-                name + " completed fixture work before refusing")
-        cases[name] = {
-            "command": result, "mutated_files": mutated_files,
-            "records_before": records_before,
-            "records_after": records_after,
-            "completions_after": len(completions_after),
-            "units_after": units_after}
+        try:
+            files_after = repair_files()
+            paths_after = case_paths(paths)
+            text = ((result.get("stdout") or "")
+                    + (result.get("stderr") or "")).lower()
+            records_after = [record_summary(path)
+                             for path in records_in(REPAIR_RECORDS)]
+            completions_after = read_completions(REPAIR_COMPLETIONS)
+            units_after = repair_units()
+            require(result["rc"] == 2, name + " refusal did not exit 2")
+            require(all(token in text for token in tokens),
+                    name + " refusal text does not name the inventory defect")
+            require([item["sha256"] for item in records_before]
+                    == [item["sha256"] for item in records_after],
+                    name + " wrote a controller record before refusing")
+            require(len(completions_after) == len(baseline_completions),
+                    name + " completed fixture work before refusing")
+            require(files_after == mutated_files
+                    and paths_after == paths_before,
+                    name + " modified fixture files before refusing")
+            cases[name] = {
+                "command": result, "mutated_files": mutated_files,
+                "files_after": files_after,
+                "case_paths_before": paths_before,
+                "case_paths_after": paths_after,
+                "records_before": records_before,
+                "records_after": records_after,
+                "completions_after": len(completions_after),
+                "units_after": units_after}
+        finally:
+            cleanup()
 
     rogue = UNIT_DIR / "crq-repair.socket"
-    run_case("rogue-unit",
+    run_case("rogue-unit", [rogue],
              lambda: _write(rogue,
                             "[Socket]\nListenStream=%t/crq-repair-proof.sock\n"),
              lambda: rogue.unlink(missing_ok=True),
              ("outside the allowlisted", "socket"))
 
     rogue_link = UNIT_DIR / "default.target.wants" / REPAIR_TIMER
-    run_case("unknown-link",
+    run_case("unknown-link", [rogue_link],
              lambda: rogue_link.symlink_to("../" + REPAIR_TIMER),
              lambda: rogue_link.unlink(missing_ok=True),
              ("outside the allowlisted", "crq-repair.timer"))
 
     rogue_dropin = REPAIR_DROPIN_DIR / "20-rogue.conf"
-    run_case("unknown-dropin",
+    run_case("unknown-dropin", [rogue_dropin],
              lambda: _write(rogue_dropin, "[Unit]\nDescription=rogue\n"),
              lambda: rogue_dropin.unlink(missing_ok=True),
              ("outside the allowlisted", "unexpected drop-in"))
 
     original_mode = REPAIR_DROPIN.stat().st_mode & 0o7777
-    run_case("unsafe-metadata",
+    run_case("unsafe-metadata", [REPAIR_DROPIN],
              lambda: os.chmod(REPAIR_DROPIN, 0o666),
              lambda: os.chmod(REPAIR_DROPIN, original_mode),
              ("group- or world-writable",))
