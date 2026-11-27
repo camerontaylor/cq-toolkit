@@ -99,11 +99,12 @@ shapes:
 * no dependency directive in a source file outside the declared set names an
   expected unit, and no directive in a declared source names a CRQ unit
   outside the expected units: `Wants`, `Requires`, `Requisite`, `BindsTo`,
-  `PartOf`, `Conflicts`, `WantedBy`, `RequiredBy`, `Also`, `Upholds`,
-  `OnFailure`, `OnSuccess`, `Triggers`, `TriggersBy` and `Unit` (the
-  timer/path target). A declared timer may name its own declared service; a
-  foreign timer naming that service is still foreign. An undeclared unit of
-  another CRQ group naming only its own units is not foreign.
+  `PartOf`, `Conflicts`, `PropagatesStopTo`, `StopPropagatedFrom`,
+  `WantedBy`, `RequiredBy`, `Also`, `Upholds`, `OnFailure`, `OnSuccess`,
+  `Triggers`, `TriggersBy` and `Unit` (the timer/path target). A declared
+  timer may name its own declared service; a foreign timer naming that
+  service is still foreign. An undeclared unit of another CRQ group naming
+  only its own units is not foreign.
 
 The recursive dependency scan is bounded by visited entry count and does not
 follow symlinked directories. A symlink file is read when its resolved target
