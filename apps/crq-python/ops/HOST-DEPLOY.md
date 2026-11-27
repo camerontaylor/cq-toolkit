@@ -417,7 +417,8 @@ Ordering and guarantees:
    timestamps; one slot seen twice is not two slots). The first observation
    polls every five seconds for up to `--first-tick-timeout-seconds` (default
    1500: one 20-minute cadence plus five minutes of slack), so a just-switched
-   runner can finish its first tick. Timeout remains unhealthy. Subsequent
+   runner can finish its first tick and a fresh host can publish its first
+   heartbeat. Timeout remains unhealthy. Subsequent
    observations sleep the required `--interval-seconds` before sampling; that
    is a fixed delay rather than polling, so choose at least one runner cadence
    plus slack (the runbook uses 1500). `crq.py` assigns and
@@ -426,8 +427,9 @@ Ordering and guarantees:
    `$XDG_STATE_HOME/crq` or `~/.local/state/crq`) only afterward, so
    advancing queue saves are intermediate evidence and never count. The
    heartbeat must name this checkout's `apps/crq-python` runner root and a
-   strict UTC `YYYY-MM-DDTHH:MM:SSZ` tick; a missing, unreadable,
-   malformed or other-checkout heartbeat refuses assessment. Each
+   strict UTC `YYYY-MM-DDTHH:MM:SSZ` tick; an unreadable, malformed or
+   other-checkout heartbeat refuses assessment, and a heartbeat still absent
+   when the first-tick budget runs out is unhealthy. Each
    observation also carries two independent receipt verdicts that never
    change `healthy` or the exit code (a bad sample is not a tick failure):
    - `receipts_readable` — the ten most recently modified run directories
