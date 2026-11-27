@@ -18,10 +18,11 @@
  *   after_bytes=M` line on stderr, only when a load recorded a pending compaction, the
  *   document carries the version marker, and the queue file is still the one that load saw.
  *
- * Still unbound, and said plainly: nothing here loads the queue. The TS loader refuses a
- * queue that needs compaction (`queueEffects.ts`), so no caller records a pending identity
- * today; {@link QueueCompaction.note} is the seam a future loader would call. The forge
- * reads stay in `publicationForgeReads.ts`.
+ * The loader half is `pendingCompactionLoader.ts` (differentially pinned), which calls
+ * {@link QueueCompaction.note} on a shared tracker. Still unbound, and said plainly: nothing
+ * composes that loader with this saver in a runtime path, and the production
+ * `loadQueueDocument` (`queueEffects.ts`) still refuses a queue that needs compaction, so no
+ * runtime caller records a pending identity. The forge reads stay in `publicationForgeReads.ts`.
  *
  * Not modelled, and pinned as such: on a retained-number queue a live item whose `order` is a
  * float (`3.0`, `1e2`) makes {@link fileRepairNewItem} throw the unmapped `unsupported item

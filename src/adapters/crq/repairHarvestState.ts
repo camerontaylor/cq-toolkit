@@ -4,8 +4,9 @@
  *
  * - `saveQueue`: `c.save_queue(q)` = `atomic(QUEUE, q)` (`publicationFiles.ts`, already
  *   differential-tested against Python's writer). The admission-history compaction log
- *   Python appends afterwards is not reproduced: the TS queue loader refuses a queue that
- *   needs compaction, so there is none to log. A float the harvest stamped (`replay_attempted`)
+ *   Python appends afterwards is not reproduced here (`fileRepairSaveQueue` in
+ *   `repairHarvestForge.ts` reproduces it): the production TS queue loader refuses a queue
+ *   that needs compaction, so there is none to log on this path. A float the harvest stamped (`replay_attempted`)
  *   keeps its `.0` because the writer takes retained `JsonNumber`s.
  * - `requireCanonicalDelivery`: `repairCanonicalDelivery.ts` with `root = dirname(stateRoot)`
  *   (Python's `c.STATE.parent`).
