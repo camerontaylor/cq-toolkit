@@ -220,8 +220,12 @@ class ExecutionTests(SnapshotGitFixture, unittest.TestCase):
         partial = self.partial_clone()
         initial = copy.deepcopy(self.q)
         real_run = subprocess.run
+        # The real crq.git calls below inherit this process env: strip caller
+        # GIT_* overrides exactly like the fixture helper so the partial clone
+        # stays the repository Git opens while the production wrapper is tested.
+        ambient = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
         for failure in ("missing", "timeout"):
-            with self.subTest(failure):
+            with self.subTest(failure), mock.patch.dict(os.environ, ambient, clear=True):
                 self.q = copy.deepcopy(initial)
                 self.item = self.q["items"][0]
                 pr = self.pr()
