@@ -469,16 +469,25 @@ def _dispatch(config, role, job, wt, directory, judge=False, deadline=None):
     raise ValueError('unsupported role driver')
 
 
-def resume_worktree(result, wt):
+def resume_worktree(result, wt, wt_root, item, job_id):
     """Resume states record the rung's worktree (A2 is a suffixed checkout),
-    but process_item passes the original worktree on restart. Validate the
-    recorded tree and restore it before handling either resume state so
-    interrupted retention and deferred judging use the tree the result names."""
+    but process_item passes the original worktree on restart. Restore the
+    recorded tree before handling either resume state so interrupted retention
+    and deferred judging use the tree the result names, but only when it is this
+    job's own: a directory directly under the resolved worktree root named
+    ``crq-repair-<item>-<job>`` or the same name plus ``-A2`` (the rule recovery
+    and harvest cleanup apply). Any other recorded tree, including a foreign or
+    nested one, is never adopted; the caller then refuses a pending judge or
+    mechanical stage whose candidate is not the tree in hand."""
     recorded = result.get('worktree')
     if not recorded:
         return wt
     recorded = Path(recorded).resolve()
-    if recorded != Path(wt).resolve() and recorded.is_dir() and (recorded / '.git').exists():
+    if recorded == Path(wt).resolve():
+        return wt
+    owned = 'crq-repair-' + item + '-' + job_id
+    if (recorded.parent == Path(wt_root).resolve() and recorded.name in (owned, owned + '-A2')
+            and recorded.is_dir() and (recorded / '.git').exists()):
         return recorded
     return wt
 
@@ -506,7 +515,7 @@ def process(config, job, wt):
     if resume_progress:
         result = json.loads(progress_path.read_text())
     if result.get('dispatch_pending') or result.get('pending_judge') or result.get('pending_mechanical'):
-        wt = resume_worktree(result, wt)
+        wt = resume_worktree(result, wt, config['worktree_root'], job['item'], job['job'])
     if ((result.get('pending_judge') or result.get('pending_mechanical')) and result.get('worktree')
             and Path(result['worktree']).resolve() != Path(wt).resolve()):
         # The recorded candidate tree is gone: verifying or judging the base

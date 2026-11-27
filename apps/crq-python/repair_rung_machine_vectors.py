@@ -92,7 +92,7 @@ def job(**extra):
 def config(**repair_extra):
     repair = {"roles": roles()}
     repair.update(repair_extra)
-    return {"repair": repair, "clone": "/T/clone"}
+    return {"repair": repair, "clone": "/T/clone", "worktree_root": "/T/wts"}
 
 
 def raising(kind, message):
@@ -382,9 +382,35 @@ def build_scenarios() -> None:
     scenario("pending_mechanical adopts the recorded A2 tree",
              wt="/T/wt",
              progress=prior(next_rung=2, attempts=[attempt("A0"), attempt("A1"), attempt("A2", "ok")],
-                            worktree="/T/wt-A2",
+                            worktree="/T/wts/crq-repair-item-1-crq-R-F1-A2",
                             pending_mechanical={"rung": 2, "commits": ["d" * 40], "fixer_reason": "r"}),
-             mechanical=[{"verdict": "pass"}], trees=["/T/wt-A2"])
+             mechanical=[{"verdict": "pass"}], trees=["/T/wts/crq-repair-item-1-crq-R-F1-A2"])
+    for label, recorded in [
+        ("outside the worktree root", "/T/elsewhere/crq-repair-item-1-crq-R-F1-A2"),
+        ("another job's tree", "/T/wts/crq-repair-item-1-crq-R-F2"),
+        ("another item's tree", "/T/wts/crq-repair-item-2-crq-R-F1-A2"),
+        ("nested below the root", "/T/wts/sub/crq-repair-item-1-crq-R-F1"),
+        ("the sibling wt-A2 the unowned rule used to adopt", "/T/wt-A2"),
+    ]:
+        scenario("pending_mechanical recorded tree " + label + " is not adopted and is refused",
+                 progress=prior(next_rung=2, attempts=[attempt("A0"), attempt("A1"), attempt("A2", "ok")],
+                                worktree=recorded,
+                                pending_mechanical={"rung": 2, "commits": ["d" * 40], "fixer_reason": "r"}),
+                 mechanical=[{"verdict": "pass"}], trees=["/T/wt", recorded])
+    scenario("pending_mechanical adopts the recorded owned tree without the A2 suffix",
+             progress=prior(next_rung=0, attempts=[attempt("A0", "ok")],
+                            worktree="/T/wts/crq-repair-item-1-crq-R-F1",
+                            pending_mechanical={"rung": 0, "commits": ["d" * 40], "fixer_reason": "r"}),
+             mechanical=[{"verdict": "pass"}], trees=["/T/wts/crq-repair-item-1-crq-R-F1"])
+    scenario("a resume state without worktree_root in the config escapes as a KeyError",
+             config_={"repair": {"roles": roles()}, "clone": "/T/clone"},
+             progress=prior(next_rung=0, dispatch_pending={"rung": "A0", "role": {}}), trees=["/T/wt"])
+    scenario("a resume state without item in the job escapes as a KeyError",
+             job_={k: v for k, v in job().items() if k != "item"},
+             progress=prior(next_rung=0, dispatch_pending={"rung": "A0", "role": {}}), trees=["/T/wt"])
+    scenario("no resume state never reads worktree_root",
+             config_={"repair": {"roles": roles()}, "clone": "/T/clone"},
+             dispatch=[ok()], mechanical=[{"verdict": "pass"}])
 
     # ---- judge --------------------------------------------------------------
     critical = job(finding={"severity": "critical", "path": "src/a.py"})
@@ -476,6 +502,9 @@ def build_scenarios() -> None:
              progress=prior(next_rung=0, dispatch_pending={"rung": "A0", "role": {}}), trees=["/T/wt"],
              retain=[raising("OSError", "x" * 700)])
     scenario("interrupted rung whose recorded tree is another existing tree adopts it and retains it",
+             progress=prior(next_rung=2, dispatch_pending={"rung": "A2", "role": {}}, worktree="/T/wts/crq-repair-item-1-crq-R-F1-A2"),
+             trees=["/T/wt", "/T/wts/crq-repair-item-1-crq-R-F1-A2"])
+    scenario("interrupted rung whose recorded tree is outside the job's own tree is not adopted or retained",
              progress=prior(next_rung=2, dispatch_pending={"rung": "A2", "role": {}}, worktree="/T/wt-A2"),
              trees=["/T/wt", "/T/wt-A2"])
     scenario("interrupted rung whose recorded tree is gone is not retained",
