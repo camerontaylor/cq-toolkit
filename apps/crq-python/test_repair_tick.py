@@ -4,6 +4,7 @@ import contextlib
 import fcntl
 import io
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
@@ -395,6 +396,24 @@ class ResumedHarvestOwnershipTest(unittest.TestCase):
         self.assertEqual(self.item['repair_runs']['run1']['state'], 'queued')
         self.c.make_worktree.assert_called_once()
         self.assertEqual(mark.call_count, 2)
+
+    def test_cleanup_timeout_is_recorded_and_harvest_continues(self):
+        # A timed-out `git status` in the harvested tree raises TimeoutExpired
+        # (a SubprocessError, not an OSError); it must become a clipped
+        # `repair cleanup <job>` message instead of aborting the harvest.
+        wt = self.c.WT_ROOT / ('crq-repair-' + self.ITEM + '-' + self.J2)
+        wt.mkdir(parents=True)
+        record = self.item['repair_runs']['run1']
+        record['state'] = 'done'
+        record['verdicts'] = [json.loads((self.state / 'repair' / self.J2 / 'result.json').read_text())]
+        slow = subprocess.TimeoutExpired(['git', 'status'], 1200)
+        slow.cmd = ['git', 'status', 'y' * 400]
+        with mock.patch('crq_repair.retain.command', side_effect=slow):
+            messages = repair_tick.harvest(self.c, {}, self.item)
+        prefix = 'repair cleanup ' + self.J2 + ': '
+        line = [m for m in messages if m.startswith(prefix)]
+        self.assertEqual(len(line), 1)
+        self.assertEqual(len(line[0]), len(prefix) + 300)
 
     def test_written_back_row_naming_another_task_is_still_a_mismatch(self):
         self.row(self.F1, 'needs-retriage', 'crq-other-F1')
