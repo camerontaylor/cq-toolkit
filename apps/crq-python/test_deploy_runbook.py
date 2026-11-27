@@ -984,6 +984,29 @@ class DeployTests(DeployFixture, unittest.TestCase):
         self.assertEqual((self.runner / "config.json").read_bytes(),
                          self.original_config)
 
+    def test_failed_checkout_leaving_head_at_previous_still_rolls_back(self):
+        # A failed checkout can write the worktree before it moves HEAD, so
+        # HEAD == previous must not skip the git rollback: with HEAD.lock
+        # held the rollback checkout fails too, and the switch reports an
+        # unrecovered rollback instead of reinstalling config over the
+        # target's source files.
+        lock = self.root / ".git/HEAD.lock"
+        real_git = host.git
+
+        def lock_before_checkout(root, *args):
+            if args[:1] == ("checkout",) and not lock.exists():
+                lock.write_text("")
+            return real_git(root, *args)
+
+        with mock.patch.object(host, "git", lock_before_checkout):
+            with self.assertRaisesRegex(
+                    ValueError, "failed; live config left unrecovered"):
+                host.switch(self.root, self.overlay, self.raw, self.target)
+        lock.unlink()
+        self.assertEqual(self.head(), self.prior)
+        self.assertNotEqual((self.runner / "config.json").read_bytes(),
+                            self.original_config)
+
     def test_refusal_restore_with_lost_hold_recreate_reacquires_admission(self):
         class BrokenSwitch:
             def load_overlay(self, path):

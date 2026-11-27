@@ -872,23 +872,21 @@ def switch(root, overlay, raw, target, tag=None, rollback_config=None):
             # Recovery spans the whole switch window inside the lock: the
             # restore, checkout, audit and config writes all run inside it,
             # so a failure or interrupt there (e.g. a full audit volume, or a
-            # signal during the first restore) must reinstall the saved
-            # bytes, rolling the checkout back too when HEAD moved. The
-            # original error still propagates; a failed rollback is reported
-            # instead.
+            # signal during the first restore) must roll the checkout back
+            # and reinstall the saved bytes. The original error still
+            # propagates; a failed rollback is reported instead.
             try:
-                # HEAD still naming ``previous`` means the checkout never
-                # happened (e.g. an interrupt during the restore): only the
-                # live bytes need reinstalling, below, with no git step and
-                # no checkout. Otherwise the rendered destination config may
-                # already be installed (e.g. a failing directory fsync after
-                # the replace); when the two commits differ in CONFIG, git
-                # refuses to check out over that local modification, so
-                # restore the committed bytes first; the previous rendering
-                # is reinstalled below.
-                if git(root, 'rev-parse', 'HEAD') != previous:
-                    git(root, 'restore', '--', CONFIG)
-                    git(root, 'checkout', '--no-overwrite-ignore', '--detach', previous)
+                # The rendered destination config may already be installed
+                # (e.g. a failing directory fsync after the replace). When the
+                # two commits differ in CONFIG, git refuses to check out over
+                # that local modification, so restore the committed bytes
+                # first; the previous rendering is reinstalled below. This
+                # always runs, even when HEAD still names ``previous``: a
+                # failed checkout writes the index and worktree before it
+                # moves HEAD, so an unchanged HEAD does not prove the tree
+                # is untouched.
+                git(root, 'restore', '--', CONFIG)
+                git(root, 'checkout', '--no-overwrite-ignore', '--detach', previous)
             except BaseException as rollback:
                 # HEAD may still name the target commit, so reinstalling the
                 # previous rendering here would install config from a different
