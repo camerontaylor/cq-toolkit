@@ -44,7 +44,8 @@ def add(name: str, queue, ops: list[dict]) -> None:
     SCENARIOS.append({"name": name, "queue_hex": hx(raw), "ops": ops})
 
 
-def load(persist: bool = False) -> dict:
+def load(persist: bool | None = None) -> dict:
+    """``persist`` None omits the argument (Python's read-only default)."""
     return {"op": "load", "persist": persist}
 
 
@@ -100,6 +101,8 @@ def build_scenarios() -> None:
     add("sequence: load then save logs once and clears", legacy, [load(), save(), save()])
     add("sequence: persist logs immediately and clears", legacy, [load(True), load(), save()])
     add("sequence: persist writes the compacted bytes", legacy, [load(True)])
+    add("sequence: explicit persist=False is read-only", legacy, [load(False), save()])
+    add("sequence: the omitted argument is read-only", legacy, [load(), load()])
     add("sequence: persist on a non-compacting load writes nothing", current, [load(True)])
     add("sequence: repeated loads overwrite and one save logs once", legacy, [load(), load(), save(), save()])
     add("sequence: load persist twice logs once", legacy, [load(True), load(True)])
@@ -206,7 +209,11 @@ def _run(spec: dict) -> dict:
                 try:
                     with contextlib.redirect_stderr(err):
                         if op["op"] == "load":
-                            last = crq.load_queue(persist_compaction=op["persist"])
+                            last = (
+                                crq.load_queue()
+                                if op["persist"] is None
+                                else crq.load_queue(persist_compaction=op["persist"])
+                            )
                             step["queue"] = json.dumps(last, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
                         elif op["op"] == "save":
                             crq.save_queue(copy.deepcopy(last) if op["doc"] is None else json.loads(op["doc"]))

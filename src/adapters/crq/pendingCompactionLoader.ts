@@ -29,6 +29,13 @@
  *   `IntegrityError` (also the top-level duplicate or non-string key), a non-object admission row `AttributeError`). The reader underneath is the
  *   preview loader's, whose finer `summarize` cases (a non-string `quota_state`, which Python
  *   counts when hashable) are not modelled and are not vectored.
+ * - Three further class/behaviour deviations, found by probing real `crq.load_queue` and NOT
+ *   vectored: a UTF-8 BOM before `{` is a Python `ValueError` but loads here (and records a
+ *   pending); a document with admission history but no `items` key is a Python `KeyError`, here
+ *   a `ValueError`; an `open` item whose `cycles` is a string loads in Python, here a
+ *   `ValueError`. The first lives in the read, the other two in the retire pass.
+ * - `EACCES` and other errno failures map to `OSError` via `pyOsError` (the repo-wide
+ *   convention), where Python raises the finer `PermissionError`; the class list is approximate.
  * - The `stat` and the read are two operations in both languages; a change between them is
  *   recorded under the pre-read identity in both.
  * - The retirement pass is `backfillQueueLoad.retire`; its own failure classes are mapped the
@@ -36,7 +43,7 @@
  */
 import { resolve } from 'node:path';
 import { JsonParseError, type JsonObject } from '../../policy/crq/jsonValue.js';
-import { PyError } from '../../queue-runner/pyErrors.js';
+import { PyError, pyOsError } from '../../queue-runner/pyErrors.js';
 import { readCompactedQueue, retire } from './backfillQueueLoad.js';
 import { queueIdentity, type QueueCompaction } from './repairHarvestForge.js';
 
@@ -50,13 +57,11 @@ export interface PendingCompactionLoaderOptions {
 }
 
 /** The Python exception class a failed read stands for. */
-function pythonError(error: unknown): unknown {
+function pythonError(error: unknown, path: string): unknown {
   if (error instanceof PyError) return error;
   const code = (error as NodeJS.ErrnoException | null)?.code;
   const message = error instanceof Error ? error.message : String(error);
-  if (code === 'ENOENT') return new PyError('FileNotFoundError', message);
-  if (code === 'EISDIR') return new PyError('IsADirectoryError', message);
-  if (typeof code === 'string' && /^E[A-Z0-9]+$/.test(code)) return new PyError('OSError', message);
+  if (typeof code === 'string' && /^E[A-Z0-9]+$/.test(code)) return pyOsError(error, path);
   if (error instanceof TypeError && /utf-?8|encoded data/i.test(message))
     return new PyError('UnicodeDecodeError', message);
   if (error instanceof JsonParseError)
@@ -85,7 +90,7 @@ export function pendingCompactionLoader(
       identity = await queueIdentity(path);
       loaded = await readCompactedQueue(path);
     } catch (error) {
-      throw pythonError(error);
+      throw pythonError(error, path);
     }
     if (loaded.compacted) options.compaction.note(identity);
     if (loaded.compacted && loadOptions?.persistCompaction === true) {
@@ -94,7 +99,7 @@ export function pendingCompactionLoader(
     try {
       return retire(loaded.queue);
     } catch (error) {
-      throw pythonError(error);
+      throw pythonError(error, path);
     }
   };
 }

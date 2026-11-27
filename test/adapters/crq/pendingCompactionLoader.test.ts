@@ -12,6 +12,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { pendingCompactionLoader } from '../../../src/adapters/crq/pendingCompactionLoader.js';
 import {
@@ -29,7 +30,7 @@ type Rec = Record<string, unknown>;
 
 interface Op {
   op: 'load' | 'save' | 'rewrite' | 'replace' | 'unlink';
-  persist?: boolean;
+  persist?: boolean | null;
   doc?: string | null;
   text_hex?: string;
 }
@@ -111,7 +112,10 @@ async function replay(spec: Case['scenario']): Promise<Step[]> {
     };
     try {
       if (op.op === 'load') {
-        last = await load({ persistCompaction: op.persist === true });
+        // A null persist omits the argument, as Python's `load_queue()` does.
+        last = await (op.persist === null || op.persist === undefined
+          ? load()
+          : load({ persistCompaction: op.persist }));
         step.queue = dumps(last);
       } else if (op.op === 'save') {
         const source = op.doc === null || op.doc === undefined ? last! : parseJsonValue(op.doc);
@@ -177,7 +181,9 @@ describe('the oracle is Python 3.14', () => {
     const run = spawnSync(
       oraclePython(),
       [
-        new URL('../../../apps/crq-python/pending_compaction_vectors.py', import.meta.url).pathname,
+        fileURLToPath(
+          new URL('../../../apps/crq-python/pending_compaction_vectors.py', import.meta.url),
+        ),
         '--check',
       ],
       { encoding: 'utf8' },
