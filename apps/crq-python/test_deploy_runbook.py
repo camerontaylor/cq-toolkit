@@ -1240,6 +1240,22 @@ class HoldPersistenceTest(unittest.TestCase):
         self.assertIn("admission may be open", str(caught.exception))
         self.assertTrue(self.hold.acquired)
 
+    def test_recreated_hold_syncs_its_directory(self):
+        self.hold.acquire()
+        calls = []
+
+        def failing_then_recording():
+            calls.append(1)
+            if len(calls) == 1:
+                raise OSError(5, "I/O error")
+
+        with mock.patch.object(rb.Hold, "sync_directory",
+                               side_effect=failing_then_recording):
+            with self.assertRaises(rb.RecoveryRequired):
+                self.hold.release()
+        # one failed removal sync, then one sync of the recreated entry
+        self.assertEqual(len(calls), 2)
+
     def test_acquire_syncs_parent_of_each_created_directory(self):
         root = Path(self.temp.name)
         synced = []

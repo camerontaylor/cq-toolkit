@@ -532,8 +532,8 @@ class Hold:
                     "the admission marker " + str(self.path)
                     + " was removed but its removal could not be synced ("
                     + repr(exc)[:200] + ") and the hold could not be "
-                    "re-established (" + repr(again)[:200] + "); admission "
-                    "may be open: re-create the marker with this run's "
+                    "durably re-established (" + repr(again)[:200] + "); "
+                    "admission may be open: re-create the marker with this run's "
                     "token " + self.token.decode().strip()) from exc
             raise RecoveryRequired(
                 "the admission marker " + str(self.path)
@@ -550,6 +550,7 @@ class Hold:
             handle.write(self.token)
             handle.flush()
             os.fsync(handle.fileno())
+        self.sync_directory()
 
 
 class DeployLock:
