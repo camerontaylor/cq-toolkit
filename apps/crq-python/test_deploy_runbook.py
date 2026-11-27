@@ -1153,6 +1153,54 @@ class DeployTests(DeployFixture, unittest.TestCase):
         self.assertEqual(self.record(run)["outcome"], "recovery_required")
         self.assertEqual(self.marker().read_bytes(), run.hold.token)
 
+    def _main_failing_nth_present_sync(self, nth, health=None):
+        """Run main() with the nth directory sync issued while the marker
+        exists failing: 1 is the forward acquire, 2 the rollback re-acquire."""
+        real_sync = rb.Hold.sync_directory
+        present = []
+
+        def sync(hold):
+            if hold.path.exists():
+                present.append(1)
+                if len(present) == nth:
+                    raise OSError(5, "I/O error")
+            return real_sync(hold)
+
+        runs = []
+
+        def factory(args):
+            kwargs = {} if health is None else {"health": health}
+            runs.append(self.build(**kwargs))
+            return runs[0]
+
+        with mock.patch.object(rb.Hold, "sync_directory", sync), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            code = rb.main(
+                ["deploy", "--root", str(self.root),
+                 "--overlay", str(self.overlay_path),
+                 "--record-dir", str(self.record_dir),
+                 "--target-sha", self.target, "--no-fetch"],
+                run_factory=factory)
+        self.assertGreaterEqual(len(present), nth)
+        return code, json.loads(output.getvalue())["error"], runs[0]
+
+    def _assert_recorded_recovery(self, code, error, run):
+        self.assertEqual(code, 3)
+        self.assertIsNotNone(error["run_dir"])
+        self.assertEqual(error["run_dir"], str(run.run_dir))
+        self.assertEqual(error["outcome"], "recovery_required")
+        self.assertEqual(self.record(run)["outcome"], "recovery_required")
+        self.assertEqual(self.marker().read_bytes(), run.hold.token)
+
+    def test_forward_acquire_sync_failure_is_recorded_and_exits_3(self):
+        code, error, run = self._main_failing_nth_present_sync(1)
+        self._assert_recorded_recovery(code, error, run)
+
+    def test_rollback_reacquire_sync_failure_is_recorded_and_exits_3(self):
+        code, error, run = self._main_failing_nth_present_sync(
+            2, health=lambda: {"healthy": False, "observations": ["bad"]})
+        self._assert_recorded_recovery(code, error, run)
+
     def test_health_failure_keeps_hold_when_rollback_is_disabled(self):
         real_switch = host.switch
 

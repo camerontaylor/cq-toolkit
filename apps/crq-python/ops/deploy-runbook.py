@@ -921,8 +921,7 @@ class Run:
         # must be copied to its own immutable receipt first: if this process
         # dies in the drain or the switch, the receipt is what recovery reads.
         self.persist_recovery_receipt()
-        self.hold = Hold(self.root)
-        self.hold.acquire()
+        self.acquire_hold(Hold(self.root))
         self.phase("held")
         self.narrate("hold acquired; stopping triggers")
         self.stop_triggers()
@@ -1210,6 +1209,19 @@ class Run:
                                 + json.dumps(stopped, sort_keys=True))
         return result
 
+    def acquire_hold(self, hold):
+        """Acquire ``hold`` as this run's. A bare RecoveryRequired (the marker
+        exists but its durability could not be verified) goes through
+        fail_stop so deploy.json carries the receipt and the run id; the
+        marker is retained, never deleted. A Refused still propagates."""
+        self.hold = hold
+        try:
+            hold.acquire()
+        except RecoveryRequired as exc:
+            if exc.record:
+                raise
+            self.fail_stop(str(exc))
+
     def release_hold(self):
         """Release the marker; a recovery-required failure from the hold
         carries no run record, so fail-stop records it (run_dir, outcome,
@@ -1255,7 +1267,7 @@ class Run:
         if self.hold is None or not getattr(self.hold, "acquired", False):
             hold = Hold(self.root)
             try:
-                hold.acquire()
+                self.acquire_hold(hold)
             except Refused as exc:
                 self.fail_stop(
                     "cannot reacquire admission for rollback: " + str(exc)
