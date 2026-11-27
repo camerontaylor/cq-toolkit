@@ -215,7 +215,7 @@ function artifactReference(value: unknown): BackfillArtifactReference {
 /** Decode a canonical JSON document; a malformed file is a refusal, not a guess. */
 function parseCanonical(text: string, what: string): unknown {
   try {
-    return parseJsonValue(text);
+    return parseJsonValue(text, { duplicates: 'error' });
   } catch (error) {
     throw new BackfillRouteError(
       'invalid',
