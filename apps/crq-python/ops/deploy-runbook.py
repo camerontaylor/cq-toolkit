@@ -1364,7 +1364,13 @@ class Run:
         """Keep the hold (reacquiring it if this run released admission)
         and leave the host inert; owner recovery."""
         reacquire_refusal = None
-        if self.hold is not None and not getattr(self.hold, "acquired", False):
+        if self.hold is not None and (
+                not getattr(self.hold, "acquired", False)
+                or self.hold.ownership() is not True):
+            # ``acquired`` can be stale or unverifiable (an unreadable or
+            # missing marker): re-check ownership here. acquire() creates
+            # the marker exclusively, so a foreign or unreadable marker is
+            # never touched and surfaces as the reacquire refusal.
             # Admission was released for the health window: reclaim this
             # run's marker before stopping triggers so the host stays inert
             # behind it. A refusal (typically a foreign marker) still holds

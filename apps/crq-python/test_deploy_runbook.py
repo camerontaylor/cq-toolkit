@@ -1018,6 +1018,60 @@ class DeployTests(DeployFixture, unittest.TestCase):
         self.assertFalse(self.record(run)["admission_held"])
         self.assertIn("admission_reacquire_refusal", self.record(run))
 
+    def _refusal_run_with_lost_hold(self, plant, unreadable):
+        class BrokenSwitch:
+            def load_overlay(self, path):
+                return host.load_overlay(path)
+
+            def root_check(self, root, overlay):
+                return host.root_check(root, overlay)
+
+            def switch(self, *args, rollback_config=None):
+                raise ValueError("helper refused the switch")
+
+        real_sync = rb.Hold.sync_directory
+        real_ownership = rb.Hold.ownership
+        state = {"gone": False}
+
+        def sync(hold):
+            if not hold.path.exists() and not state["gone"]:
+                state["gone"] = True
+                if plant:
+                    hold.path.write_bytes(b"operator\n")
+                raise OSError(5, "I/O error")
+            return real_sync(hold)
+
+        def ownership(hold):
+            if unreadable and state["gone"] and not state.get("hid"):
+                state["hid"] = True
+                return None
+            return real_ownership(hold)
+
+        run = self.build(helper=BrokenSwitch())
+        patches = [mock.patch.object(rb.Hold, "sync_directory", sync),
+                   mock.patch.object(rb.Hold, "ownership", ownership)]
+        if not plant:
+            patches.append(mock.patch.object(rb.Hold, "_write_marker",
+                                             side_effect=OSError(28, "full")))
+        with contextlib.ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            with self.assertRaises(rb.RecoveryRequired):
+                run.run()
+        return run
+
+    def test_unreadable_foreign_marker_still_records_reacquire_refusal(self):
+        run = self._refusal_run_with_lost_hold(plant=True, unreadable=True)
+        self.assertEqual(self.marker().read_bytes(), b"operator\n")
+        self.assertIn("admission_reacquire_refusal", self.record(run))
+        self.assertFalse(self.record(run)["admission_held"])
+
+    def test_unreadable_missing_marker_is_reacquired_by_fail_stop(self):
+        run = self._refusal_run_with_lost_hold(plant=False, unreadable=True)
+        self.assertTrue(self.marker().exists())
+        self.assertTrue(run.hold.owns())
+        self.assertTrue(self.record(run)["admission_held"])
+
     def test_health_failure_keeps_hold_when_rollback_is_disabled(self):
         real_switch = host.switch
 
@@ -1347,6 +1401,27 @@ class HoldPersistenceTest(unittest.TestCase):
         self.assertIn("unknown", message)
         self.assertTrue(self.hold.acquired)
         self.assertEqual(self.hold.path.read_bytes(), self.hold.token)
+
+    def test_failed_recreate_with_unreadable_marker_keeps_acquired(self):
+        # No marker could be written and reads keep failing: the state is
+        # unknown, so ``acquired`` is not cleared on a guess.
+        self.hold.acquire()
+        outcomes = [OSError(5, "I/O error"), None]
+        calls = []
+        real_ownership = rb.Hold.ownership
+
+        def ownership(hold):
+            calls.append(1)
+            return real_ownership(hold) if len(calls) == 1 else None
+
+        with mock.patch.object(rb.Hold, "sync_directory",
+                               side_effect=outcomes), \
+                mock.patch.object(rb.Hold, "_write_marker",
+                                  side_effect=OSError(28, "full")), \
+                mock.patch.object(rb.Hold, "ownership", ownership):
+            with self.assertRaises(rb.RecoveryRequired):
+                self.hold.release()
+        self.assertTrue(self.hold.acquired)
 
     def test_same_token_marker_already_present_is_tolerated(self):
         self.hold.acquire()
