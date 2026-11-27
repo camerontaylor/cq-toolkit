@@ -122,8 +122,18 @@ export function pythonMtime(mtimeNs: bigint): number {
   return Number(sec) + Number(nsec) * 1e-9;
 }
 
-/** What `read_text()` + `json.loads` raise as `OSError`/`ValueError`. */
-export class StateFileUnreadable extends Error {}
+/**
+ * What `read_text()` + `json.loads` raise as `OSError`/`ValueError`. `origin`
+ * says which: `'os'` is a failed read, `'value'` a decode, parse or digit-limit refusal.
+ */
+export class StateFileUnreadable extends Error {
+  constructor(
+    message: string,
+    readonly origin: 'os' | 'value' = 'value',
+  ) {
+    super(message);
+  }
+}
 
 function isFsError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && typeof (error as NodeJS.ErrnoException).code === 'string';
@@ -159,7 +169,8 @@ export async function readJsonValue(path: string): Promise<JsonValue> {
   try {
     bytes = await readFile(path);
   } catch (error) {
-    if (isFsError(error)) throw new StateFileUnreadable(`${error.code ?? 'OSError'}: ${path}`);
+    if (isFsError(error))
+      throw new StateFileUnreadable(`${error.code ?? 'OSError'}: ${path}`, 'os');
     throw error;
   }
   let text: string;

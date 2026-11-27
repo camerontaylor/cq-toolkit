@@ -142,7 +142,8 @@ def require(condition, message):
         raise RuntimeError(message)
 
 
-def _starttime(pid):
+def _stat_sample(pid):
+    """One /proc/<pid>/stat sample: process state and starttime together."""
     try:
         text = (pathlib.Path("/proc") / str(pid) / "stat").read_text()
     except OSError:
@@ -150,7 +151,9 @@ def _starttime(pid):
     # The comm field may contain spaces and parentheses; fields after the
     # final ')' begin at state (field 3), so starttime (field 22) is index 19.
     tail = text.rsplit(")", 1)[1].split()
-    return tail[19] if len(tail) > 19 else None
+    if len(tail) < 20:
+        return None
+    return {"state": tail[0], "starttime": tail[19]}
 
 
 def process_state(pid):
@@ -158,19 +161,29 @@ def process_state(pid):
     state = {"pid": pid, "alive": False, "cmdline": "", "starttime": None}
     if not isinstance(pid, int) or pid <= 0:
         return state
-    try:
-        raw = (pathlib.Path("/proc") / str(pid) / "cmdline").read_bytes()
-    except OSError:
+    # State and starttime come from one /proc/<pid>/stat sample. A successful
+    # /proc/<pid>/cmdline read does not prove liveness: Linux keeps the file
+    # readable with an empty command line for a zombie, so liveness is decided
+    # by the stat state and a zombie or dead process is never a surviving
+    # fixture process even though its /proc entry and start time remain.
+    sample = _stat_sample(pid)
+    if sample is None:
+        return state
+    state["starttime"] = sample["starttime"]
+    if sample["state"] in ("Z", "X", "x"):
         return state
     state["alive"] = True
-    state["cmdline"] = raw.replace(b"\0", b" ").decode("utf-8", "replace").strip()
-    state["starttime"] = _starttime(pid)
     try:
         state["pgid"] = os.getpgid(pid)
         state["sid"] = os.getsid(pid)
     except OSError:
         state["pgid"] = None
         state["sid"] = None
+    try:
+        raw = (pathlib.Path("/proc") / str(pid) / "cmdline").read_bytes()
+    except OSError:
+        return state
+    state["cmdline"] = raw.replace(b"\0", b" ").decode("utf-8", "replace").strip()
     return state
 
 
@@ -236,11 +249,14 @@ def stop_process(proc):
     before = process_state(proc.pid)
     if before["alive"]:
         proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5)
+    # Reap even when the child already exited: process_state does not count a
+    # zombie as alive, but an owned child that has not been waited on yet must
+    # still be reaped here. wait() returns immediately for an exited child.
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
     after = process_state(proc.pid)
     require(not after["alive"], "harness cleanup did not stop a seeded process")
     return {"before": before, "after": after, "terminated": True,
@@ -858,23 +874,24 @@ def completion_baseline(entries):
             "invocations": set(item.get("invocation") for item in entries)}
 
 
-def completion_logged(item, log_entries):
+def completion_logged(item, log_entries, unit=UNIT):
     """Journal completion evidence must match a real fixture log entry."""
     return any(isinstance(entry, dict)
                and type(entry.get("sequence")) is int
                and entry.get("sequence") == item.get("sequence")
                and entry.get("invocation") == item.get("invocation")
-               and entry.get("unit") == UNIT
+               and entry.get("unit") == unit
                and entry.get("runtime") == item.get("runtime")
                and entry.get("success") is True
                for entry in log_entries)
 
 
-def validate_completed(record, runtime, prior, baseline, log_entries):
+def validate_completed(record, runtime, prior, baseline, log_entries,
+                       unit=UNIT):
     require(record["outcome"] == "completed", "switch did not complete")
     require(record["phase"] == "activation_pending",
             "completed record has the wrong phase")
-    require(record["unit"] == UNIT and record["runtime"] == runtime,
+    require(record["unit"] == unit and record["runtime"] == runtime,
             "completed record runtime or unit mismatch")
     require(record["prior_runtime"] == prior,
             "completed record prior runtime mismatch")
@@ -892,10 +909,10 @@ def validate_completed(record, runtime, prior, baseline, log_entries):
     require(len(set(invocations)) == 2, "completion invocations are not distinct")
     require(not set(invocations) & baseline["invocations"],
             "completion invocations were already recorded before the switch")
-    require(all(item.get("unit") == UNIT and item.get("runtime") == runtime
+    require(all(item.get("unit") == unit and item.get("runtime") == runtime
                 and item.get("success") is True for item in evidence),
             "completion evidence is not unit/runtime bound")
-    require(all(completion_logged(item, log_entries) for item in evidence),
+    require(all(completion_logged(item, log_entries, unit) for item in evidence),
             "completion evidence is absent from the fixture completion log")
     return {"sequences": sequences, "invocations": invocations}
 
@@ -1322,8 +1339,8 @@ def recover_phase(args, kill=None, record_dir=RECORDS, label="recover"):
 
 def recover_kill_phase(args):
     payload = recover_phase(args, kill="drain")
-    require(payload["cli"]["rc"] not in (0, None),
-            "interrupted recovery unexpectedly returned success")
+    require(payload["cli"]["rc"] == -9,
+            "interrupted recovery was not terminated by SIGKILL at the drain hook")
     require(payload["record_after"]["sha256"] == payload["record_before"]["sha256"],
             "interrupted recovery changed the retained record")
     require(payload["record_after"]["outcome"] == "pending"
@@ -2142,7 +2159,13 @@ def cli_paused(extra, callback, timeout=180):
                 "stdout": out[-60000:], "stderr": err[-60000:],
                 "timeout": False, "pause_reached": False, "during": None,
                 "json": None}
-    during = callback()
+    try:
+        during = callback()
+    except BaseException:
+        terminate_process(proc)
+        proc.communicate()
+        REPAIR_PAUSE_MARKER.unlink(missing_ok=True)
+        raise
     # Release the fence only after the observation callback returned: the
     # adapter resumes once the marker is gone and refuses at its bound when
     # the callback never completes, so the switch cannot continue while
@@ -2344,55 +2367,72 @@ def activators_unknown(args):
     baseline_completions = read_completions(REPAIR_COMPLETIONS)
     cases = {}
 
-    def run_case(name, mutate, cleanup, tokens):
+    def case_paths(paths):
+        # repair_files() keeps its fixed inventory shape (the host verifier
+        # compares it with the baseline). Each case's own mutation path
+        # (rogue socket, drop-in, link) is recorded separately.
+        return {str(path): file_state(path) for path in paths}
+
+    def run_case(name, paths, mutate, cleanup, tokens):
         mutate()
         mutated_files = repair_files()
+        paths_before = case_paths(paths)
         records_before = [record_summary(path)
                           for path in records_in(REPAIR_RECORDS)]
         result = cli_activators("switch", ["--runtime", NODE_RUNTIME])
-        text = ((result.get("stdout") or "")
-                + (result.get("stderr") or "")).lower()
-        records_after = [record_summary(path)
-                         for path in records_in(REPAIR_RECORDS)]
-        completions_after = read_completions(REPAIR_COMPLETIONS)
-        units_after = repair_units()
-        cleanup()
-        require(result["rc"] == 2, name + " refusal did not exit 2")
-        require(all(token in text for token in tokens),
-                name + " refusal text does not name the inventory defect")
-        require([item["sha256"] for item in records_before]
-                == [item["sha256"] for item in records_after],
-                name + " wrote a controller record before refusing")
-        require(len(completions_after) == len(baseline_completions),
-                name + " completed fixture work before refusing")
-        cases[name] = {
-            "command": result, "mutated_files": mutated_files,
-            "records_before": records_before,
-            "records_after": records_after,
-            "completions_after": len(completions_after),
-            "units_after": units_after}
+        try:
+            files_after = repair_files()
+            paths_after = case_paths(paths)
+            text = ((result.get("stdout") or "")
+                    + (result.get("stderr") or "")).lower()
+            records_after = [record_summary(path)
+                             for path in records_in(REPAIR_RECORDS)]
+            completions_after = read_completions(REPAIR_COMPLETIONS)
+            units_after = repair_units()
+            require(result["rc"] == 2, name + " refusal did not exit 2")
+            require(all(token in text for token in tokens),
+                    name + " refusal text does not name the inventory defect")
+            require([item["sha256"] for item in records_before]
+                    == [item["sha256"] for item in records_after],
+                    name + " wrote a controller record before refusing")
+            require(len(completions_after) == len(baseline_completions),
+                    name + " completed fixture work before refusing")
+            require(files_after == mutated_files
+                    and paths_after == paths_before,
+                    name + " modified fixture files before refusing")
+            cases[name] = {
+                "command": result, "mutated_files": mutated_files,
+                "files_after": files_after,
+                "case_paths_before": paths_before,
+                "case_paths_after": paths_after,
+                "records_before": records_before,
+                "records_after": records_after,
+                "completions_after": len(completions_after),
+                "units_after": units_after}
+        finally:
+            cleanup()
 
     rogue = UNIT_DIR / "crq-repair.socket"
-    run_case("rogue-unit",
+    run_case("rogue-unit", [rogue],
              lambda: _write(rogue,
                             "[Socket]\nListenStream=%t/crq-repair-proof.sock\n"),
              lambda: rogue.unlink(missing_ok=True),
              ("outside the allowlisted", "socket"))
 
     rogue_link = UNIT_DIR / "default.target.wants" / REPAIR_TIMER
-    run_case("unknown-link",
+    run_case("unknown-link", [rogue_link],
              lambda: rogue_link.symlink_to("../" + REPAIR_TIMER),
              lambda: rogue_link.unlink(missing_ok=True),
              ("outside the allowlisted", "crq-repair.timer"))
 
     rogue_dropin = REPAIR_DROPIN_DIR / "20-rogue.conf"
-    run_case("unknown-dropin",
+    run_case("unknown-dropin", [rogue_dropin],
              lambda: _write(rogue_dropin, "[Unit]\nDescription=rogue\n"),
              lambda: rogue_dropin.unlink(missing_ok=True),
              ("outside the allowlisted", "unexpected drop-in"))
 
     original_mode = REPAIR_DROPIN.stat().st_mode & 0o7777
-    run_case("unsafe-metadata",
+    run_case("unsafe-metadata", [REPAIR_DROPIN],
              lambda: os.chmod(REPAIR_DROPIN, 0o666),
              lambda: os.chmod(REPAIR_DROPIN, original_mode),
              ("group- or world-writable",))
@@ -2566,7 +2606,13 @@ def activators_fence(args):
     require(external.get("completions_before_external") == completions_before,
             "a completion landed between the pre-switch log "
             "and the first pause sample")
-    require(any(REPAIR_UNIT in line for line in external.get("jobs", [])),
+    external_jobs = external.get("jobs_observation") or {}
+    external_jobs_result = external_jobs.get("command") or {}
+    require(not external_jobs_result.get("timeout")
+            and external_jobs_result.get("rc") == 0,
+            "queued target job observation failed during the pause")
+    require(any(line == queue_seed["job"]
+                for line in (external_jobs.get("lines") or [])),
             "queued target job was not retained through mask and reload")
     require(external.get("marker", {}).get("phase") == "after-mask-reload",
             "pause marker does not record the expected phase")
@@ -2625,14 +2671,9 @@ def activators_switch_back(args):
             "switch back record names another runtime")
     require(record.get("prior_runtime") == NODE_RUNTIME,
             "switch back record names another prior runtime")
-    completions = record.get("completions") or []
-    require(len(completions) == 2,
-            "switch back record does not retain two completions")
-    baseline = max((item.get("sequence", 0)
-                    for item in before["repair_completions"]), default=0)
-    require(all(type(item.get("sequence")) is int
-                and item["sequence"] > baseline for item in completions),
-            "switch back completions do not advance past the baseline")
+    validate_completed(record, PYTHON_RUNTIME, NODE_RUNTIME,
+                       completion_baseline(before["repair_completions"]),
+                       after["repair_completions"], unit=REPAIR_UNIT)
     expected_service = repair_adapter().render_unit(PYTHON_RUNTIME)
     require(after["repair_files"]["service"]["sha256"]
             == sha256_bytes(expected_service.encode()),
@@ -2869,6 +2910,12 @@ def main(argv=None):
     if case is not None and args.boundary not in (None, case):
         parser.error(args.phase + " proves the " + case + " case derived"
                      " from its name, not --boundary " + args.boundary)
+    drain_seed = (args.phase[len("drain-"):]
+                  if args.phase.startswith("drain-") else None)
+    if drain_seed is not None and args.seed not in (None, drain_seed):
+        parser.error(args.phase + " probes the " + drain_seed
+                     + " seed derived from its name, not --seed "
+                     + args.seed)
     try:
         require(os.uname().nodename == "crq-probe",
                 "proof driver only runs on the disposable crq-probe guest")

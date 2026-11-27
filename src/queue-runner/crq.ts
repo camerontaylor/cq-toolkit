@@ -15,6 +15,7 @@ import {
   REVIEW_DEADLINE_MS,
   runReviewCapabilityMain,
 } from '../adapters/crq/reviewCapabilityMain.js';
+import { runReviewChildMain } from '../adapters/crq/reviewChildMain.js';
 import { runStatusWriter, runSummaryWriter } from '../adapters/crq/statusWriter.js';
 import { runBackfillUnit } from '../adapters/crq/backfillSource.js';
 import { pythonJsonText } from '../policy/crq/pythonJson.js';
@@ -123,6 +124,18 @@ if (command === 'queue-capability') {
       'queue-v1': () => serveQueue([], rewritten('queue-v1')),
       'review-v1': () => serveReview([], rewritten('review-v1')),
     },
+  });
+} else if (command === '_review') {
+  // INTERNAL (`crq.py _review <run_id>`, `cmd_review_child`): the detached child
+  // `launch` spawns. Deliberately not in LIVE_UNIT_COMMANDS or LIVE_OPERATOR_COMMANDS:
+  // no unit, adapter or operator selects it, and it prints nothing to stdout
+  // (the spawner redirects both streams to `runner.log`).
+  process.exitCode = await runReviewChildMain({
+    argv: rest,
+    root,
+    stateRoot: await publisherStateRoot(root),
+    env: process.env,
+    stderr: stdio.stderr,
   });
 } else if (command === 'repair') {
   // `crq_repair.py`'s CLI: it owns its argv and its one Python-shaped JSON

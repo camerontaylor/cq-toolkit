@@ -100,12 +100,13 @@ export function fileReconcilePhaseEffects(
       };
       const adapter = makeFixRunAdapter({
         items: rawItems as JsonObject[],
+        now,
         isReceipt: (item) => item instanceof JsonObject && item.get('kind') === REVIEW_RECEIPT_KIND,
         reconcileReceipt: (item) => {
           if (!(item instanceof JsonObject)) throw new Error('receipt item is not a JSON object');
           return reconcileReceiptLane(item, {
             async reconcile(it) {
-              const result = await reconcileCurrentRepair(it, repair);
+              const result = await reconcileCurrentRepair(it, { ...repair, now });
               await install(result.item);
               return {
                 starved: result.starved,

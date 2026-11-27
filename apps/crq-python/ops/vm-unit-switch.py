@@ -4819,7 +4819,7 @@ def verify_raw_evidence(report, raw_root, mode="base"):
         "switch-node": lambda rc: rc == 0,
         "switch-python": lambda rc: rc == 0,
         "interrupt": lambda rc: rc not in (0, None),
-        "recover-kill": lambda rc: rc not in (0, None),
+        "recover-kill": lambda rc: rc == -9,
         "recover": lambda rc: rc == 0,
         "recover-repeat": lambda rc: rc == 2,
         "rollback-fence": lambda rc: rc not in (0, None),

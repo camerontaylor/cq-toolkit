@@ -1855,6 +1855,125 @@ class ActivatorHarnessTests(unittest.TestCase):
         self.assertTrue(problems)
 
 
+class ActivatorsUnknownMutationPathTests(unittest.TestCase):
+    """The refusal proof must see per-case mutation paths vanish (offline)."""
+
+    REFUSAL = {"rc": 2, "stdout": "", "timeout": False,
+               "stderr": "outside the allowlisted socket unexpected drop-in "
+                         "crq-repair.timer group- or world-writable"}
+    UNITS = {
+        harness.REPAIR_UNIT: {
+            "LoadState": "loaded", "ActiveState": "inactive",
+            "UnitFileState": "static",
+            "FragmentPath": harness.REPAIR_PATHS["service"]},
+        harness.REPAIR_TIMER: {
+            "LoadState": "loaded", "ActiveState": "inactive",
+            "UnitFileState": "enabled",
+            "FragmentPath": harness.REPAIR_PATHS["timer"]},
+        harness.REPAIR_PATH: {
+            "LoadState": "loaded", "ActiveState": "inactive",
+            "UnitFileState": "enabled",
+            "FragmentPath": harness.REPAIR_PATHS["path"]},
+    }
+
+    def _run(self, tamper=None):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = pathlib.Path(tmp).resolve()
+            unit_dir = home / "units"
+            dropin_dir = unit_dir / "crq-repair.service.d"
+            dropin = dropin_dir / "10-fence-proof.conf"
+            (unit_dir / "default.target.wants").mkdir(parents=True)
+            guest._write(dropin, "[Unit]\n")
+            calls = []
+
+            def switch(command, extra=None, **kw):
+                calls.append(command)
+                if tamper:
+                    tamper(unit_dir, dropin_dir)
+                return dict(self.REFUSAL)
+
+            def forbidden(*args, **kw):
+                raise AssertionError("real command or observation invoked")
+
+            patches = dict(UNIT_DIR=unit_dir, REPAIR_DROPIN_DIR=dropin_dir,
+                           REPAIR_DROPIN=dropin,
+                           REPAIR_RECORDS=home / "records",
+                           REPAIR_COMPLETIONS=home / "completions.jsonl")
+            with contextlib.ExitStack() as stack:
+                for name, value in patches.items():
+                    stack.enter_context(mock.patch.object(guest, name, value))
+                for name in ("repair_clean", "snapshot"):
+                    stack.enter_context(mock.patch.object(
+                        guest, name, return_value={}))
+                stack.enter_context(mock.patch.object(
+                    guest, "repair_files",
+                    side_effect=lambda: {"service": {"type": "file"}}))
+                stack.enter_context(mock.patch.object(
+                    guest, "repair_units",
+                    side_effect=lambda: copy.deepcopy(self.UNITS)))
+                stack.enter_context(mock.patch.object(
+                    guest, "cli_activators", side_effect=switch))
+                real = [stack.enter_context(mock.patch.object(
+                            guest, name, side_effect=forbidden))
+                        for name in ("run", "systemctl", "show")]
+                real.append(stack.enter_context(mock.patch.object(
+                    subprocess, "run", side_effect=forbidden)))
+                result = guest.activators_unknown(mock.Mock())
+                for mocked in real:
+                    mocked.assert_not_called()
+            leftovers = sorted(str(p) for p in unit_dir.rglob("*")
+                               if p.name in ("crq-repair.socket", "20-rogue.conf")
+                               or p.is_symlink())
+            return result, calls, leftovers
+
+    def test_legitimate_refusal_passes_and_records_case_paths(self):
+        result, calls, leftovers = self._run()
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(leftovers, [])
+        for name, suffix in (("rogue-unit", "crq-repair.socket"),
+                             ("unknown-link", "default.target.wants/crq-repair.timer"),
+                             ("unknown-dropin", "20-rogue.conf"),
+                             ("unsafe-metadata", "10-fence-proof.conf")):
+            case = result["cases"][name]
+            for key in ("case_paths_before", "case_paths_after"):
+                (path, entry), = case[key].items()
+                self.assertTrue(path.endswith(suffix))
+                self.assertNotEqual(entry["type"], "missing")
+            self.assertEqual(case["case_paths_before"],
+                             case["case_paths_after"])
+
+    def test_producer_output_passes_host_verifier(self):
+        result, _, _ = self._run()
+        baseline = result["baseline"]
+        self.assertEqual(set(result["cases"]["rogue-unit"]["mutated_files"]),
+                         set(baseline["files"]))
+        for name, case in result["cases"].items():
+            if name == "unsafe-metadata":
+                continue  # needs a real chmod'd dropin entry from repair_files
+            problems = []
+            self.assertTrue(harness._refusal_case_ok(
+                name, case, baseline, result, problems), (name, problems))
+
+    def test_switch_deleting_case_path_fails_before_cleanup(self):
+        victims = {"rogue-unit": "crq-repair.socket",
+                   "unknown-link": "default.target.wants/crq-repair.timer",
+                   "unknown-dropin": "crq-repair.service.d/20-rogue.conf"}
+        for name, rel in victims.items():
+            with self.subTest(case=name):
+                seen = []
+
+                def tamper(unit_dir, dropin_dir, rel=rel, seen=seen):
+                    target = unit_dir / rel
+                    if target.exists() or target.is_symlink():
+                        target.unlink()
+                        seen.append(target)
+
+                with self.assertRaisesRegex(RuntimeError,
+                                            "modified fixture files"):
+                    self._run(tamper)
+                self.assertEqual(len(seen), 1)
+
+
 class SourceCommitTests(unittest.TestCase):
     def _run(self, status, match=None):
         calls = []

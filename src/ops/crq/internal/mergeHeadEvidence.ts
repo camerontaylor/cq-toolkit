@@ -4,6 +4,7 @@ import type { RunGit } from '../../../adapters/crq/ledgerGit.js';
 import { JsonObject } from '../../../policy/crq/jsonValue.js';
 import { sourcePath } from '../../../policy/crq/repairBinding.js';
 import { pythonSplitlines } from '../../../policy/crq/repairGates.js';
+import { changedLocations, changeUndone } from './changeUndone.js';
 
 const sha = /^[0-9a-f]{40}$/;
 const maxPatch = 262_144;
@@ -50,6 +51,14 @@ type Entry = readonly [string, string] | null;
 export interface MergeHeadInput {
   readonly published: string | undefined;
   readonly actual: string;
+  /**
+   * The forge merge commit, already bound by the caller to the promoted ref.
+   * Its tree, not the PR head's, is what must retain the repair: a squash merge
+   * leaves the head outside the merge's ancestry, and a `-s ours` merge drops
+   * the head's changes while still containing it. The head must still descend
+   * from the published fix. Omitted only by callers that have no merge commit.
+   */
+  readonly merge?: string;
   readonly commits: readonly string[];
   readonly anchors: readonly string[];
 }
@@ -80,7 +89,8 @@ export async function mergeHeadEvidence(
     actual_head: input.actual,
     source_blobs: {},
   };
-  if (published === input.actual) return evidence;
+  const comparison = input.merge ?? input.actual;
+  if (published === input.actual && input.actual === comparison) return evidence;
   const run = async (args: string[]): Promise<Uint8Array> => {
     const result = await git(args);
     if (result.code !== 0) throw new Error('git evidence unavailable');
@@ -98,6 +108,8 @@ export async function mergeHeadEvidence(
     !(await ancestor(published, input.actual))
   )
     throw new Error('merged repair head is not a descendant of the published fix');
+  if (!sha.test(comparison))
+    throw new Error('merged repair commit unavailable; needs revalidation');
   if (!input.commits.length || input.commits.length > 64)
     throw new Error('published repair commits unavailable or exceed bound');
   const changed = new Set<string>();
@@ -202,7 +214,7 @@ export async function mergeHeadEvidence(
     const normalized = sourcePath(new JsonObject([['path', path]]));
     if (!normalized.ok || normalized.path !== path) throw new Error('invalid repair source path');
     const before = await entry(published, path);
-    const after = await entry(input.actual, path);
+    const after = await entry(comparison, path);
     const prior = parent ? await entry(parent, path) : null;
     blobs[path] = before?.[1] ?? null;
     modes[path] = before?.[0] ?? null;
@@ -212,16 +224,26 @@ export async function mergeHeadEvidence(
     }
     if (before && !after)
       throw new Error('merged repair source changed; needs revalidation: ' + path);
-    // A root publication spans the empty tree through the published head,
-    // not just the first commit. Git recognizes its empty tree object by ID.
-    let changeBase = parent;
-    if (!changeBase) {
-      const format = decoder.decode(await run(['rev-parse', '--show-object-format'])).trim();
-      // This proof's commit/blob validation currently supports SHA-1 only.
-      if (format !== 'sha1') throw new Error('unsupported Git object format; needs revalidation');
-      changeBase = createHash('sha1').update('tree 0\0').digest('hex');
-    }
-    const original = await patch(['diff', ...options, changeBase, published, '--', path]);
+    // Python's published_change_patch: a parented publication is diffed from the
+    // parent of its first commit through the published head, but a root
+    // publication (no parent) is the root commit alone (`diff-tree --root`), not
+    // the empty tree through the published head. Later commits of a root
+    // publication are therefore outside the compared change; that is the Python
+    // contract this port keeps (see mergeHeadEvidence.root.test.ts).
+    const original = await patch(
+      parent
+        ? ['diff', ...options, parent, published, '--', path]
+        : [
+            'diff-tree',
+            '-p',
+            '--root',
+            '--no-commit-id',
+            ...options,
+            input.commits[0]!,
+            '--',
+            path,
+          ],
+    );
     const originalText = patchText(original);
     if (!originalText.trim()) {
       containment[path] = {
@@ -243,22 +265,21 @@ export async function mergeHeadEvidence(
     const modeChanged = !!before && (!prior || prior[0] !== before[0]);
     if (!added.length && !removed.length && !modeChanged)
       throw new Error('merged repair source changed; needs revalidation: ' + path);
-    const extra = await patch(['diff', ...options, published, input.actual, '--', path]);
+    const extra = await patch(['diff', ...options, published, comparison, '--', path]);
     const extraText = patchText(extra);
+    // A binary head diff has no text hunks, so the location comparison below
+    // would see nothing changed. Only a published repair that depended on text
+    // changes can be undone by one; a mode-only repair is judged on its mode.
     if (
+      (added.length || removed.length) &&
       pythonSplitlines(extraText).some(
         (line) => line.startsWith('Binary files ') || line.startsWith('GIT binary patch'),
       )
     )
       throw new Error('merged repair source changed; needs revalidation: ' + path);
-    const [extraAdded, extraRemoved] = lines(extraText);
-    const extraAddedSet = new Set(extraAdded);
-    const extraRemovedSet = new Set(extraRemoved);
-    if (
-      added.some((l) => extraRemovedSet.has(l)) ||
-      removed.some((l) => extraAddedSet.has(l)) ||
-      (modeChanged && after?.[0] !== before?.[0])
-    )
+    // Identical text elsewhere in the file is not an undo: match by location.
+    const undone = changeUndone(changedLocations(originalText), changedLocations(extraText));
+    if (undone.length || (modeChanged && after?.[0] !== before?.[0]))
       throw new Error('merged repair source changed; needs revalidation: ' + path);
     const excerpts: Record<string, string | boolean> = {};
     for (const [key, text] of [

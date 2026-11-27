@@ -1,9 +1,10 @@
 /** Inactive stdin gitleaks binding for general review scans. No matcher or route. */
 import { spawn } from 'node:child_process';
 import { constants } from 'node:fs';
-import { access, mkdtemp, open, rm, stat } from 'node:fs/promises';
+import { mkdtemp, open, rm } from 'node:fs/promises';
 import { delimiter, join, resolve } from 'node:path';
 import { killProcessTree } from './gitExec.js';
+import { findGitleaksOnPath } from './gitleaksDiscovery.js';
 import type { ReviewScannerEffects } from '../../queue-runner/reviewScan.js';
 
 const maxBytes = 16 * 1024 * 1024;
@@ -16,20 +17,7 @@ export function fileReviewGitleaks(options: {
 }): ReviewScannerEffects['gitleaks'] {
   return async (diff) => {
     const directories = options.path.split(delimiter).map((entry) => resolve(entry || '.'));
-    let executable: string | null = null;
-    for (const directory of directories) {
-      const candidate = join(directory, 'gitleaks');
-      try {
-        if (!(await stat(candidate)).isFile()) continue;
-        await access(candidate, constants.X_OK);
-        executable = candidate;
-        break;
-      } catch (error) {
-        const code = (error as NodeJS.ErrnoException).code;
-        if (code === 'ENOENT' || code === 'ENOTDIR' || code === 'EACCES') continue;
-        throw new Error('gitleaks discovery failed');
-      }
-    }
+    const executable = findGitleaksOnPath(options.path);
     if (executable === null) return { kind: 'not-run' };
     if (Buffer.byteLength(diff) > maxBytes) throw new Error('gitleaks input too large');
     const scratch = await mkdtemp(join(resolve(options.scratchRoot), 'crq-gitleaks-'));

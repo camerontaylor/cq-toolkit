@@ -1,6 +1,7 @@
 """Narrow isolated one-job/preparation/snapshot tests. No models or live state."""
 import contextlib
 import copy
+import fcntl
 import io
 import importlib.util
 import json
@@ -785,6 +786,8 @@ class BoundedRepairTest(unittest.TestCase):
             self.assertEqual(len(out.retained()), 1)
             retained = item['repair_runs'][job['run']]['verdicts'][0]
             retained['item'] = 'wrong-item'
+            # A settled run is not replayed; drop the flag to exercise the replay check.
+            item['repair_runs'][job['run']].pop('siblings_recorded', None)
             with self.assertRaisesRegex(ValueError, 'outcome identity mismatch'):
                 repair_tick.harvest(self.c, self.queue, item)
         self.assertEqual(json.loads(path.read_text()), result)
@@ -868,7 +871,8 @@ class BoundedRepairTest(unittest.TestCase):
             repair_tick.harvest(self.c, self.queue, item)
             repair_tick.harvest(self.c, self.queue, item)
             outcome = inbox.return_value.repair_outcome
-            self.assertEqual(outcome.call_count, 2)
+            # The second harvest finds the run settled (siblings_recorded) and skips the replay.
+            self.assertEqual(outcome.call_count, 1)
             self.assertEqual(outcome.call_args.args[:3], (fid, job_id, 'needs-retriage'))
             self.assertEqual(outcome.call_args.kwargs['failure_class'], 'exhausted')
 
@@ -922,8 +926,38 @@ class BoundedRepairTest(unittest.TestCase):
         self.assertEqual(artifact(['--triage-dry-run', '--recover-job', ''], code=2), 'refused')
         self.assertEqual(artifact(['--recover-job', '', '--job', OLD], code=2), 'refused')
         self.assertEqual(artifact(['--recover-job', ''], code=2), 'refused')
-        # A dry run with no triage state writes nothing itself, so it reports that.
+        # A dry run with no triage state reports that; it still takes (and
+        # releases) the service lock, creating state/repair and the lock file.
         self.assertEqual(artifact(['--triage-dry-run']), 'no-triage')
+
+    def test_triage_dry_run_takes_the_service_lock_before_previewing(self):
+        self.config['repair'].update(enabled=True, spend_authorization='offline-test-fixture-only')
+        atomic(self.root / 'config.json', self.config)
+        lock_path = self.root / 'state/repair/service.lock'
+
+        def dry_run():
+            out = io.StringIO()
+            with mock.patch.object(service, 'ROOT', self.root), \
+                 mock.patch.object(service, 'runner_disabled', return_value=False), \
+                 mock.patch.object(service, 'triage_phase', return_value={'status': 'previewed'}) as phase, \
+                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                code = service.main(['--triage-dry-run'])
+            return code, json.loads(out.getvalue()), phase
+
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open('a') as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            code, artifact, phase = dry_run()
+        # Another pass owns the lock: busy, exit 0, and no paid judgment preview.
+        self.assertEqual((code, artifact['status']), (0, 'busy'))
+        phase.assert_not_called()
+        # The refused call left the lock free: the next dry run previews.
+        code, artifact, phase = dry_run()
+        self.assertEqual((code, artifact), (0, {'status': 'previewed'}))
+        phase.assert_called_once()
+        # ... and releases it afterwards.
+        with lock_path.open('a') as probe:
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
     def test_argument_failure_emits_one_json_usage_artifact_and_returns_2(self):
         # An argparse failure (`--job` without a value) must not exit before the

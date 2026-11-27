@@ -213,13 +213,20 @@ class LedgerTest(unittest.TestCase):
             if args[0] == "fetch":
                 actual_git("update-ref", "refs/crq/review-ledger-validated", advanced)
             return result
+        # A checkpoint strictly newer than the fetched head makes the snapshot
+        # stale: fetch retries, and while the remote itself is still behind it
+        # rejects the snapshot instead of returning the older head.
         with mock.patch.object(publisher, "git", side_effect=advance_during_fetch):
-            self.assertEqual(publisher.fetch(), (genesis, []))
+            with self.assertRaisesRegex(ledger.IntegrityError, "not a descendant"):
+                publisher.fetch()
         self.assertEqual(git("rev-parse", "refs/crq/review-ledger-validated"), advanced)
         # An older remote on the next invocation is still a rollback.
         with self.assertRaisesRegex(ledger.IntegrityError, "not a descendant"):
             publisher.fetch()
         git("push", "origin", advanced + ":refs/heads/cq/review-ledger")
+        # Once the concurrent validation is published, the retried fetch
+        # observes it instead of returning the stale head.
+        self.assertEqual(publisher.fetch(), (advanced, []))
         out = ledger.Outbox(self.root / "outbox", self.store)
         from test_backfill_accounting import Fixture
         # A publisher verifies actual Git scope as well as event schema.

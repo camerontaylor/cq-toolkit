@@ -8,6 +8,7 @@ import {
   withoutObjectKey,
 } from '../../../policy/crq/queueDoc.js';
 import { remediationFixed } from '../../../policy/crq/queueReceipt.js';
+import { closedMarkerDue } from '../../../policy/crq/closedMarker.js';
 import { RefreshExhausted } from '../../../policy/crq/forgeBudget.js';
 
 export interface CurrentRepairEffects {
@@ -16,6 +17,15 @@ export interface CurrentRepairEffects {
   targetRef(selector: string): string;
   resolveRef(ref: string): Promise<string>;
   isAncestor(ancestor: string, descendant: string): Promise<boolean>;
+  /**
+   * Python's `merge_head_evidence(c, record, head, merge=merge)`: resolves when the
+   * forge merge commit's tree retains the published repair, throws otherwise.
+   * Identity, ancestry and the receipt checks have already passed; this is the
+   * tree evidence, so a merge that dropped or reverted the repair is never credited.
+   */
+  proveMergeTree(record: JsonObject, head: string, merge: string): Promise<void>;
+  /** The clock for the `not_fixed` recheck and its `at` stamp; defaults to the wall clock. */
+  now?(): Date;
 }
 
 export interface CurrentRepairResult {
@@ -36,7 +46,8 @@ function sortedDigests(values: readonly JsonValue[]): string[] {
 /**
  * Python's reconcile_current_fix. The caller must install the returned item in
  * its tick-owned queue before persisting it. No prior remediation is trusted:
- * every pass rechecks ancestry against the observed target tip.
+ * every pass rechecks ancestry against the observed target tip and the repair
+ * against the merge commit's tree.
  */
 export async function reconcileCurrentRepair(
   original: JsonObject,
@@ -53,12 +64,14 @@ export async function reconcileCurrentRepair(
   const id = text(item.get('receipt_id'));
   const runs = item.get('repair_runs');
   if (!id || !(runs instanceof JsonObject)) return result();
+  const clock = effects.now?.() ?? new Date();
+  // A not_fixed marker suppresses its record only until the bounded recheck.
   const eligible = runs.entries.filter(
     ([, value]) =>
       value instanceof JsonObject &&
       value.get('receipt_id') === id &&
       value.get('state') === 'published' &&
-      !pyTruthy(value.get('not_fixed')),
+      (!pyTruthy(value.get('not_fixed')) || closedMarkerDue(value.get('not_fixed'), clock)),
   );
   if (eligible.length === 0) return result();
   let doc: JsonValue;
@@ -133,11 +146,14 @@ export async function reconcileCurrentRepair(
             ['state', state ?? null],
             ['head', info.get('headRefOid') ?? null],
             ['reason', 'closed-or-head-mismatch'],
+            ['at', `${clock.toISOString().slice(0, 19)}Z`],
           ]),
         ],
       ]);
-    } else if (state === 'MERGED' && pythonValueEqual(info.get('number'), number)) {
-      record = withObjectKeys(record, [['merged_fix', info]]);
+    } else {
+      record = withoutObjectKey(record, 'not_fixed'); // Reopened or re-merged at head: stale.
+      if (state === 'MERGED' && pythonValueEqual(info.get('number'), number))
+        record = withObjectKeys(record, [['merged_fix', info]]);
     }
     item = withObjectKeys(item, [
       ['repair_runs', withObjectKeys(item.get('repair_runs') as JsonObject, [[run, record]])],
@@ -168,6 +184,7 @@ export async function reconcileCurrentRepair(
       state !== 'MERGED' ||
       !pythonValueEqual(info.get('number'), number) ||
       info.get('baseRefName') !== ref.replace(/^origin\//, '') ||
+      !published ||
       head !== published ||
       !merge ||
       !captureTarget ||
@@ -189,6 +206,16 @@ export async function reconcileCurrentRepair(
       continue;
     }
     if (!ancestry) continue;
+    try {
+      await effects.proveMergeTree(record, published, merge);
+    } catch (error) {
+      // Not credited: a refusal and a failed read both retry on the next tick.
+      if (error instanceof RefreshExhausted) starved += 1;
+      else deferred += 1;
+      if (errors.length < 2)
+        errors.push(error instanceof Error ? `${error.name}: ${error.message}` : String(error));
+      continue;
+    }
     const evidence = new JsonObject([
       ['receipt_id', id],
       ['subject', subject],

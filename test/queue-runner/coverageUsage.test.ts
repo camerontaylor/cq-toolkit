@@ -56,12 +56,12 @@ function harness(over: Partial<CoverageEffects> = {}, items: Item[] = [cov()]) {
 describe('coverageFallback', () => {
   it('returns the backfill selection untouched when it started or found something', async () => {
     const h = harness({ select: async () => ({ started: 'r9', available: true }) });
-    expect(await coverageFallback(h.q, h.log, false, null, true, h.fx)).toEqual({
+    expect(await coverageFallback(h.q, h.log, false, null, h.fx)).toEqual({
       started: 'r9',
       available: true,
     });
     const h2 = harness({ select: async () => ({ started: null, available: true }) });
-    expect(await coverageFallback(h2.q, h2.log, false, null, true, h2.fx)).toEqual({
+    expect(await coverageFallback(h2.q, h2.log, false, null, h2.fx)).toEqual({
       started: null,
       available: true,
     });
@@ -70,12 +70,12 @@ describe('coverageFallback', () => {
 
   it('yields to a configured dispatch and to an `only` filter', async () => {
     const a = harness({ backfillDispatchConfigured: () => true });
-    expect(await coverageFallback(a.q, a.log, false, null, true, a.fx)).toEqual({
+    expect(await coverageFallback(a.q, a.log, false, null, a.fx)).toEqual({
       started: null,
       available: false,
     });
     const b = harness();
-    expect(await coverageFallback(b.q, b.log, false, 'cov-1', true, b.fx)).toEqual({
+    expect(await coverageFallback(b.q, b.log, false, 'cov-1', b.fx)).toEqual({
       started: null,
       available: false,
     });
@@ -84,14 +84,14 @@ describe('coverageFallback', () => {
 
   it('pins coverage_sha with setdefault semantics', async () => {
     const h = harness({}, [cov(), cov({ id: 'cov-2', coverage_sha: 'keep' })]);
-    await coverageFallback(h.q, h.log, true, null, true, h.fx);
+    await coverageFallback(h.q, h.log, true, null, h.fx);
     expect(h.q.items[0]?.coverage_sha).toBe('mq1');
     expect(h.q.items[1]?.coverage_sha).toBe('keep');
   });
 
   it('dry-run reports the first eligible candidate and launches nothing', async () => {
     const h = harness();
-    expect(await coverageFallback(h.q, h.log, true, null, true, h.fx)).toEqual({
+    expect(await coverageFallback(h.q, h.log, true, null, h.fx)).toEqual({
       started: null,
       available: true,
     });
@@ -101,7 +101,7 @@ describe('coverageFallback', () => {
 
   it('launches, binds the run and logs the state', async () => {
     const h = harness();
-    expect(await coverageFallback(h.q, h.log, false, null, true, h.fx)).toEqual({
+    expect(await coverageFallback(h.q, h.log, false, null, h.fx)).toEqual({
       started: 'run-1',
       available: true,
     });
@@ -118,7 +118,7 @@ describe('coverageFallback', () => {
         return 'r';
       },
     });
-    await coverageFallback(h.q, h.log, false, null, true, h.fx);
+    await coverageFallback(h.q, h.log, false, null, h.fx);
     expect(seen).toEqual({
       base: 'b',
       head: 'h',
@@ -137,7 +137,7 @@ describe('coverageFallback', () => {
         return 'r';
       },
     });
-    expect(await coverageFallback(h.q, h.log, false, null, true, h.fx)).toEqual({
+    expect(await coverageFallback(h.q, h.log, false, null, h.fx)).toEqual({
       started: null,
       available: true,
     });
@@ -149,13 +149,13 @@ describe('coverageFallback', () => {
         return 'r';
       },
     });
-    await coverageFallback(k.q, k.log, false, null, true, k.fx);
+    await coverageFallback(k.q, k.log, false, null, k.fx);
     expect(k.calls).toEqual([]);
   });
 
   it('marks an empty coverage range skipped and moves to the next candidate', async () => {
     const h = harness({ diffNameOnly: async (_b, _h) => '' }, [cov(), cov({ id: 'cov-2' })]);
-    const r = await coverageFallback(h.q, h.log, false, null, true, h.fx);
+    const r = await coverageFallback(h.q, h.log, false, null, h.fx);
     expect(h.q.items.map((i) => [i.state, i.last_error])).toEqual([
       ['skipped', 'empty coverage range'],
       ['skipped', 'empty coverage range'],
@@ -165,7 +165,7 @@ describe('coverageFallback', () => {
 
   it('a rank-4 refusal skips the candidate but still reports availability', async () => {
     const h = harness({ rank4Gate: async () => false });
-    expect(await coverageFallback(h.q, h.log, false, null, true, h.fx)).toEqual({
+    expect(await coverageFallback(h.q, h.log, false, null, h.fx)).toEqual({
       started: null,
       available: true,
     });
@@ -178,42 +178,40 @@ describe('coverageFallback', () => {
         throw new Error('😀'.repeat(300));
       },
     });
-    const r = await coverageFallback(h.q, h.log, false, null, true, h.fx);
+    const r = await coverageFallback(h.q, h.log, false, null, h.fx);
     expect(h.q.items[0]?.wait_reason).toBe('coverage planning failed: ' + '😀'.repeat(200));
     expect(r).toEqual({ started: null, available: true });
   });
 
   it('skips a future not_before and unmet dependencies without marking availability', async () => {
     const h = harness({}, [cov({ not_before: '2026-11-15T13:00:00Z' })]);
-    expect(await coverageFallback(h.q, h.log, false, null, true, h.fx)).toEqual({
+    expect(await coverageFallback(h.q, h.log, false, null, h.fx)).toEqual({
       started: null,
       available: false,
     });
     const d = harness({ depsMet: () => false });
-    expect(await coverageFallback(d.q, d.log, false, null, true, d.fx)).toEqual({
+    expect(await coverageFallback(d.q, d.log, false, null, d.fx)).toEqual({
       started: null,
       available: false,
     });
     const past = harness({}, [cov({ not_before: '2026-11-15T11:00:00Z' })]);
-    expect((await coverageFallback(past.q, past.log, true, null, true, past.fx)).available).toBe(
-      true,
-    );
+    expect((await coverageFallback(past.q, past.log, true, null, past.fx)).available).toBe(true);
   });
 
   it('a not_before equal to now is already due', async () => {
     const h = harness({}, [cov({ not_before: '2026-11-15T12:00:00Z' })]);
-    expect((await coverageFallback(h.q, h.log, true, null, true, h.fx)).available).toBe(true);
+    expect((await coverageFallback(h.q, h.log, true, null, h.fx)).available).toBe(true);
   });
 
   it('considers candidates in sort order, not queue order', async () => {
     const h = harness({}, [cov({ id: 'cov-b' }), cov({ id: 'cov-a' })]);
-    await coverageFallback(h.q, h.log, true, null, true, h.fx);
+    await coverageFallback(h.q, h.log, true, null, h.fx);
     expect(h.log).toEqual(['DRY-RUN would cut coverage cov-a']);
   });
 
   it('holds a candidate whose legacy origins are empty or not retryable', async () => {
     const empty = harness({ legacyOrigins: () => ({ source: { pr: 1 }, origins: [] }) });
-    await coverageFallback(empty.q, empty.log, false, null, true, empty.fx);
+    await coverageFallback(empty.q, empty.log, false, null, empty.fx);
     expect(empty.q.items[0]?.wait_reason).toBe(
       'legacy coverage retry history or cooldown unresolved',
     );
@@ -221,7 +219,7 @@ describe('coverageFallback', () => {
       legacyOrigins: () => ({ source: { pr: 1 }, origins: ['a', 'b'] }),
       legacyRetryAllowed: (_q, _pr, o) => o === 'a',
     });
-    const r = await coverageFallback(blocked.q, blocked.log, false, null, true, blocked.fx);
+    const r = await coverageFallback(blocked.q, blocked.log, false, null, blocked.fx);
     expect(blocked.q.items[0]?.wait_reason).toBe(
       'legacy coverage retry history or cooldown unresolved',
     );
@@ -235,21 +233,19 @@ describe('coverageFallback', () => {
         throw new CoverageIdentityError('x');
       },
     });
-    await coverageFallback(h.q, h.log, false, null, true, h.fx);
+    await coverageFallback(h.q, h.log, false, null, h.fx);
     expect(h.q.items[0]?.wait_reason).toBe('legacy coverage retry identity unresolved');
     const bad = harness({
       legacyOrigins: () => {
         throw new Error('boom');
       },
     });
-    await expect(coverageFallback(bad.q, bad.log, false, null, true, bad.fx)).rejects.toThrow(
-      'boom',
-    );
+    await expect(coverageFallback(bad.q, bad.log, false, null, bad.fx)).rejects.toThrow('boom');
   });
 
   it('returns quietly while a coverage review is already running', async () => {
     const h = harness({}, [cov({ state: 'reviewing' })]);
-    expect(await coverageFallback(h.q, h.log, false, null, true, h.fx)).toEqual({
+    expect(await coverageFallback(h.q, h.log, false, null, h.fx)).toEqual({
       started: null,
       available: false,
     });
@@ -271,7 +267,7 @@ describe('coverageFallback', () => {
       },
       [merged, noCommit, promo],
     );
-    const r = await coverageFallback(h.q, h.log, true, null, true, h.fx);
+    const r = await coverageFallback(h.q, h.log, true, null, h.fx);
     expect(measured).toEqual(['m1']);
     expect(merged.measure).toEqual({ m: 1 });
     expect(h.q.items).toContain(fresh);
@@ -287,7 +283,7 @@ describe('coverageFallback', () => {
       },
       [{ id: 'm1', kind: 'merged', merge_commit: 'abc' }],
     );
-    await coverageFallback(f.q, f.log, false, null, true, f.fx);
+    await coverageFallback(f.q, f.log, false, null, f.fx);
     expect(f.log).toEqual(['coverage measurement failed: ' + 'x'.repeat(150)]);
   });
 
@@ -309,46 +305,37 @@ describe('coverageFallback', () => {
       },
       [],
     );
-    const r = await coverageFallback(h.q, h.log, false, null, true, h.fx);
+    const r = await coverageFallback(h.q, h.log, false, null, h.fx);
     expect(seen).toEqual(['mq1', 'mq1']);
     expect(fresh.coverage_sha).toBe('mq1');
     expect(r.started).toBe('run-1');
   });
 
-  it('exposes backfill_ordinary_exhausted during the call and restores it after', async () => {
+  it('leaves backfill_ordinary_exhausted exactly as the caller set it (f5cd311ad dropped the scoping)', async () => {
     let during: unknown;
-    const h = harness({
-      select: async (q) => {
+    const seam = {
+      select: async (q: Queue) => {
         during = q.backfill_ordinary_exhausted;
         return { started: null, available: false };
       },
-    });
-    await coverageFallback(h.q, h.log, true, null, false, h.fx);
-    expect(during).toBe(true);
-    expect(h.q.backfill_ordinary_exhausted).toBe(false);
-
-    const keep = harness({
-      select: async (q) => {
-        during = q.backfill_ordinary_exhausted;
-        return { started: null, available: false };
-      },
-    });
-    keep.q.backfill_ordinary_exhausted = 'prior';
-    await coverageFallback(keep.q, keep.log, true, null, true, keep.fx);
-    expect(during).toBe('prior');
-    expect(keep.q.backfill_ordinary_exhausted).toBe('prior');
+    };
+    for (const flag of [false, true, 'prior'] as const) {
+      const h = harness(seam);
+      h.q.backfill_ordinary_exhausted = flag;
+      await coverageFallback(h.q, h.log, false, null, h.fx);
+      expect(during).toBe(flag);
+      expect(h.q.backfill_ordinary_exhausted).toBe(flag);
+    }
   });
 
-  it('restores the flag even when a seam throws', async () => {
+  it('propagates a seam failure without touching the flag', async () => {
     const h = harness({
       select: async () => {
         throw new Error('select down');
       },
     });
     h.q.backfill_ordinary_exhausted = true;
-    await expect(coverageFallback(h.q, h.log, false, null, false, h.fx)).rejects.toThrow(
-      'select down',
-    );
+    await expect(coverageFallback(h.q, h.log, false, null, h.fx)).rejects.toThrow('select down');
     expect(h.q.backfill_ordinary_exhausted).toBe(true);
   });
 });

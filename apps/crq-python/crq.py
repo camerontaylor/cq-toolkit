@@ -593,6 +593,15 @@ def secret_scan(base: str, head: str, out: Path, *, classes: Optional[frozenset]
                             exemptions=exemptions, exemption_error=exemption_error)
 
 
+def _diff_lines(diff: str) -> List[str]:
+    """Split a diff on the only terminator git emits, ``\\n``. A trailing ``\\r`` stays in
+    the line, and U+2028/U+0085 and the other Unicode boundaries are ordinary content."""
+    lines = diff.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
 def secret_scan_diff(diff: str, out: Path, *, base=None, head=None,
                      classes: Optional[frozenset] = None, exemptions=None,
                      exemption_error: Optional[str] = None) -> Tuple[bool, Dict[str, Any]]:
@@ -605,30 +614,17 @@ def secret_scan_diff(diff: str, out: Path, *, base=None, head=None,
     line_paths: Dict[int, str] = {}
     path = None
     in_header = False  # ---/+++ are headers only between "diff --git" and the first "@@"
-    # Gitleaks numbers its stdin lines by LF only, so attribution keys are the
-    # physical LF line each record starts on, not the splitlines() number the
-    # denylist hits report (the two diverge on U+2028 and friends).
-    lf_lines = 0
-    # Patch structure (file headers, hunk starts) is read only at the start of
-    # an LF-delimited record. splitlines() also splits on U+2028, lone CR and
-    # similar, but git emits one record per LF, so a fragment after such a
-    # character is hunk content and can never change the attributed path.
-    record_start = True
-    for n, (line, kept) in enumerate(zip(diff.splitlines(), diff.splitlines(True)), 1):
-        physical = lf_lines + 1
-        lf_lines += kept.count("\n")
-        starts_record = record_start
-        record_start = kept.endswith("\n")
-        if starts_record and line.startswith("diff --git"):
+    for n, line in enumerate(_diff_lines(diff), 1):
+        if line.startswith("diff --git"):
             m = re.match(r"diff --git a/(.*) b/(.*)$", line)
             path = m.group(2) if m else None
             in_header = True
             continue
-        if starts_record and line.startswith("@@"):
+        if line.startswith("@@"):
             in_header = False
             continue
         if in_header:
-            if starts_record and (line.startswith("+++ ") or line.startswith("--- ")):
+            if line.startswith("+++ ") or line.startswith("--- "):
                 p = line[4:]
                 if p != "/dev/null":
                     path = p[2:] if p[:2] in ("a/", "b/") else p
@@ -637,7 +633,7 @@ def secret_scan_diff(diff: str, out: Path, *, base=None, head=None,
             continue
         if any(a.search(path) for a in allow):
             continue
-        line_paths[physical] = path
+        line_paths[n] = path
         content = line[1:]
         for rid, rx, prx in compiled:
             if prx is not None and not prx.search(path):
@@ -3604,13 +3600,14 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
     # cleared before the read and after the pass, so a publication outside the
     # pass never sees another tick's count (an unread count holds creation).
     repair_tick.reset_fix_pr_backlog()
+    repair_tick.begin_tick(sys.modules[__name__])
     if not dry and repair_tick.backfill_repair_present(q):
         # Before the first publish: the hard cap on backfill fix PRs reads this
         # and the drain reads the file it writes. One forge request under its
         # own allowance, like reconcile below; a tick with no backfill repair
         # work makes no call.
         with forge_window(ForgeBudget(requests=1, seconds=30)):
-            repair_tick.refresh_fix_pr_backlog(sys.modules[__name__])
+            repair_tick.refresh_fix_pr_backlog(sys.modules[__name__], q)
     try:
         for item in list(live_items(q)):
             if not dry and item.get("kind") == local_review_runtime.KIND and item.get("publication_pending"):

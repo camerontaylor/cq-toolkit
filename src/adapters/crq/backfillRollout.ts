@@ -6,7 +6,7 @@
  */
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { JsonObject } from '../../policy/crq/jsonValue.js';
+import { JsonObject, type JsonValue } from '../../policy/crq/jsonValue.js';
 import { ledgerLoads, pythonTruthy, LedgerIntegrityError } from '../../policy/crq/ledger.js';
 import { parsePublisherSpool } from './publisherSpool.js';
 
@@ -28,10 +28,12 @@ export async function readOptionalFile(path: string): Promise<Buffer | null> {
   }
 }
 
-export async function readBackfillRollout(stateRoot: string): Promise<JsonObject | null> {
-  const bytes = await readOptionalFile(join(stateRoot, 'backfill-rollout.json'));
-  if (bytes === null) return null;
-  const value = ledgerLoads(bytes);
+/**
+ * The checks `backfill_runtime.settings` makes on a parsed rollout: required
+ * keys truthy, the runner identity, the publisher spool. A document that is
+ * not an object is refused here as an integrity failure.
+ */
+export function checkBackfillRollout(value: JsonValue): JsonObject {
   if (
     !(value instanceof JsonObject) ||
     REQUIRED.some((key) => !pythonTruthy(value.get(key))) ||
@@ -40,6 +42,12 @@ export async function readBackfillRollout(stateRoot: string): Promise<JsonObject
     throw new LedgerIntegrityError('backfill rollout prerequisites incomplete');
   parsePublisherSpool(value.get('publisher_spool'));
   return value;
+}
+
+export async function readBackfillRollout(stateRoot: string): Promise<JsonObject | null> {
+  const bytes = await readOptionalFile(join(stateRoot, 'backfill-rollout.json'));
+  if (bytes === null) return null;
+  return checkBackfillRollout(ledgerLoads(bytes));
 }
 
 /**

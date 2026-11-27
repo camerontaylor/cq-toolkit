@@ -35,7 +35,10 @@ class PublishCapTest(unittest.TestCase):
             if argv[:3] == ['gh', 'pr', 'create']:
                 branch = argv[argv.index('--head') + 1]
                 self.created.append(branch)
-                self.listed[branch] = [{'number': 100 + len(self.created), 'url': 'u', 'state': 'OPEN'}]
+                # The created PR sits at the prepared head: the fixture pairs
+                # branch 'crq/fix-run-<name>' with head 'h<name>'.
+                self.listed[branch] = [{'number': 100 + len(self.created), 'url': 'u', 'state': 'OPEN',
+                                        'headRefOid': 'h' + branch[len('crq/fix-run-'):]}]
 
         def gh_json(argv):
             return self.listed.get(argv[argv.index('--head') + 1], []) if '--head' in argv else []
@@ -115,6 +118,29 @@ class PublishCapTest(unittest.TestCase):
         self.assertEqual(publication['pr_create_attempts'], 1)
         self.assertEqual(repair_tick.TICK_BACKLOG['open'], 50)
 
+    def test_existing_singleton_pr_at_an_unrelated_head_is_refused(self):
+        # A PR sharing the branch name but sitting on another head is not the
+        # repair's fix PR: never record or enroll it, exactly like recovery.
+        repair_tick.TICK_BACKLOG.update(open=0, limit=10)
+        parts = self.publication('backfill-finding-a', 'a')
+        self.listed['crq/fix-run-a'] = [{'number': 77, 'url': 'u', 'state': 'OPEN', 'headRefOid': 'other'}]
+        with self.assertRaisesRegex(ValueError, 'prepared head mismatch'):
+            self.finalize(parts)
+        self.assertEqual(self.created, [])
+        self.assertNotIn('fix_pr', parts[2])
+
+    def test_created_singleton_pr_listed_at_an_unrelated_head_is_refused(self):
+        repair_tick.TICK_BACKLOG.update(open=9, limit=10)
+        parts = self.publication('backfill-finding-a', 'a')
+
+        def create(argv):
+            # The create lands, but the PR it reports sits on another head.
+            self.listed['crq/fix-run-a'] = [{'number': 78, 'url': 'u', 'state': 'OPEN', 'headRefOid': 'other'}]
+        self.c.run = create
+        with self.assertRaisesRegex(ValueError, 'prepared head mismatch'):
+            self.finalize(parts)
+        self.assertNotIn('fix_pr', parts[2])
+
 
 class BacklogFileTest(unittest.TestCase):
     def setUp(self):
@@ -139,18 +165,29 @@ class BacklogFileTest(unittest.TestCase):
         self.assertEqual(repair_tick.review_start_limit(self.c, self.now), 2)
 
     def test_refresh_writes_open_backfill_prs_and_limit(self):
-        repair_tick.refresh_fix_pr_backlog(self.c)
+        repair_tick.refresh_fix_pr_backlog(self.c, {})
         data = json.loads((self.state / 'repair/fix-pr-backlog.json').read_text())
         self.assertEqual((data['open'], data['limit']), (3, 2))
         self.assertEqual(repair_tick.TICK_BACKLOG, {'open': 3, 'limit': 2})
 
+    def test_refresh_counts_only_backfill_owned_legacy_retry_branches(self):
+        self.prs.extend({'headRefName': 'crq/fix-revalidated-' + name}
+                        for name in ('backfill', 'ordinary', 'unknown'))
+        queue = {'items': [
+            {'id': 'backfill-finding-a',
+             'repair_runs': {'revalidated-backfill': {}, 'revalidated-closed': {}}},
+            {'id': 'pr9', 'repair_runs': {'revalidated-ordinary': {}}},
+        ]}
+        repair_tick.refresh_fix_pr_backlog(self.c, queue)
+        self.assertEqual(repair_tick.TICK_BACKLOG['open'], 4)
+
     def test_failed_gh_call_keeps_previous_file_and_holds_this_tick(self):
-        repair_tick.refresh_fix_pr_backlog(self.c)
+        repair_tick.refresh_fix_pr_backlog(self.c, {})
         before = (self.state / 'repair/fix-pr-backlog.json').read_text()
         def boom(argv):
             raise RuntimeError('gh down')
         self.c.gh_json = boom
-        self.assertIsNone(repair_tick.refresh_fix_pr_backlog(self.c))
+        self.assertIsNone(repair_tick.refresh_fix_pr_backlog(self.c, {}))
         self.assertEqual((self.state / 'repair/fix-pr-backlog.json').read_text(), before)
         self.assertFalse(repair_tick.backfill_slot_free({'id': 'backfill-finding-x'}))
         self.assertTrue(repair_tick.backfill_slot_free({'id': 'pr5'}))
@@ -172,7 +209,8 @@ class TickScopeTest(unittest.TestCase):
         seen = []
         q = {'items': [{'id': 'backfill-finding-a', 'state': 'repairing', 'kind': 'merged',
                         'repair_runs': {'r': {}}}]}
-        def refresh(c):
+        def refresh(c, queue):
+            self.assertIs(queue, q)
             seen.append(('refresh', dict(repair_tick.TICK_BACKLOG), crq._FORGE_BUDGET.remaining))
             repair_tick.TICK_BACKLOG.update(open=2, limit=36)
         def harvest(c, queue, item):

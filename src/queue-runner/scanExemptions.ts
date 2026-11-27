@@ -11,6 +11,9 @@
  * more than Python's full `tomllib`, never less.
  */
 import { pythonUnicode16Space } from '../policy/crq/pythonUnicode16.js';
+import { pyTruthy } from '../policy/crq/queueDoc.js';
+import { PyError } from './pyErrors.js';
+import { REVIEW_RECEIPT_KIND } from '../policy/crq/tickSchedule.js';
 
 export const SCAN_EXEMPTIONS_PATH = '.crq/scan-exemptions.toml';
 export const EXEMPTIBLE_RULES: ReadonlySet<string> = new Set([
@@ -305,4 +308,46 @@ export function exemptReason(
   for (const entry of exemptions ?? [])
     if (entry.rule === rule && entry.rx.test(path)) return entry.reason;
   return null;
+}
+
+/**
+ * `crq.exemption_base` minus the git call: the revision whose exemption file
+ * governs a projected (push or merged-current) scan. Never the projection's
+ * own base: that is the reviewed tip minus only the selected paths, so any
+ * out-of-scope change would keep its reviewed copy of the exemption file as
+ * policy. Push: the range's pre-push base. Merged-current: the merge's first
+ * parent. Null (no exemptions) for every other item.
+ */
+export function exemptionBaseSpec(item: {
+  readonly kind?: unknown;
+  readonly subject?: unknown;
+}): string | null {
+  // `item.get("subject") or {}`: a falsy subject is empty, a truthy non-dict one
+  // fails at `subject.get(...)`, but only on the two kinds that read it.
+  const subject = pyTruthy(item.subject) ? item.subject : {};
+  const isPush = item.kind === 'push-current';
+  const isReceipt = item.kind === REVIEW_RECEIPT_KIND;
+  if (
+    (isPush || isReceipt) &&
+    (typeof subject !== 'object' || subject === null || Array.isArray(subject))
+  ) {
+    throw new PyError('AttributeError', 'subject has no attribute get');
+  }
+  const fields = subject as Record<string, unknown>;
+  let spec: unknown;
+  if (isPush) spec = fields.base;
+  else if (isReceipt && pyTruthy(fields.merge_sha)) {
+    // Python `subject["merge_sha"] + "^1"` raises TypeError on a non-string.
+    if (typeof fields.merge_sha !== 'string') throw new TypeError('merge_sha must be a string');
+    spec = `${fields.merge_sha}^1`;
+  } else return null;
+  return typeof spec === 'string' && spec !== '' ? spec : null;
+}
+
+/**
+ * `git rev-parse` echoes the spec itself when it cannot resolve it, so only a
+ * full object id counts as a resolved exemption base.
+ */
+export function acceptExemptionBase(echo: string): string | null {
+  return /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(echo) ? echo : null;
 }

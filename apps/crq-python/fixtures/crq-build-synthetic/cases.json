@@ -1,0 +1,4369 @@
+{
+ "cases": [
+  {
+   "name": "derives-paths-from-synth-paths",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "829adafb71fdd27111292dae45f6eb6fd97c0623",
+       "head": "9e95bc8e00fdf83d586b9b8a1461a95266c90998",
+       "paths": 3
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/base 829adafb71fdd27111292dae45f6eb6fd97c0623",
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/head 9e95bc8e00fdf83d586b9b8a1461a95266c90998",
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/target b123d9c4f246529390a1cdd5a7388281261fa9a9"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree 516a0cd6a4339ee628f723fb87cbc28a7791d622\nparent b123d9c4f246529390a1cdd5a7388281261fa9a9\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md"
+       ]
+      },
+      "head": {
+       "commit": "tree 051c2fce2ec5f02553ba35b8d58b0fb34ae9840b\nparent 829adafb71fdd27111292dae45f6eb6fd97c0623\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 4cb29ea38f70d7c61b2a3a25b02e3bdf44905402 a.txt",
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      }
+     }
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "derives-paths-from-synth-paths",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "derives-paths-with-measure-key-null",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "829adafb71fdd27111292dae45f6eb6fd97c0623",
+       "head": "9e95bc8e00fdf83d586b9b8a1461a95266c90998",
+       "paths": 3
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/base 829adafb71fdd27111292dae45f6eb6fd97c0623",
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/head 9e95bc8e00fdf83d586b9b8a1461a95266c90998",
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/target b123d9c4f246529390a1cdd5a7388281261fa9a9"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree 516a0cd6a4339ee628f723fb87cbc28a7791d622\nparent b123d9c4f246529390a1cdd5a7388281261fa9a9\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md"
+       ]
+      },
+      "head": {
+       "commit": "tree 051c2fce2ec5f02553ba35b8d58b0fb34ae9840b\nparent 829adafb71fdd27111292dae45f6eb6fd97c0623\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 4cb29ea38f70d7c61b2a3a25b02e3bdf44905402 a.txt",
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      }
+     }
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": null,
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "derives-paths-with-measure-key-null",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "measure-without-synthetic-paths",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "829adafb71fdd27111292dae45f6eb6fd97c0623",
+       "head": "9e95bc8e00fdf83d586b9b8a1461a95266c90998",
+       "paths": 3
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/base 829adafb71fdd27111292dae45f6eb6fd97c0623",
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/head 9e95bc8e00fdf83d586b9b8a1461a95266c90998",
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/target b123d9c4f246529390a1cdd5a7388281261fa9a9"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree 516a0cd6a4339ee628f723fb87cbc28a7791d622\nparent b123d9c4f246529390a1cdd5a7388281261fa9a9\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md"
+       ]
+      },
+      "head": {
+       "commit": "tree 051c2fce2ec5f02553ba35b8d58b0fb34ae9840b\nparent 829adafb71fdd27111292dae45f6eb6fd97c0623\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 4cb29ea38f70d7c61b2a3a25b02e3bdf44905402 a.txt",
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      }
+     }
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": {
+      "files": []
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "measure-without-synthetic-paths",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "measure-empty-synthetic-paths-falls-back",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "829adafb71fdd27111292dae45f6eb6fd97c0623",
+       "head": "9e95bc8e00fdf83d586b9b8a1461a95266c90998",
+       "paths": 3
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/base 829adafb71fdd27111292dae45f6eb6fd97c0623",
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/head 9e95bc8e00fdf83d586b9b8a1461a95266c90998",
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/target b123d9c4f246529390a1cdd5a7388281261fa9a9"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree 516a0cd6a4339ee628f723fb87cbc28a7791d622\nparent b123d9c4f246529390a1cdd5a7388281261fa9a9\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md"
+       ]
+      },
+      "head": {
+       "commit": "tree 051c2fce2ec5f02553ba35b8d58b0fb34ae9840b\nparent 829adafb71fdd27111292dae45f6eb6fd97c0623\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 4cb29ea38f70d7c61b2a3a25b02e3bdf44905402 a.txt",
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      }
+     }
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": {
+      "synthetic_paths": []
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "measure-empty-synthetic-paths-falls-back",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "measure-empty-string-falls-back",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "829adafb71fdd27111292dae45f6eb6fd97c0623",
+       "head": "9e95bc8e00fdf83d586b9b8a1461a95266c90998",
+       "paths": 3
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/base 829adafb71fdd27111292dae45f6eb6fd97c0623",
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/head 9e95bc8e00fdf83d586b9b8a1461a95266c90998",
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/target b123d9c4f246529390a1cdd5a7388281261fa9a9"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree 516a0cd6a4339ee628f723fb87cbc28a7791d622\nparent b123d9c4f246529390a1cdd5a7388281261fa9a9\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md"
+       ]
+      },
+      "head": {
+       "commit": "tree 051c2fce2ec5f02553ba35b8d58b0fb34ae9840b\nparent 829adafb71fdd27111292dae45f6eb6fd97c0623\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 4cb29ea38f70d7c61b2a3a25b02e3bdf44905402 a.txt",
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      }
+     }
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": {
+      "synthetic_paths": ""
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "measure-empty-string-falls-back",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "measure-zero-falls-back",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "829adafb71fdd27111292dae45f6eb6fd97c0623",
+       "head": "9e95bc8e00fdf83d586b9b8a1461a95266c90998",
+       "paths": 3
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/base 829adafb71fdd27111292dae45f6eb6fd97c0623",
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/head 9e95bc8e00fdf83d586b9b8a1461a95266c90998",
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/target b123d9c4f246529390a1cdd5a7388281261fa9a9"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree 516a0cd6a4339ee628f723fb87cbc28a7791d622\nparent b123d9c4f246529390a1cdd5a7388281261fa9a9\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md"
+       ]
+      },
+      "head": {
+       "commit": "tree 051c2fce2ec5f02553ba35b8d58b0fb34ae9840b\nparent 829adafb71fdd27111292dae45f6eb6fd97c0623\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 4cb29ea38f70d7c61b2a3a25b02e3bdf44905402 a.txt",
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      }
+     }
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": {
+      "synthetic_paths": 0
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "measure-zero-falls-back",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "supplied-paths-filtered-by-live",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "159054563ed09bab3410c5d97a534d2aaec1e145",
+       "head": "3bc20fe4ba2a3d353295bfdcc55ae784eeaf1ade",
+       "paths": 2
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/83f4af4713596747b86d2509e246034a3d877d61243c0837d6d502840f8e447b/0/0/base 159054563ed09bab3410c5d97a534d2aaec1e145",
+      "refs/crq/backfill/83f4af4713596747b86d2509e246034a3d877d61243c0837d6d502840f8e447b/0/0/head 3bc20fe4ba2a3d353295bfdcc55ae784eeaf1ade",
+      "refs/crq/backfill/83f4af4713596747b86d2509e246034a3d877d61243c0837d6d502840f8e447b/0/0/target b123d9c4f246529390a1cdd5a7388281261fa9a9"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree 3040698e515b7af8090209134c2615ea489ae9ca\nparent b123d9c4f246529390a1cdd5a7388281261fa9a9\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md"
+       ]
+      },
+      "head": {
+       "commit": "tree 051c2fce2ec5f02553ba35b8d58b0fb34ae9840b\nparent 159054563ed09bab3410c5d97a534d2aaec1e145\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 4cb29ea38f70d7c61b2a3a25b02e3bdf44905402 a.txt",
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      }
+     }
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": {
+      "synthetic_paths": [
+       "new.txt",
+       "gone.txt",
+       "a.txt"
+      ]
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "supplied-paths-filtered-by-live",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "supplied-paths-sorted-by-code-point",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "9fbe1ae1a27764e9d12cd1f3f04884f35a15757d",
+       "head": "28264f3b9330e98df0814d315c4c42ddb7c088ec",
+       "paths": 2
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/6587a75ef801a311dd9e53e491e313526c224a8e986b8183ae63abfaf4a35a71/0/0/base 9fbe1ae1a27764e9d12cd1f3f04884f35a15757d",
+      "refs/crq/backfill/6587a75ef801a311dd9e53e491e313526c224a8e986b8183ae63abfaf4a35a71/0/0/head 28264f3b9330e98df0814d315c4c42ddb7c088ec",
+      "refs/crq/backfill/6587a75ef801a311dd9e53e491e313526c224a8e986b8183ae63abfaf4a35a71/0/0/target b123d9c4f246529390a1cdd5a7388281261fa9a9"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree 20eeaf38d026617077c7501385d9f18ac5e3a8be\nparent b123d9c4f246529390a1cdd5a7388281261fa9a9\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      },
+      "head": {
+       "commit": "tree 051c2fce2ec5f02553ba35b8d58b0fb34ae9840b\nparent 9fbe1ae1a27764e9d12cd1f3f04884f35a15757d\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 4cb29ea38f70d7c61b2a3a25b02e3bdf44905402 a.txt",
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      }
+     }
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": {
+      "synthetic_paths": [
+       "dir/c.txt",
+       "a.txt",
+       "B"
+      ]
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "supplied-paths-sorted-by-code-point",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "supplied-duplicates-are-retained",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "0523f1766b4b97d4cc985be712eff4cada25b691",
+       "head": "a912fb072b1ded1bd652f6e2788f312a55c07d78",
+       "paths": 3
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/83d09b3a5dbf6b69b728c83d2e2ce42963b5901f7cc92930738c90d964e212af/0/0/base 0523f1766b4b97d4cc985be712eff4cada25b691",
+      "refs/crq/backfill/83d09b3a5dbf6b69b728c83d2e2ce42963b5901f7cc92930738c90d964e212af/0/0/head a912fb072b1ded1bd652f6e2788f312a55c07d78",
+      "refs/crq/backfill/83d09b3a5dbf6b69b728c83d2e2ce42963b5901f7cc92930738c90d964e212af/0/0/target b123d9c4f246529390a1cdd5a7388281261fa9a9"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree 08727eaaf9f2a209c0e8ac1e9d626906ad010fec\nparent b123d9c4f246529390a1cdd5a7388281261fa9a9\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      },
+      "head": {
+       "commit": "tree 051c2fce2ec5f02553ba35b8d58b0fb34ae9840b\nparent 0523f1766b4b97d4cc985be712eff4cada25b691\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 4cb29ea38f70d7c61b2a3a25b02e3bdf44905402 a.txt",
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      }
+     }
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": {
+      "synthetic_paths": [
+       "a.txt",
+       "a.txt",
+       "b.txt"
+      ]
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "supplied-duplicates-are-retained",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "supplied-no-live-path",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "9a3d59d8142d3f935ec5486ffad6a460086eccb2",
+       "head": "b4cc5041301fdc08e5a04119400c7f4d0e6d818c",
+       "paths": 0
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/97e229be7b1ce3dc3ed45695e13e0c83e574ee710777c4432f92ae9976ca4432/0/0/base 9a3d59d8142d3f935ec5486ffad6a460086eccb2",
+      "refs/crq/backfill/97e229be7b1ce3dc3ed45695e13e0c83e574ee710777c4432f92ae9976ca4432/0/0/head b4cc5041301fdc08e5a04119400c7f4d0e6d818c",
+      "refs/crq/backfill/97e229be7b1ce3dc3ed45695e13e0c83e574ee710777c4432f92ae9976ca4432/0/0/target b123d9c4f246529390a1cdd5a7388281261fa9a9"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree 051c2fce2ec5f02553ba35b8d58b0fb34ae9840b\nparent b123d9c4f246529390a1cdd5a7388281261fa9a9\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 4cb29ea38f70d7c61b2a3a25b02e3bdf44905402 a.txt",
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      },
+      "head": {
+       "commit": "tree 051c2fce2ec5f02553ba35b8d58b0fb34ae9840b\nparent 9a3d59d8142d3f935ec5486ffad6a460086eccb2\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 4cb29ea38f70d7c61b2a3a25b02e3bdf44905402 a.txt",
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      }
+     }
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": {
+      "synthetic_paths": [
+       "nope"
+      ]
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "supplied-no-live-path",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "supplied-string-iterates-characters",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "9a3d59d8142d3f935ec5486ffad6a460086eccb2",
+       "head": "b4cc5041301fdc08e5a04119400c7f4d0e6d818c",
+       "paths": 0
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/97e229be7b1ce3dc3ed45695e13e0c83e574ee710777c4432f92ae9976ca4432/0/0/base 9a3d59d8142d3f935ec5486ffad6a460086eccb2",
+      "refs/crq/backfill/97e229be7b1ce3dc3ed45695e13e0c83e574ee710777c4432f92ae9976ca4432/0/0/head b4cc5041301fdc08e5a04119400c7f4d0e6d818c",
+      "refs/crq/backfill/97e229be7b1ce3dc3ed45695e13e0c83e574ee710777c4432f92ae9976ca4432/0/0/target b123d9c4f246529390a1cdd5a7388281261fa9a9"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree 051c2fce2ec5f02553ba35b8d58b0fb34ae9840b\nparent b123d9c4f246529390a1cdd5a7388281261fa9a9\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 4cb29ea38f70d7c61b2a3a25b02e3bdf44905402 a.txt",
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      },
+      "head": {
+       "commit": "tree 051c2fce2ec5f02553ba35b8d58b0fb34ae9840b\nparent 9a3d59d8142d3f935ec5486ffad6a460086eccb2\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 4cb29ea38f70d7c61b2a3a25b02e3bdf44905402 a.txt",
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      }
+     }
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": {
+      "synthetic_paths": "ab"
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "supplied-string-iterates-characters",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "supplied-dict-iterates-keys",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "02557993899c68ee7068dea0f8155f8acec101e6",
+       "head": "15d20d28ec4339f38a77824f903bc7a02a9ea7bf",
+       "paths": 1
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/848a725c534df0e9cda53e6a68f276b7e9ff3f96cae3e8fe127697a84604606d/0/0/base 02557993899c68ee7068dea0f8155f8acec101e6",
+      "refs/crq/backfill/848a725c534df0e9cda53e6a68f276b7e9ff3f96cae3e8fe127697a84604606d/0/0/head 15d20d28ec4339f38a77824f903bc7a02a9ea7bf",
+      "refs/crq/backfill/848a725c534df0e9cda53e6a68f276b7e9ff3f96cae3e8fe127697a84604606d/0/0/target b123d9c4f246529390a1cdd5a7388281261fa9a9"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree f687b32ef542080776f04d06440be130e3440756\nparent b123d9c4f246529390a1cdd5a7388281261fa9a9\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      },
+      "head": {
+       "commit": "tree 051c2fce2ec5f02553ba35b8d58b0fb34ae9840b\nparent 02557993899c68ee7068dea0f8155f8acec101e6\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 4cb29ea38f70d7c61b2a3a25b02e3bdf44905402 a.txt",
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      }
+     }
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": {
+      "synthetic_paths": {
+       "a.txt": 1,
+       "zz": 2
+      }
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "supplied-dict-iterates-keys",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "supplied-non-string-hashables-are-skipped",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "02557993899c68ee7068dea0f8155f8acec101e6",
+       "head": "15d20d28ec4339f38a77824f903bc7a02a9ea7bf",
+       "paths": 1
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/848a725c534df0e9cda53e6a68f276b7e9ff3f96cae3e8fe127697a84604606d/0/0/base 02557993899c68ee7068dea0f8155f8acec101e6",
+      "refs/crq/backfill/848a725c534df0e9cda53e6a68f276b7e9ff3f96cae3e8fe127697a84604606d/0/0/head 15d20d28ec4339f38a77824f903bc7a02a9ea7bf",
+      "refs/crq/backfill/848a725c534df0e9cda53e6a68f276b7e9ff3f96cae3e8fe127697a84604606d/0/0/target b123d9c4f246529390a1cdd5a7388281261fa9a9"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree f687b32ef542080776f04d06440be130e3440756\nparent b123d9c4f246529390a1cdd5a7388281261fa9a9\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      },
+      "head": {
+       "commit": "tree 051c2fce2ec5f02553ba35b8d58b0fb34ae9840b\nparent 02557993899c68ee7068dea0f8155f8acec101e6\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 4cb29ea38f70d7c61b2a3a25b02e3bdf44905402 a.txt",
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      }
+     }
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": {
+      "synthetic_paths": [
+       1,
+       null,
+       true,
+       {
+        "$float": "1.5"
+       },
+       "a.txt"
+      ]
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "supplied-non-string-hashables-are-skipped",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "supplied-unhashable-element-is-type-error",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "cannot use 'list' as a dict key (unhashable type: 'list')",
+      "raises": "TypeError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": {
+      "synthetic_paths": [
+       "a.txt",
+       [
+        "a.txt"
+       ]
+      ]
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "supplied-unhashable-element-is-type-error",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "supplied-unhashable-dict-element-is-type-error",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "cannot use 'dict' as a dict key (unhashable type: 'dict')",
+      "raises": "TypeError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": {
+      "synthetic_paths": [
+       {
+        "p": 1
+       }
+      ]
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "supplied-unhashable-dict-element-is-type-error",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "supplied-int-is-type-error",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "'int' object is not iterable",
+      "raises": "TypeError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": {
+      "synthetic_paths": 5
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "supplied-int-is-type-error",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "supplied-true-is-type-error",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "'bool' object is not iterable",
+      "raises": "TypeError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": {
+      "synthetic_paths": true
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "supplied-true-is-type-error",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "supplied-float-is-type-error",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "'float' object is not iterable",
+      "raises": "TypeError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": {
+      "synthetic_paths": {
+       "$float": "5.0"
+      }
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "supplied-float-is-type-error",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "supplied-fraction-is-type-error",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "'float' object is not iterable",
+      "raises": "TypeError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": {
+      "synthetic_paths": {
+       "$float": "0.5"
+      }
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "supplied-fraction-is-type-error",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "supplied-big-int-is-type-error",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "'int' object is not iterable",
+      "raises": "TypeError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": {
+      "synthetic_paths": {
+       "$int": "1180591620717411303424"
+      }
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "supplied-big-int-is-type-error",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "supplied-negative-int-is-type-error",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "'int' object is not iterable",
+      "raises": "TypeError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": {
+      "synthetic_paths": -3
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "supplied-negative-int-is-type-error",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "supplied-zero-float-falls-back",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "829adafb71fdd27111292dae45f6eb6fd97c0623",
+       "head": "9e95bc8e00fdf83d586b9b8a1461a95266c90998",
+       "paths": 3
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/base 829adafb71fdd27111292dae45f6eb6fd97c0623",
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/head 9e95bc8e00fdf83d586b9b8a1461a95266c90998",
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/target b123d9c4f246529390a1cdd5a7388281261fa9a9"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree 516a0cd6a4339ee628f723fb87cbc28a7791d622\nparent b123d9c4f246529390a1cdd5a7388281261fa9a9\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md"
+       ]
+      },
+      "head": {
+       "commit": "tree 051c2fce2ec5f02553ba35b8d58b0fb34ae9840b\nparent 829adafb71fdd27111292dae45f6eb6fd97c0623\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 4cb29ea38f70d7c61b2a3a25b02e3bdf44905402 a.txt",
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      }
+     }
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": {
+      "synthetic_paths": {
+       "$float": "0.0"
+      }
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "supplied-zero-float-falls-back",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "measure-int-is-attribute-error",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "'int' object has no attribute 'get'",
+      "raises": "AttributeError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": 5,
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "measure-int-is-attribute-error",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "measure-float-is-attribute-error",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "'float' object has no attribute 'get'",
+      "raises": "AttributeError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": {
+      "$float": "5.5"
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "measure-float-is-attribute-error",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "measure-zero-float-is-falsy",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "829adafb71fdd27111292dae45f6eb6fd97c0623",
+       "head": "9e95bc8e00fdf83d586b9b8a1461a95266c90998",
+       "paths": 3
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/base 829adafb71fdd27111292dae45f6eb6fd97c0623",
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/head 9e95bc8e00fdf83d586b9b8a1461a95266c90998",
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/target b123d9c4f246529390a1cdd5a7388281261fa9a9"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree 516a0cd6a4339ee628f723fb87cbc28a7791d622\nparent b123d9c4f246529390a1cdd5a7388281261fa9a9\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md"
+       ]
+      },
+      "head": {
+       "commit": "tree 051c2fce2ec5f02553ba35b8d58b0fb34ae9840b\nparent 829adafb71fdd27111292dae45f6eb6fd97c0623\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 4cb29ea38f70d7c61b2a3a25b02e3bdf44905402 a.txt",
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      }
+     }
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": {
+      "$float": "0.0"
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "measure-zero-float-is-falsy",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "float-merge-commit",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "expected str, bytes or os.PathLike object, not float",
+      "raises": "TypeError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "merge_commit": {
+      "$float": "7.5"
+     },
+     "pr": 1
+    },
+    "name": "float-merge-commit",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "big-int-merge-commit",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "expected str, bytes or os.PathLike object, not int",
+      "raises": "TypeError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "merge_commit": {
+      "$int": "1180591620717411303424"
+     },
+     "pr": 1
+    },
+    "name": "big-int-merge-commit",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "item-int",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "'int' object is not subscriptable",
+      "raises": "TypeError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": 5,
+    "name": "item-int",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "item-float",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "'float' object is not subscriptable",
+      "raises": "TypeError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "$float": "5.5"
+    },
+    "name": "item-float",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "float-id-with-supplied-paths",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "unsupported canonical JSON value",
+      "raises": "IntegrityError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": {
+      "$float": "1.5"
+     },
+     "kind": "merged",
+     "measure": {
+      "synthetic_paths": [
+       "a.txt"
+      ]
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "float-id-with-supplied-paths",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "big-int-id-with-supplied-paths",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "integer outside interoperable JSON range",
+      "raises": "IntegrityError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": {
+      "$int": "1180591620717411303424"
+     },
+     "kind": "merged",
+     "measure": {
+      "synthetic_paths": [
+       "a.txt"
+      ]
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "big-int-id-with-supplied-paths",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "measure-string-is-attribute-error",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "'str' object has no attribute 'get'",
+      "raises": "AttributeError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": "x",
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "measure-string-is-attribute-error",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "measure-list-is-attribute-error",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "'list' object has no attribute 'get'",
+      "raises": "AttributeError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": [
+      1
+     ],
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "measure-list-is-attribute-error",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "measure-empty-list-is-falsy",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "829adafb71fdd27111292dae45f6eb6fd97c0623",
+       "head": "9e95bc8e00fdf83d586b9b8a1461a95266c90998",
+       "paths": 3
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/base 829adafb71fdd27111292dae45f6eb6fd97c0623",
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/head 9e95bc8e00fdf83d586b9b8a1461a95266c90998",
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/target b123d9c4f246529390a1cdd5a7388281261fa9a9"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree 516a0cd6a4339ee628f723fb87cbc28a7791d622\nparent b123d9c4f246529390a1cdd5a7388281261fa9a9\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md"
+       ]
+      },
+      "head": {
+       "commit": "tree 051c2fce2ec5f02553ba35b8d58b0fb34ae9840b\nparent 829adafb71fdd27111292dae45f6eb6fd97c0623\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 4cb29ea38f70d7c61b2a3a25b02e3bdf44905402 a.txt",
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      }
+     }
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": [],
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "measure-empty-list-is-falsy",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "measure-zero-is-falsy",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "829adafb71fdd27111292dae45f6eb6fd97c0623",
+       "head": "9e95bc8e00fdf83d586b9b8a1461a95266c90998",
+       "paths": 3
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/base 829adafb71fdd27111292dae45f6eb6fd97c0623",
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/head 9e95bc8e00fdf83d586b9b8a1461a95266c90998",
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/target b123d9c4f246529390a1cdd5a7388281261fa9a9"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree 516a0cd6a4339ee628f723fb87cbc28a7791d622\nparent b123d9c4f246529390a1cdd5a7388281261fa9a9\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md"
+       ]
+      },
+      "head": {
+       "commit": "tree 051c2fce2ec5f02553ba35b8d58b0fb34ae9840b\nparent 829adafb71fdd27111292dae45f6eb6fd97c0623\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 4cb29ea38f70d7c61b2a3a25b02e3bdf44905402 a.txt",
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      }
+     }
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": 0,
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "measure-zero-is-falsy",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "missing-merge-commit-is-key-error",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "'merge_commit'",
+      "raises": "KeyError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "pr": 1
+    },
+    "name": "missing-merge-commit-is-key-error",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "missing-id-after-projection",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "'id'",
+      "raises": "KeyError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "kind": "merged",
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "missing-id-after-projection",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "missing-id-with-supplied-paths",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "'id'",
+      "raises": "KeyError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "kind": "merged",
+     "measure": {
+      "synthetic_paths": [
+       "a.txt"
+      ]
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "missing-id-with-supplied-paths",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "item-not-a-dict",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "list indices must be integers or slices, not str",
+      "raises": "TypeError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": [
+     "x"
+    ],
+    "name": "item-not-a-dict",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "item-none",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "'NoneType' object is not subscriptable",
+      "raises": "TypeError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": null,
+    "name": "item-none",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "unknown-merge-commit",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "git failure",
+      "raises": "RuntimeError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "merge_commit": "ffffffffffffffffffffffffffffffffffffffff",
+     "pr": 1
+    },
+    "name": "unknown-merge-commit",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "non-string-merge-commit",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "expected str, bytes or os.PathLike object, not int",
+      "raises": "TypeError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "merge_commit": 7,
+     "pr": 1
+    },
+    "name": "non-string-merge-commit",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "empty-merge-commit",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "git failure",
+      "raises": "RuntimeError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "merge_commit": "",
+     "pr": 1
+    },
+    "name": "empty-merge-commit",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "target-is-a-ref-name-not-an-oid",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "target must be an immutable full object ID",
+      "raises": "IntegrityError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "target-is-a-ref-name-not-an-oid",
+    "preseed": null,
+    "runs": 1,
+    "target": "origin/main"
+   },
+   "target": "origin/main"
+  },
+  {
+   "name": "target-short-oid",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "target must be an immutable full object ID",
+      "raises": "IntegrityError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "target-short-oid",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main",
+     "slice": 12
+    }
+   },
+   "target": "b123d9c4f246"
+  },
+  {
+   "name": "target-uppercase-oid",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "target must be an immutable full object ID",
+      "raises": "IntegrityError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "target-uppercase-oid",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main",
+     "upper": true
+    }
+   },
+   "target": "B123D9C4F246529390A1CDD5A7388281261FA9A9"
+  },
+  {
+   "name": "target-unknown-oid",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "git exit 128",
+      "raises": "CalledProcessError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "target-unknown-oid",
+    "preseed": null,
+    "runs": 1,
+    "target": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+   },
+   "target": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  },
+  {
+   "name": "generation-explicit",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "829adafb71fdd27111292dae45f6eb6fd97c0623",
+       "head": "9e95bc8e00fdf83d586b9b8a1461a95266c90998",
+       "paths": 3
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/3/0/base 829adafb71fdd27111292dae45f6eb6fd97c0623",
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/3/0/head 9e95bc8e00fdf83d586b9b8a1461a95266c90998",
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/3/0/target b123d9c4f246529390a1cdd5a7388281261fa9a9"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree 516a0cd6a4339ee628f723fb87cbc28a7791d622\nparent b123d9c4f246529390a1cdd5a7388281261fa9a9\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md"
+       ]
+      },
+      "head": {
+       "commit": "tree 051c2fce2ec5f02553ba35b8d58b0fb34ae9840b\nparent 829adafb71fdd27111292dae45f6eb6fd97c0623\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 4cb29ea38f70d7c61b2a3a25b02e3bdf44905402 a.txt",
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      }
+     }
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "generation": 3,
+     "id": "pr-1",
+     "kind": "merged",
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "generation-explicit",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "generation-zero",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "829adafb71fdd27111292dae45f6eb6fd97c0623",
+       "head": "9e95bc8e00fdf83d586b9b8a1461a95266c90998",
+       "paths": 3
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/base 829adafb71fdd27111292dae45f6eb6fd97c0623",
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/head 9e95bc8e00fdf83d586b9b8a1461a95266c90998",
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/target b123d9c4f246529390a1cdd5a7388281261fa9a9"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree 516a0cd6a4339ee628f723fb87cbc28a7791d622\nparent b123d9c4f246529390a1cdd5a7388281261fa9a9\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md"
+       ]
+      },
+      "head": {
+       "commit": "tree 051c2fce2ec5f02553ba35b8d58b0fb34ae9840b\nparent 829adafb71fdd27111292dae45f6eb6fd97c0623\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 4cb29ea38f70d7c61b2a3a25b02e3bdf44905402 a.txt",
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      }
+     }
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "generation": 0,
+     "id": "pr-1",
+     "kind": "merged",
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "generation-zero",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "generation-negative",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "invalid pin generation/partition",
+      "raises": "IntegrityError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "generation": -1,
+     "id": "pr-1",
+     "kind": "merged",
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "generation-negative",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "generation-string",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "invalid pin generation/partition",
+      "raises": "IntegrityError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "generation": "1",
+     "id": "pr-1",
+     "kind": "merged",
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "generation-string",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "generation-float",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "invalid pin generation/partition",
+      "raises": "IntegrityError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "generation": {
+      "$float": "1.0"
+     },
+     "id": "pr-1",
+     "kind": "merged",
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "generation-float",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "generation-null",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "invalid pin generation/partition",
+      "raises": "IntegrityError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "generation": null,
+     "id": "pr-1",
+     "kind": "merged",
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "generation-null",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "id-float-is-integrity-error",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "unsupported canonical JSON value",
+      "raises": "IntegrityError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": {
+      "$float": "1.5"
+     },
+     "kind": "merged",
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "id-float-is-integrity-error",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "id-list",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "829adafb71fdd27111292dae45f6eb6fd97c0623",
+       "head": "9e95bc8e00fdf83d586b9b8a1461a95266c90998",
+       "paths": 3
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/031613d236c6105cd9ad795eddd7a7c67919b234595c08783d76002ec6ea3dc0/0/0/base 829adafb71fdd27111292dae45f6eb6fd97c0623",
+      "refs/crq/backfill/031613d236c6105cd9ad795eddd7a7c67919b234595c08783d76002ec6ea3dc0/0/0/head 9e95bc8e00fdf83d586b9b8a1461a95266c90998",
+      "refs/crq/backfill/031613d236c6105cd9ad795eddd7a7c67919b234595c08783d76002ec6ea3dc0/0/0/target b123d9c4f246529390a1cdd5a7388281261fa9a9"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree 516a0cd6a4339ee628f723fb87cbc28a7791d622\nparent b123d9c4f246529390a1cdd5a7388281261fa9a9\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md"
+       ]
+      },
+      "head": {
+       "commit": "tree 051c2fce2ec5f02553ba35b8d58b0fb34ae9840b\nparent 829adafb71fdd27111292dae45f6eb6fd97c0623\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 4cb29ea38f70d7c61b2a3a25b02e3bdf44905402 a.txt",
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      }
+     }
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": [
+      "a",
+      1
+     ],
+     "kind": "merged",
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "id-list",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "id-null",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "829adafb71fdd27111292dae45f6eb6fd97c0623",
+       "head": "9e95bc8e00fdf83d586b9b8a1461a95266c90998",
+       "paths": 3
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/5a74cafaa07886abf23c9872aa82a82f13aec0da08b2a459538f435bc7522635/0/0/base 829adafb71fdd27111292dae45f6eb6fd97c0623",
+      "refs/crq/backfill/5a74cafaa07886abf23c9872aa82a82f13aec0da08b2a459538f435bc7522635/0/0/head 9e95bc8e00fdf83d586b9b8a1461a95266c90998",
+      "refs/crq/backfill/5a74cafaa07886abf23c9872aa82a82f13aec0da08b2a459538f435bc7522635/0/0/target b123d9c4f246529390a1cdd5a7388281261fa9a9"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree 516a0cd6a4339ee628f723fb87cbc28a7791d622\nparent b123d9c4f246529390a1cdd5a7388281261fa9a9\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md"
+       ]
+      },
+      "head": {
+       "commit": "tree 051c2fce2ec5f02553ba35b8d58b0fb34ae9840b\nparent 829adafb71fdd27111292dae45f6eb6fd97c0623\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 4cb29ea38f70d7c61b2a3a25b02e3bdf44905402 a.txt",
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      }
+     }
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": null,
+     "kind": "merged",
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "id-null",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "id-non-ascii",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "829adafb71fdd27111292dae45f6eb6fd97c0623",
+       "head": "9e95bc8e00fdf83d586b9b8a1461a95266c90998",
+       "paths": 3
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/d8b541c9ec586bdf8c983fe4ad18ea8056ff4b68c891148bae80ba984a751100/0/0/base 829adafb71fdd27111292dae45f6eb6fd97c0623",
+      "refs/crq/backfill/d8b541c9ec586bdf8c983fe4ad18ea8056ff4b68c891148bae80ba984a751100/0/0/head 9e95bc8e00fdf83d586b9b8a1461a95266c90998",
+      "refs/crq/backfill/d8b541c9ec586bdf8c983fe4ad18ea8056ff4b68c891148bae80ba984a751100/0/0/target b123d9c4f246529390a1cdd5a7388281261fa9a9"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree 516a0cd6a4339ee628f723fb87cbc28a7791d622\nparent b123d9c4f246529390a1cdd5a7388281261fa9a9\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md"
+       ]
+      },
+      "head": {
+       "commit": "tree 051c2fce2ec5f02553ba35b8d58b0fb34ae9840b\nparent 829adafb71fdd27111292dae45f6eb6fd97c0623\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 4cb29ea38f70d7c61b2a3a25b02e3bdf44905402 a.txt",
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      }
+     }
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-\u00e9\u4e2d",
+     "kind": "merged",
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "id-non-ascii",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "id-huge-int-in-domain",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "integer outside interoperable JSON range",
+      "raises": "IntegrityError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": {
+      "$int": "9223372036854775808"
+     },
+     "kind": "merged",
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "id-huge-int-in-domain",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "id-int-out-of-domain",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "integer outside interoperable JSON range",
+      "raises": "IntegrityError"
+     },
+     "refs": []
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": {
+      "$int": "18446744073709551616"
+     },
+     "kind": "merged",
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "id-int-out-of-domain",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "rerun-is-idempotent",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "829adafb71fdd27111292dae45f6eb6fd97c0623",
+       "head": "9e95bc8e00fdf83d586b9b8a1461a95266c90998",
+       "paths": 3
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/base 829adafb71fdd27111292dae45f6eb6fd97c0623",
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/head 9e95bc8e00fdf83d586b9b8a1461a95266c90998",
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/target b123d9c4f246529390a1cdd5a7388281261fa9a9"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree 516a0cd6a4339ee628f723fb87cbc28a7791d622\nparent b123d9c4f246529390a1cdd5a7388281261fa9a9\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md"
+       ]
+      },
+      "head": {
+       "commit": "tree 051c2fce2ec5f02553ba35b8d58b0fb34ae9840b\nparent 829adafb71fdd27111292dae45f6eb6fd97c0623\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 4cb29ea38f70d7c61b2a3a25b02e3bdf44905402 a.txt",
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      }
+     }
+    },
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "829adafb71fdd27111292dae45f6eb6fd97c0623",
+       "head": "9e95bc8e00fdf83d586b9b8a1461a95266c90998",
+       "paths": 3
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/base 829adafb71fdd27111292dae45f6eb6fd97c0623",
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/head 9e95bc8e00fdf83d586b9b8a1461a95266c90998",
+      "refs/crq/backfill/377ff7bd9613d7a1c5c3702d3474f3149baa00b11b014201abf4d08dc7001c79/0/0/target b123d9c4f246529390a1cdd5a7388281261fa9a9"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree 516a0cd6a4339ee628f723fb87cbc28a7791d622\nparent b123d9c4f246529390a1cdd5a7388281261fa9a9\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md"
+       ]
+      },
+      "head": {
+       "commit": "tree 051c2fce2ec5f02553ba35b8d58b0fb34ae9840b\nparent 829adafb71fdd27111292dae45f6eb6fd97c0623\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 4cb29ea38f70d7c61b2a3a25b02e3bdf44905402 a.txt",
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      }
+     }
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "rerun-is-idempotent",
+    "preseed": null,
+    "runs": 2,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "rerun-with-explicit-paths",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "02557993899c68ee7068dea0f8155f8acec101e6",
+       "head": "15d20d28ec4339f38a77824f903bc7a02a9ea7bf",
+       "paths": 1
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/848a725c534df0e9cda53e6a68f276b7e9ff3f96cae3e8fe127697a84604606d/0/0/base 02557993899c68ee7068dea0f8155f8acec101e6",
+      "refs/crq/backfill/848a725c534df0e9cda53e6a68f276b7e9ff3f96cae3e8fe127697a84604606d/0/0/head 15d20d28ec4339f38a77824f903bc7a02a9ea7bf",
+      "refs/crq/backfill/848a725c534df0e9cda53e6a68f276b7e9ff3f96cae3e8fe127697a84604606d/0/0/target b123d9c4f246529390a1cdd5a7388281261fa9a9"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree f687b32ef542080776f04d06440be130e3440756\nparent b123d9c4f246529390a1cdd5a7388281261fa9a9\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      },
+      "head": {
+       "commit": "tree 051c2fce2ec5f02553ba35b8d58b0fb34ae9840b\nparent 02557993899c68ee7068dea0f8155f8acec101e6\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 4cb29ea38f70d7c61b2a3a25b02e3bdf44905402 a.txt",
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      }
+     }
+    },
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "02557993899c68ee7068dea0f8155f8acec101e6",
+       "head": "15d20d28ec4339f38a77824f903bc7a02a9ea7bf",
+       "paths": 1
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/848a725c534df0e9cda53e6a68f276b7e9ff3f96cae3e8fe127697a84604606d/0/0/base 02557993899c68ee7068dea0f8155f8acec101e6",
+      "refs/crq/backfill/848a725c534df0e9cda53e6a68f276b7e9ff3f96cae3e8fe127697a84604606d/0/0/head 15d20d28ec4339f38a77824f903bc7a02a9ea7bf",
+      "refs/crq/backfill/848a725c534df0e9cda53e6a68f276b7e9ff3f96cae3e8fe127697a84604606d/0/0/target b123d9c4f246529390a1cdd5a7388281261fa9a9"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree f687b32ef542080776f04d06440be130e3440756\nparent b123d9c4f246529390a1cdd5a7388281261fa9a9\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      },
+      "head": {
+       "commit": "tree 051c2fce2ec5f02553ba35b8d58b0fb34ae9840b\nparent 02557993899c68ee7068dea0f8155f8acec101e6\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 4cb29ea38f70d7c61b2a3a25b02e3bdf44905402 a.txt",
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      }
+     }
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": {
+      "synthetic_paths": [
+       "a.txt"
+      ]
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "rerun-with-explicit-paths",
+    "preseed": null,
+    "runs": 2,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "pin-conflict-on-base",
+   "preseed": [
+    "refs/crq/backfill/848a725c534df0e9cda53e6a68f276b7e9ff3f96cae3e8fe127697a84604606d/0/0/base b123d9c4f246529390a1cdd5a7388281261fa9a9"
+   ],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "immutable subject pin conflict",
+      "raises": "IntegrityError"
+     },
+     "refs": [
+      "refs/crq/backfill/848a725c534df0e9cda53e6a68f276b7e9ff3f96cae3e8fe127697a84604606d/0/0/base b123d9c4f246529390a1cdd5a7388281261fa9a9"
+     ]
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": [
+     "a.txt"
+    ],
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": {
+      "synthetic_paths": [
+       "a.txt"
+      ]
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "pin-conflict-on-base",
+    "preseed": [
+     {
+      "label": "base",
+      "rev": "origin/main"
+     }
+    ],
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "pin-conflict-on-target",
+   "preseed": [
+    "refs/crq/backfill/848a725c534df0e9cda53e6a68f276b7e9ff3f96cae3e8fe127697a84604606d/0/0/target d47e0344626a8f7ef2f14e12191f17bdac9c5a3d"
+   ],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "message": "immutable subject pin conflict",
+      "raises": "IntegrityError"
+     },
+     "refs": [
+      "refs/crq/backfill/848a725c534df0e9cda53e6a68f276b7e9ff3f96cae3e8fe127697a84604606d/0/0/base 02557993899c68ee7068dea0f8155f8acec101e6",
+      "refs/crq/backfill/848a725c534df0e9cda53e6a68f276b7e9ff3f96cae3e8fe127697a84604606d/0/0/head 15d20d28ec4339f38a77824f903bc7a02a9ea7bf",
+      "refs/crq/backfill/848a725c534df0e9cda53e6a68f276b7e9ff3f96cae3e8fe127697a84604606d/0/0/target d47e0344626a8f7ef2f14e12191f17bdac9c5a3d"
+     ]
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": [
+     "a.txt"
+    ],
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": {
+      "synthetic_paths": [
+       "a.txt"
+      ]
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "pin-conflict-on-target",
+    "preseed": [
+     {
+      "label": "target",
+      "rev": "m1"
+     }
+    ],
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "pin-preexisting-equal-is-kept",
+   "preseed": [
+    "refs/crq/backfill/848a725c534df0e9cda53e6a68f276b7e9ff3f96cae3e8fe127697a84604606d/0/0/target b123d9c4f246529390a1cdd5a7388281261fa9a9"
+   ],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "02557993899c68ee7068dea0f8155f8acec101e6",
+       "head": "15d20d28ec4339f38a77824f903bc7a02a9ea7bf",
+       "paths": 1
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/848a725c534df0e9cda53e6a68f276b7e9ff3f96cae3e8fe127697a84604606d/0/0/base 02557993899c68ee7068dea0f8155f8acec101e6",
+      "refs/crq/backfill/848a725c534df0e9cda53e6a68f276b7e9ff3f96cae3e8fe127697a84604606d/0/0/head 15d20d28ec4339f38a77824f903bc7a02a9ea7bf",
+      "refs/crq/backfill/848a725c534df0e9cda53e6a68f276b7e9ff3f96cae3e8fe127697a84604606d/0/0/target b123d9c4f246529390a1cdd5a7388281261fa9a9"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree f687b32ef542080776f04d06440be130e3440756\nparent b123d9c4f246529390a1cdd5a7388281261fa9a9\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      },
+      "head": {
+       "commit": "tree 051c2fce2ec5f02553ba35b8d58b0fb34ae9840b\nparent 02557993899c68ee7068dea0f8155f8acec101e6\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 4cb29ea38f70d7c61b2a3a25b02e3bdf44905402 a.txt",
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      }
+     }
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": [
+     "a.txt"
+    ],
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": {
+      "synthetic_paths": [
+       "a.txt"
+      ]
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "pin-preexisting-equal-is-kept",
+    "preseed": [
+     {
+      "label": "target",
+      "rev": "origin/main"
+     }
+    ],
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  },
+  {
+   "name": "deleted-path-is-not-live",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "c364d9d28313682f3e988827a0b81f23ff707113",
+       "head": "a65e7a2c6c2ea4e88fa660f7f0b7504e78a23385",
+       "paths": 2
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/e85a072180c742b473b5ca45e3ccaaef3c0c8bc09b9817f885f69500cc2f7df1/0/0/base c364d9d28313682f3e988827a0b81f23ff707113",
+      "refs/crq/backfill/e85a072180c742b473b5ca45e3ccaaef3c0c8bc09b9817f885f69500cc2f7df1/0/0/head a65e7a2c6c2ea4e88fa660f7f0b7504e78a23385",
+      "refs/crq/backfill/e85a072180c742b473b5ca45e3ccaaef3c0c8bc09b9817f885f69500cc2f7df1/0/0/target fd5421be277e94f5e424787901b5fe8f112d8b73"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree ecefb77da7d5e75f5b89dc2e2d56cc075316c249\nparent fd5421be277e94f5e424787901b5fe8f112d8b73\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 af9c6fd168ea28cf99aa2c2dd9057a8b720e2262 b.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md"
+       ]
+      },
+      "head": {
+       "commit": "tree dd9739e84554a2bf88cc5ed02f068f59492bd187\nparent c364d9d28313682f3e988827a0b81f23ff707113\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 4cb29ea38f70d7c61b2a3a25b02e3bdf44905402 a.txt",
+        "100644 af9c6fd168ea28cf99aa2c2dd9057a8b720e2262 b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md"
+       ]
+      }
+     }
+    }
+   ],
+   "spec": {
+    "history": "deleted",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "deleted-path-is-not-live",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "fd5421be277e94f5e424787901b5fe8f112d8b73"
+  },
+  {
+   "name": "renamed-path-adds-new-name",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "a35d21adec14a59b836576094b0e591876b0dbc6",
+       "head": "ceedb9ece031d038c83f150090722b930ca28eca",
+       "paths": 3
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/b5d9d421fdafce4cec548d42734f44025ccac93d378df92729777b6cd76f84f0/0/0/base a35d21adec14a59b836576094b0e591876b0dbc6",
+      "refs/crq/backfill/b5d9d421fdafce4cec548d42734f44025ccac93d378df92729777b6cd76f84f0/0/0/head ceedb9ece031d038c83f150090722b930ca28eca",
+      "refs/crq/backfill/b5d9d421fdafce4cec548d42734f44025ccac93d378df92729777b6cd76f84f0/0/0/target 6919c271274cdf3c9545642694b1e04b9a92435b"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree ecefb77da7d5e75f5b89dc2e2d56cc075316c249\nparent 6919c271274cdf3c9545642694b1e04b9a92435b\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 af9c6fd168ea28cf99aa2c2dd9057a8b720e2262 b.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md"
+       ]
+      },
+      "head": {
+       "commit": "tree 1de4d2fd91a14305b32e402b868aae459778ebc3\nparent a35d21adec14a59b836576094b0e591876b0dbc6\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 4cb29ea38f70d7c61b2a3a25b02e3bdf44905402 a2.txt",
+        "100644 af9c6fd168ea28cf99aa2c2dd9057a8b720e2262 b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      }
+     }
+    }
+   ],
+   "spec": {
+    "history": "renamed",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "renamed-path-adds-new-name",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "6919c271274cdf3c9545642694b1e04b9a92435b"
+  },
+  {
+   "name": "unicode-name-is-quoted-by-git",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "f67a460ecfa297a4307bb3ff0341c173a40e6b34",
+       "head": "32db89f69a8f21dc8577ea66ce846769cee43f96",
+       "paths": 1
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/22b8a1540c7453c562aa40766ffafa83b78c8e488ad7bcd1d04059946e62aaed/0/0/base f67a460ecfa297a4307bb3ff0341c173a40e6b34",
+      "refs/crq/backfill/22b8a1540c7453c562aa40766ffafa83b78c8e488ad7bcd1d04059946e62aaed/0/0/head 32db89f69a8f21dc8577ea66ce846769cee43f96",
+      "refs/crq/backfill/22b8a1540c7453c562aa40766ffafa83b78c8e488ad7bcd1d04059946e62aaed/0/0/target dff53564ab43e569d02b1e124c9114dd14ffdd18"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree c09aafcc5554b9e01590297f3af9865fc2dc9731\nparent dff53564ab43e569d02b1e124c9114dd14ffdd18\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 af9c6fd168ea28cf99aa2c2dd9057a8b720e2262 b.txt",
+        "100644 d859c29f57731cc96afb78edf8e423b41b368fec dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 d905d9da82c97264ab6f4920e20242e088850ce9 \"\\303\\251.txt\""
+       ]
+      },
+      "head": {
+       "commit": "tree e996eaf6f70d39079d24784900cbd3242ba9bc6b\nparent f67a460ecfa297a4307bb3ff0341c173a40e6b34\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 587be6b4c3f93f93c489c0111bba5596147a26cb a.txt",
+        "100644 af9c6fd168ea28cf99aa2c2dd9057a8b720e2262 b.txt",
+        "100644 d859c29f57731cc96afb78edf8e423b41b368fec dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 d905d9da82c97264ab6f4920e20242e088850ce9 \"\\303\\251.txt\""
+       ]
+      }
+     }
+    }
+   ],
+   "spec": {
+    "history": "unicode",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "unicode-name-is-quoted-by-git",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "dff53564ab43e569d02b1e124c9114dd14ffdd18"
+  },
+  {
+   "name": "unicode-name-supplied",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "20ae39576ef21e829de167cbf8fb0c31f129606a",
+       "head": "892d99530e3cf6182675da114cdbfd228f49bc5f",
+       "paths": 2
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/089aa6627c9ab58b708950c5fc02b69efdd60a962c83a54067e94c8ed5b4ce42/0/0/base 20ae39576ef21e829de167cbf8fb0c31f129606a",
+      "refs/crq/backfill/089aa6627c9ab58b708950c5fc02b69efdd60a962c83a54067e94c8ed5b4ce42/0/0/head 892d99530e3cf6182675da114cdbfd228f49bc5f",
+      "refs/crq/backfill/089aa6627c9ab58b708950c5fc02b69efdd60a962c83a54067e94c8ed5b4ce42/0/0/target dff53564ab43e569d02b1e124c9114dd14ffdd18"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree 4463405c6749c65fa6bfb14ba8f89d195dd15733\nparent dff53564ab43e569d02b1e124c9114dd14ffdd18\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 af9c6fd168ea28cf99aa2c2dd9057a8b720e2262 b.txt",
+        "100644 d859c29f57731cc96afb78edf8e423b41b368fec dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md"
+       ]
+      },
+      "head": {
+       "commit": "tree e996eaf6f70d39079d24784900cbd3242ba9bc6b\nparent 20ae39576ef21e829de167cbf8fb0c31f129606a\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 587be6b4c3f93f93c489c0111bba5596147a26cb a.txt",
+        "100644 af9c6fd168ea28cf99aa2c2dd9057a8b720e2262 b.txt",
+        "100644 d859c29f57731cc96afb78edf8e423b41b368fec dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 d905d9da82c97264ab6f4920e20242e088850ce9 \"\\303\\251.txt\""
+       ]
+      }
+     }
+    }
+   ],
+   "spec": {
+    "history": "unicode",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": {
+      "synthetic_paths": [
+       "\u00e9.txt",
+       "a.txt"
+      ]
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "unicode-name-supplied",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "dff53564ab43e569d02b1e124c9114dd14ffdd18"
+  },
+  {
+   "name": "non-utf8-path-derived",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "bcf32153721822383d0701dc046c7cb4318416ec",
+       "head": "01a7129a2465b080f8baa2303c9c85c24d94ff7b",
+       "paths": 1
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/b5f8fedd86a9533301f9d803569dece7851045a8de598a066384ffec32dfa9b6/0/0/base bcf32153721822383d0701dc046c7cb4318416ec",
+      "refs/crq/backfill/b5f8fedd86a9533301f9d803569dece7851045a8de598a066384ffec32dfa9b6/0/0/head 01a7129a2465b080f8baa2303c9c85c24d94ff7b",
+      "refs/crq/backfill/b5f8fedd86a9533301f9d803569dece7851045a8de598a066384ffec32dfa9b6/0/0/target 9f188e47b76e6dacbc8f7f847659ae32e33f1257"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree c79556c801069fb51dcd894060df305c5ca519c9\nparent 9f188e47b76e6dacbc8f7f847659ae32e33f1257\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 af9c6fd168ea28cf99aa2c2dd9057a8b720e2262 b.txt",
+        "100644 d859c29f57731cc96afb78edf8e423b41b368fec dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 b68025345d5301abad4d9ec9166f455243a0d746 \"\\377.txt\""
+       ]
+      },
+      "head": {
+       "commit": "tree fe3fac751d4923f9e1935c729a76df77e2a03cd0\nparent bcf32153721822383d0701dc046c7cb4318416ec\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 587be6b4c3f93f93c489c0111bba5596147a26cb a.txt",
+        "100644 af9c6fd168ea28cf99aa2c2dd9057a8b720e2262 b.txt",
+        "100644 d859c29f57731cc96afb78edf8e423b41b368fec dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 b68025345d5301abad4d9ec9166f455243a0d746 \"\\377.txt\""
+       ]
+      }
+     }
+    }
+   ],
+   "spec": {
+    "history": "nonutf8",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "non-utf8-path-derived",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "9f188e47b76e6dacbc8f7f847659ae32e33f1257"
+  },
+  {
+   "name": "non-utf8-path-supplied",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "bcf32153721822383d0701dc046c7cb4318416ec",
+       "head": "01a7129a2465b080f8baa2303c9c85c24d94ff7b",
+       "paths": 1
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/b5f8fedd86a9533301f9d803569dece7851045a8de598a066384ffec32dfa9b6/0/0/base bcf32153721822383d0701dc046c7cb4318416ec",
+      "refs/crq/backfill/b5f8fedd86a9533301f9d803569dece7851045a8de598a066384ffec32dfa9b6/0/0/head 01a7129a2465b080f8baa2303c9c85c24d94ff7b",
+      "refs/crq/backfill/b5f8fedd86a9533301f9d803569dece7851045a8de598a066384ffec32dfa9b6/0/0/target 9f188e47b76e6dacbc8f7f847659ae32e33f1257"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree c79556c801069fb51dcd894060df305c5ca519c9\nparent 9f188e47b76e6dacbc8f7f847659ae32e33f1257\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 af9c6fd168ea28cf99aa2c2dd9057a8b720e2262 b.txt",
+        "100644 d859c29f57731cc96afb78edf8e423b41b368fec dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 b68025345d5301abad4d9ec9166f455243a0d746 \"\\377.txt\""
+       ]
+      },
+      "head": {
+       "commit": "tree fe3fac751d4923f9e1935c729a76df77e2a03cd0\nparent bcf32153721822383d0701dc046c7cb4318416ec\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 587be6b4c3f93f93c489c0111bba5596147a26cb a.txt",
+        "100644 af9c6fd168ea28cf99aa2c2dd9057a8b720e2262 b.txt",
+        "100644 d859c29f57731cc96afb78edf8e423b41b368fec dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 b68025345d5301abad4d9ec9166f455243a0d746 \"\\377.txt\""
+       ]
+      }
+     }
+    }
+   ],
+   "spec": {
+    "history": "nonutf8",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": {
+      "synthetic_paths": [
+       "a.txt"
+      ]
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "non-utf8-path-supplied",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "9f188e47b76e6dacbc8f7f847659ae32e33f1257"
+  },
+  {
+   "name": "modes-derived",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "a2cd05ffd09e573b8c2d1f30649f8b3ac427f41c",
+       "head": "9ad82c096c8bbd4790fd6eecb2a67336961fd3f8",
+       "paths": 2
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/ab3ba789040d76a242f8c2bfb26cb50b410e0b0409c01af72e803979af48c6b4/0/0/base a2cd05ffd09e573b8c2d1f30649f8b3ac427f41c",
+      "refs/crq/backfill/ab3ba789040d76a242f8c2bfb26cb50b410e0b0409c01af72e803979af48c6b4/0/0/head 9ad82c096c8bbd4790fd6eecb2a67336961fd3f8",
+      "refs/crq/backfill/ab3ba789040d76a242f8c2bfb26cb50b410e0b0409c01af72e803979af48c6b4/0/0/target a27640e81567831ab08810bacd5fb326780db1d5"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree b5e2b20ae739455084235bd9eeab4428e91d7621\nparent a27640e81567831ab08810bacd5fb326780db1d5\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 814f4a422927b82f5f8a43f8fab6d3839e3983f2 a.txt",
+        "100644 af9c6fd168ea28cf99aa2c2dd9057a8b720e2262 b.txt",
+        "100644 d859c29f57731cc96afb78edf8e423b41b368fec dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md"
+       ]
+      },
+      "head": {
+       "commit": "tree 671f51950312852fe943f47f93eb17a44b31bc40\nparent a2cd05ffd09e573b8c2d1f30649f8b3ac427f41c\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 814f4a422927b82f5f8a43f8fab6d3839e3983f2 a.txt",
+        "100644 af9c6fd168ea28cf99aa2c2dd9057a8b720e2262 b.txt",
+        "100644 d859c29f57731cc96afb78edf8e423b41b368fec dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "120000 8d14cbf983b3fad683171c9418998d9f68340823 ln",
+        "100755 1a2485251c33a70432394c93fb89330ef214bfc9 run.sh"
+       ]
+      }
+     }
+    }
+   ],
+   "spec": {
+    "history": "modes",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "modes-derived",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "a27640e81567831ab08810bacd5fb326780db1d5"
+  },
+  {
+   "name": "modes-supplied",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "e4ddbd4aa35aca5c5fa882fd725b396059a7faa5",
+       "head": "33890cdf9a00a4a27f928be085ea40d97c6a66fb",
+       "paths": 3
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/2f43e590351b840ceee916ac3d6df16f6ceec3d9dfc9e6514765e8a38ccac7be/0/0/base e4ddbd4aa35aca5c5fa882fd725b396059a7faa5",
+      "refs/crq/backfill/2f43e590351b840ceee916ac3d6df16f6ceec3d9dfc9e6514765e8a38ccac7be/0/0/head 33890cdf9a00a4a27f928be085ea40d97c6a66fb",
+      "refs/crq/backfill/2f43e590351b840ceee916ac3d6df16f6ceec3d9dfc9e6514765e8a38ccac7be/0/0/target a27640e81567831ab08810bacd5fb326780db1d5"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree 4463405c6749c65fa6bfb14ba8f89d195dd15733\nparent a27640e81567831ab08810bacd5fb326780db1d5\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 af9c6fd168ea28cf99aa2c2dd9057a8b720e2262 b.txt",
+        "100644 d859c29f57731cc96afb78edf8e423b41b368fec dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md"
+       ]
+      },
+      "head": {
+       "commit": "tree 671f51950312852fe943f47f93eb17a44b31bc40\nparent e4ddbd4aa35aca5c5fa882fd725b396059a7faa5\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 814f4a422927b82f5f8a43f8fab6d3839e3983f2 a.txt",
+        "100644 af9c6fd168ea28cf99aa2c2dd9057a8b720e2262 b.txt",
+        "100644 d859c29f57731cc96afb78edf8e423b41b368fec dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "120000 8d14cbf983b3fad683171c9418998d9f68340823 ln",
+        "100755 1a2485251c33a70432394c93fb89330ef214bfc9 run.sh"
+       ]
+      }
+     }
+    }
+   ],
+   "spec": {
+    "history": "modes",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": {
+      "synthetic_paths": [
+       "ln",
+       "run.sh",
+       "a.txt"
+      ]
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "modes-supplied",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "a27640e81567831ab08810bacd5fb326780db1d5"
+  },
+  {
+   "name": "linear-merge-has-no-second-parent",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "58d14e2aa65f17c540fcdfad6bdfa6e10fe4138e",
+       "head": "9adab7e99e7c823c3aa1016148745b7271f3a7bb",
+       "paths": 1
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/191eec84ee7734964cc942ec993b4b97e47ac29a1c6b72153b026b4d58a1fef7/0/0/base 58d14e2aa65f17c540fcdfad6bdfa6e10fe4138e",
+      "refs/crq/backfill/191eec84ee7734964cc942ec993b4b97e47ac29a1c6b72153b026b4d58a1fef7/0/0/head 9adab7e99e7c823c3aa1016148745b7271f3a7bb",
+      "refs/crq/backfill/191eec84ee7734964cc942ec993b4b97e47ac29a1c6b72153b026b4d58a1fef7/0/0/target 82884344dafbbb1f170e02ef7719fdaa885560ed"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree 4463405c6749c65fa6bfb14ba8f89d195dd15733\nparent 82884344dafbbb1f170e02ef7719fdaa885560ed\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 af9c6fd168ea28cf99aa2c2dd9057a8b720e2262 b.txt",
+        "100644 d859c29f57731cc96afb78edf8e423b41b368fec dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md"
+       ]
+      },
+      "head": {
+       "commit": "tree 84face5f129742a8cdb52bab3b42c9679ea9cd28\nparent 58d14e2aa65f17c540fcdfad6bdfa6e10fe4138e\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 587be6b4c3f93f93c489c0111bba5596147a26cb a.txt",
+        "100644 af9c6fd168ea28cf99aa2c2dd9057a8b720e2262 b.txt",
+        "100644 d859c29f57731cc96afb78edf8e423b41b368fec dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md"
+       ]
+      }
+     }
+    }
+   ],
+   "spec": {
+    "history": "linear",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "linear-merge-has-no-second-parent",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "82884344dafbbb1f170e02ef7719fdaa885560ed"
+  },
+  {
+   "name": "linear-supplied-paths",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "58d14e2aa65f17c540fcdfad6bdfa6e10fe4138e",
+       "head": "9adab7e99e7c823c3aa1016148745b7271f3a7bb",
+       "paths": 1
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/191eec84ee7734964cc942ec993b4b97e47ac29a1c6b72153b026b4d58a1fef7/0/0/base 58d14e2aa65f17c540fcdfad6bdfa6e10fe4138e",
+      "refs/crq/backfill/191eec84ee7734964cc942ec993b4b97e47ac29a1c6b72153b026b4d58a1fef7/0/0/head 9adab7e99e7c823c3aa1016148745b7271f3a7bb",
+      "refs/crq/backfill/191eec84ee7734964cc942ec993b4b97e47ac29a1c6b72153b026b4d58a1fef7/0/0/target 82884344dafbbb1f170e02ef7719fdaa885560ed"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree 4463405c6749c65fa6bfb14ba8f89d195dd15733\nparent 82884344dafbbb1f170e02ef7719fdaa885560ed\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 af9c6fd168ea28cf99aa2c2dd9057a8b720e2262 b.txt",
+        "100644 d859c29f57731cc96afb78edf8e423b41b368fec dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md"
+       ]
+      },
+      "head": {
+       "commit": "tree 84face5f129742a8cdb52bab3b42c9679ea9cd28\nparent 58d14e2aa65f17c540fcdfad6bdfa6e10fe4138e\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 587be6b4c3f93f93c489c0111bba5596147a26cb a.txt",
+        "100644 af9c6fd168ea28cf99aa2c2dd9057a8b720e2262 b.txt",
+        "100644 d859c29f57731cc96afb78edf8e423b41b368fec dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md"
+       ]
+      }
+     }
+    }
+   ],
+   "spec": {
+    "history": "linear",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "measure": {
+      "synthetic_paths": [
+       "a.txt"
+      ]
+     },
+     "merge_commit": {
+      "$rev": "m1"
+     },
+     "pr": 1
+    },
+    "name": "linear-supplied-paths",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "82884344dafbbb1f170e02ef7719fdaa885560ed"
+  },
+  {
+   "name": "merge-commit-is-the-target",
+   "preseed": [],
+   "results": [
+    {
+     "item_unchanged": true,
+     "outcome": {
+      "ok": {
+       "base": "8e0151161198507419041aee83a336b3e85de8af",
+       "head": "8cb1bb5d8a276625820ece0be5e9b3730ad49ca2",
+       "paths": 1
+      }
+     },
+     "refs": [
+      "refs/crq/backfill/138a9db4d2211f4529d015982ff312c0dce8d788ac79f9c5a645e55740aeee0d/0/0/base 8e0151161198507419041aee83a336b3e85de8af",
+      "refs/crq/backfill/138a9db4d2211f4529d015982ff312c0dce8d788ac79f9c5a645e55740aeee0d/0/0/head 8cb1bb5d8a276625820ece0be5e9b3730ad49ca2",
+      "refs/crq/backfill/138a9db4d2211f4529d015982ff312c0dce8d788ac79f9c5a645e55740aeee0d/0/0/target b123d9c4f246529390a1cdd5a7388281261fa9a9"
+     ],
+     "subject": {
+      "base": {
+       "commit": "tree 84ebe76207ed237521ab76e154bb6c2670da971b\nparent b123d9c4f246529390a1cdd5a7388281261fa9a9\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection base",
+       "files": [
+        "100644 4cb29ea38f70d7c61b2a3a25b02e3bdf44905402 a.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      },
+      "head": {
+       "commit": "tree 051c2fce2ec5f02553ba35b8d58b0fb34ae9840b\nparent 8e0151161198507419041aee83a336b3e85de8af\nauthor crq <crq@localhost> 946684800 +0000\ncommitter crq <crq@localhost> 946684800 +0000\n\ncrq current projection head",
+       "files": [
+        "100644 4cb29ea38f70d7c61b2a3a25b02e3bdf44905402 a.txt",
+        "100644 70b84520453adef1a2902d64d53601da120d125f b.txt",
+        "100644 31ea731340530c6f0829bad83710502247b66a39 dir/c.txt",
+        "100644 a98c46c71c932a57a1ec95007803ea5509cc6316 docs/readme.md",
+        "100644 8ba3a16384aacc37d01564b28401755ce8053f51 new.txt"
+       ]
+      }
+     }
+    }
+   ],
+   "spec": {
+    "history": "merged",
+    "identity_paths": null,
+    "item": {
+     "id": "pr-1",
+     "kind": "merged",
+     "merge_commit": {
+      "$rev": "origin/main"
+     },
+     "pr": 1
+    },
+    "name": "merge-commit-is-the-target",
+    "preseed": null,
+    "runs": 1,
+    "target": {
+     "$rev": "origin/main"
+    }
+   },
+   "target": "b123d9c4f246529390a1cdd5a7388281261fa9a9"
+  }
+ ],
+ "histories": {
+  "deleted": [
+   {
+    "op": "write",
+    "path": "a.txt",
+    "text": "one\ntwo\n"
+   },
+   {
+    "op": "write",
+    "path": "b.txt",
+    "text": "bee\n"
+   },
+   {
+    "op": "write",
+    "path": "dir/c.txt",
+    "text": "see\n"
+   },
+   {
+    "op": "write",
+    "path": "docs/readme.md",
+    "text": "# r\n"
+   },
+   {
+    "msg": "base",
+    "op": "commit"
+   },
+   {
+    "args": [
+     "checkout",
+     "-q",
+     "-b",
+     "feat"
+    ],
+    "op": "git"
+   },
+   {
+    "op": "write",
+    "path": "a.txt",
+    "text": "one\ntwo\nthree\n"
+   },
+   {
+    "op": "write",
+    "path": "new.txt",
+    "text": "n\n"
+   },
+   {
+    "op": "write",
+    "path": "dir/c.txt",
+    "text": "see\nmore\n"
+   },
+   {
+    "msg": "pr work",
+    "op": "commit"
+   },
+   {
+    "args": [
+     "checkout",
+     "-q",
+     "main"
+    ],
+    "op": "git"
+   },
+   {
+    "args": [
+     "merge",
+     "-q",
+     "--no-ff",
+     "feat",
+     "-m",
+     "merge pr"
+    ],
+    "op": "git"
+   },
+   {
+    "args": [
+     "tag",
+     "m1"
+    ],
+    "op": "git"
+   },
+   {
+    "op": "rm",
+    "path": "new.txt"
+   },
+   {
+    "msg": "drop new",
+    "op": "commit"
+   },
+   {
+    "args": [
+     "push",
+     "-q",
+     "origin",
+     "main"
+    ],
+    "op": "git"
+   },
+   {
+    "args": [
+     "fetch",
+     "-q",
+     "origin"
+    ],
+    "op": "git"
+   }
+  ],
+  "linear": [
+   {
+    "op": "write",
+    "path": "a.txt",
+    "text": "one\ntwo\n"
+   },
+   {
+    "op": "write",
+    "path": "b.txt",
+    "text": "bee\n"
+   },
+   {
+    "op": "write",
+    "path": "dir/c.txt",
+    "text": "see\n"
+   },
+   {
+    "op": "write",
+    "path": "docs/readme.md",
+    "text": "# r\n"
+   },
+   {
+    "msg": "base",
+    "op": "commit"
+   },
+   {
+    "op": "write",
+    "path": "a.txt",
+    "text": "x\n"
+   },
+   {
+    "msg": "plain",
+    "op": "commit"
+   },
+   {
+    "args": [
+     "tag",
+     "m1"
+    ],
+    "op": "git"
+   },
+   {
+    "args": [
+     "push",
+     "-q",
+     "origin",
+     "main"
+    ],
+    "op": "git"
+   },
+   {
+    "args": [
+     "fetch",
+     "-q",
+     "origin"
+    ],
+    "op": "git"
+   }
+  ],
+  "merged": [
+   {
+    "op": "write",
+    "path": "a.txt",
+    "text": "one\ntwo\n"
+   },
+   {
+    "op": "write",
+    "path": "b.txt",
+    "text": "bee\n"
+   },
+   {
+    "op": "write",
+    "path": "dir/c.txt",
+    "text": "see\n"
+   },
+   {
+    "op": "write",
+    "path": "docs/readme.md",
+    "text": "# r\n"
+   },
+   {
+    "msg": "base",
+    "op": "commit"
+   },
+   {
+    "args": [
+     "checkout",
+     "-q",
+     "-b",
+     "feat"
+    ],
+    "op": "git"
+   },
+   {
+    "op": "write",
+    "path": "a.txt",
+    "text": "one\ntwo\nthree\n"
+   },
+   {
+    "op": "write",
+    "path": "new.txt",
+    "text": "n\n"
+   },
+   {
+    "op": "write",
+    "path": "dir/c.txt",
+    "text": "see\nmore\n"
+   },
+   {
+    "msg": "pr work",
+    "op": "commit"
+   },
+   {
+    "args": [
+     "checkout",
+     "-q",
+     "main"
+    ],
+    "op": "git"
+   },
+   {
+    "args": [
+     "merge",
+     "-q",
+     "--no-ff",
+     "feat",
+     "-m",
+     "merge pr"
+    ],
+    "op": "git"
+   },
+   {
+    "args": [
+     "tag",
+     "m1"
+    ],
+    "op": "git"
+   },
+   {
+    "op": "write",
+    "path": "b.txt",
+    "text": "bee\nlater\n"
+   },
+   {
+    "msg": "later",
+    "op": "commit"
+   },
+   {
+    "args": [
+     "push",
+     "-q",
+     "origin",
+     "main"
+    ],
+    "op": "git"
+   },
+   {
+    "args": [
+     "fetch",
+     "-q",
+     "origin"
+    ],
+    "op": "git"
+   }
+  ],
+  "modes": [
+   {
+    "op": "write",
+    "path": "a.txt",
+    "text": "one\ntwo\n"
+   },
+   {
+    "op": "write",
+    "path": "b.txt",
+    "text": "bee\n"
+   },
+   {
+    "op": "write",
+    "path": "dir/c.txt",
+    "text": "see\n"
+   },
+   {
+    "op": "write",
+    "path": "docs/readme.md",
+    "text": "# r\n"
+   },
+   {
+    "msg": "base",
+    "op": "commit"
+   },
+   {
+    "args": [
+     "checkout",
+     "-q",
+     "-b",
+     "feat"
+    ],
+    "op": "git"
+   },
+   {
+    "op": "write",
+    "path": "run.sh",
+    "text": "#!/bin/sh\n"
+   },
+   {
+    "op": "chmod",
+    "path": "run.sh"
+   },
+   {
+    "op": "symlink",
+    "path": "ln",
+    "to": "a.txt"
+   },
+   {
+    "msg": "pr work",
+    "op": "commit"
+   },
+   {
+    "args": [
+     "checkout",
+     "-q",
+     "main"
+    ],
+    "op": "git"
+   },
+   {
+    "args": [
+     "merge",
+     "-q",
+     "--no-ff",
+     "feat",
+     "-m",
+     "merge pr"
+    ],
+    "op": "git"
+   },
+   {
+    "args": [
+     "tag",
+     "m1"
+    ],
+    "op": "git"
+   },
+   {
+    "args": [
+     "push",
+     "-q",
+     "origin",
+     "main"
+    ],
+    "op": "git"
+   },
+   {
+    "args": [
+     "fetch",
+     "-q",
+     "origin"
+    ],
+    "op": "git"
+   }
+  ],
+  "nonutf8": [
+   {
+    "op": "write",
+    "path": "a.txt",
+    "text": "one\ntwo\n"
+   },
+   {
+    "op": "write",
+    "path": "b.txt",
+    "text": "bee\n"
+   },
+   {
+    "op": "write",
+    "path": "dir/c.txt",
+    "text": "see\n"
+   },
+   {
+    "op": "write",
+    "path": "docs/readme.md",
+    "text": "# r\n"
+   },
+   {
+    "msg": "base",
+    "op": "commit"
+   },
+   {
+    "args": [
+     "checkout",
+     "-q",
+     "-b",
+     "feat"
+    ],
+    "op": "git"
+   },
+   {
+    "op": "writeb",
+    "path_hex": "ff2e747874",
+    "text": "z\n"
+   },
+   {
+    "op": "write",
+    "path": "a.txt",
+    "text": "x\n"
+   },
+   {
+    "msg": "pr work",
+    "op": "commit"
+   },
+   {
+    "args": [
+     "checkout",
+     "-q",
+     "main"
+    ],
+    "op": "git"
+   },
+   {
+    "args": [
+     "merge",
+     "-q",
+     "--no-ff",
+     "feat",
+     "-m",
+     "merge pr"
+    ],
+    "op": "git"
+   },
+   {
+    "args": [
+     "tag",
+     "m1"
+    ],
+    "op": "git"
+   },
+   {
+    "args": [
+     "push",
+     "-q",
+     "origin",
+     "main"
+    ],
+    "op": "git"
+   },
+   {
+    "args": [
+     "fetch",
+     "-q",
+     "origin"
+    ],
+    "op": "git"
+   }
+  ],
+  "renamed": [
+   {
+    "op": "write",
+    "path": "a.txt",
+    "text": "one\ntwo\n"
+   },
+   {
+    "op": "write",
+    "path": "b.txt",
+    "text": "bee\n"
+   },
+   {
+    "op": "write",
+    "path": "dir/c.txt",
+    "text": "see\n"
+   },
+   {
+    "op": "write",
+    "path": "docs/readme.md",
+    "text": "# r\n"
+   },
+   {
+    "msg": "base",
+    "op": "commit"
+   },
+   {
+    "args": [
+     "checkout",
+     "-q",
+     "-b",
+     "feat"
+    ],
+    "op": "git"
+   },
+   {
+    "op": "write",
+    "path": "a.txt",
+    "text": "one\ntwo\nthree\n"
+   },
+   {
+    "op": "write",
+    "path": "new.txt",
+    "text": "n\n"
+   },
+   {
+    "op": "write",
+    "path": "dir/c.txt",
+    "text": "see\nmore\n"
+   },
+   {
+    "msg": "pr work",
+    "op": "commit"
+   },
+   {
+    "args": [
+     "checkout",
+     "-q",
+     "main"
+    ],
+    "op": "git"
+   },
+   {
+    "args": [
+     "merge",
+     "-q",
+     "--no-ff",
+     "feat",
+     "-m",
+     "merge pr"
+    ],
+    "op": "git"
+   },
+   {
+    "args": [
+     "tag",
+     "m1"
+    ],
+    "op": "git"
+   },
+   {
+    "args": [
+     "mv",
+     "a.txt",
+     "a2.txt"
+    ],
+    "op": "git"
+   },
+   {
+    "msg": "rename",
+    "op": "commit"
+   },
+   {
+    "args": [
+     "push",
+     "-q",
+     "origin",
+     "main"
+    ],
+    "op": "git"
+   },
+   {
+    "args": [
+     "fetch",
+     "-q",
+     "origin"
+    ],
+    "op": "git"
+   }
+  ],
+  "unicode": [
+   {
+    "op": "write",
+    "path": "a.txt",
+    "text": "one\ntwo\n"
+   },
+   {
+    "op": "write",
+    "path": "b.txt",
+    "text": "bee\n"
+   },
+   {
+    "op": "write",
+    "path": "dir/c.txt",
+    "text": "see\n"
+   },
+   {
+    "op": "write",
+    "path": "docs/readme.md",
+    "text": "# r\n"
+   },
+   {
+    "msg": "base",
+    "op": "commit"
+   },
+   {
+    "args": [
+     "checkout",
+     "-q",
+     "-b",
+     "feat"
+    ],
+    "op": "git"
+   },
+   {
+    "op": "write",
+    "path": "\u00e9.txt",
+    "text": "e\n"
+   },
+   {
+    "op": "write",
+    "path": "a.txt",
+    "text": "x\n"
+   },
+   {
+    "msg": "pr work",
+    "op": "commit"
+   },
+   {
+    "args": [
+     "checkout",
+     "-q",
+     "main"
+    ],
+    "op": "git"
+   },
+   {
+    "args": [
+     "merge",
+     "-q",
+     "--no-ff",
+     "feat",
+     "-m",
+     "merge pr"
+    ],
+    "op": "git"
+   },
+   {
+    "args": [
+     "tag",
+     "m1"
+    ],
+    "op": "git"
+   },
+   {
+    "args": [
+     "push",
+     "-q",
+     "origin",
+     "main"
+    ],
+    "op": "git"
+   },
+   {
+    "args": [
+     "fetch",
+     "-q",
+     "origin"
+    ],
+    "op": "git"
+   }
+  ]
+ },
+ "schema": "crq-build-synthetic-oracle/1",
+ "source": "apps/crq-python/crq.py:1102"
+}

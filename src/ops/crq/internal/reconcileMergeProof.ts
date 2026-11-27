@@ -4,7 +4,7 @@
  * Port of the proof selection in `repair_tick.reconcile_fix_prs`: canonical terminal
  * ledger truth first, then a saved journal revalidation, then merge-head evidence.
  * It reuses `canonicalFixedEvents`, `validateFixedPublicationEvidence` and
- * `mergeHeadEvidence`; every read is injected. Not wired into a tick.
+ * `mergeHeadEvidence`; every read is injected.
  */
 import { JsonObject, type JsonValue } from '../../../policy/crq/jsonValue.js';
 import { ledgerValueEqual } from '../../../policy/crq/ledger.js';
@@ -153,7 +153,8 @@ export async function canonicalProof(
 }
 
 /**
- * The `try` block that selects the merge proof. Throws when a proof exists but is
+ * The `try` block that selects the merge proof. `merge` is the forge merge commit the
+ * caller already bound to the promoted ref; merge-head evidence compares its tree. Throws when a proof exists but is
  * invalid. Returns `{ proof: null }` when the run has no recorded publication head:
  * `repair_tick` parity, where an unpublished run has no other finalization route.
  */
@@ -162,6 +163,7 @@ export async function proveMerge(
   record: JsonObject,
   info: JsonObject,
   effects: MergeProofEffects,
+  merge: string,
 ): Promise<MergeProof> {
   const projected = await canonicalProof(record, info, effects);
   if (projected !== null) {
@@ -202,6 +204,7 @@ export async function proveMerge(
     {
       published: typeof published === 'string' && published ? published : undefined,
       actual: typeof actual === 'string' ? actual : '',
+      merge,
       commits: strings(object(publication).get('commits')),
       anchors,
     },

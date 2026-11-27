@@ -9,6 +9,7 @@ import json
 import os
 import pathlib
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -51,6 +52,12 @@ SNAPSHOT_PATHS = (
 )
 
 
+def DRIVE(overlay):
+    """A QEMU command line (NUL-delimited) whose drive file is `overlay`."""
+    return (b"qemu\0-drive\0file=" + str(overlay).encode()
+            + b",if=virtio,format=qcow2\0")
+
+
 class SumsTests(unittest.TestCase):
     def test_single_entry(self):
         self.assertEqual(vm.sums_digest(SUM, vm.IMAGE_NAME), DIGEST)
@@ -88,20 +95,32 @@ class StopOwnedProcessTests(unittest.TestCase):
     def _stop(self, active_state, *, purge=True, stop_rc=0, show_rc=0,
               load_state="loaded", run_id="r1"):
         with tempfile.TemporaryDirectory() as tmp:
-            run_dir = pathlib.Path(tmp) / "runs" / "r1"
+            run_dir = pathlib.Path(tmp).resolve() / "runs" / "r1"
             run_dir.mkdir(parents=True)
             (run_dir / "overlay.qcow2").write_text("disk")
 
             self.dispatched = []
+            self.derived_unit = vm.run_scope_unit(run_dir, run_id) + ".scope"
 
             def fake_run(argv, **kwargs):
                 self.dispatched.append(argv)
                 if "show" in argv:
-                    out = "ActiveState=%s\nLoadState=%s\n" % (active_state, load_state)
+                    # Only the derived unit exists; the legacy name is absent.
+                    state = load_state if argv[-1] == self.derived_unit else "not-found"
+                    out = ("ActiveState=%s\nLoadState=%s\nControlGroup=/user.slice/%s\n"
+                           % (active_state, state, argv[-1]))
                     return mock.Mock(returncode=show_rc, stdout=out, stderr="")
                 return mock.Mock(returncode=stop_rc, stdout="", stderr="")
 
-            with mock.patch.object(vm.subprocess, "run", side_effect=fake_run):
+            # The loaded scope holds one member owned by this run (its cmdline
+            # carries the overlay path), so a populated scope still dispatches
+            # the stop and the post-stop query sees the scope emptied.
+            members = iter([[4242], []])
+            with mock.patch.object(vm.subprocess, "run", side_effect=fake_run), \
+                 mock.patch.object(vm, "_cgroup_pids",
+                                   side_effect=lambda *_: next(members)), \
+                 mock.patch.object(pathlib.Path, "read_bytes",
+                                   return_value=DRIVE(run_dir / "overlay.qcow2")):
                 result = vm.stop_owned_process(
                     {"path": str(run_dir), "run_id": run_id}, purge=purge)
             return result, (run_dir / "overlay.qcow2").exists()
@@ -111,18 +130,24 @@ class StopOwnedProcessTests(unittest.TestCase):
         self.assertTrue(result["stopped"])
         self.assertFalse(still_there)
         show = ["systemctl", "--user", "show", "-p", "ActiveState", "-p", "LoadState",
-                "-p", "ControlGroup", "crq-vm-r1.scope"]
-        stop = ["systemctl", "--user", "stop", "crq-vm-r1.scope"]
+                "-p", "ControlGroup", self.derived_unit]
+        stop = ["systemctl", "--user", "stop", self.derived_unit]
         # Ownership proof first, then the stop, then the post-stop state query.
-        self.assertEqual(self.dispatched, [show, stop, show])
+        legacy = ["systemctl", "--user", "show", "-p", "ActiveState", "-p", "LoadState",
+                  "-p", "ControlGroup", "crq-vm-r1.scope"]
+        # The legacy-named scope is checked last and found absent.
+        self.assertEqual(self.dispatched, [show, stop, show, legacy])
 
     def test_failed_scope_is_stopped(self):
         result, _ = self._stop("failed")
         self.assertTrue(result["stopped"])
 
-    def test_unloaded_unit_counts_as_stopped_even_if_stop_fails(self):
+    def test_unloaded_unit_is_counted_stopped_without_a_stop_command(self):
         result, _ = self._stop("inactive", stop_rc=5, load_state="not-found")
         self.assertTrue(result["stopped"])
+        # An absent scope is never given a stop command: another launch could
+        # register a scope with the same name between the check and the stop.
+        self.assertFalse(any("stop" in argv for argv in self.dispatched))
 
     def test_failed_scope_query_never_dispatches_stop(self):
         with self.assertRaises(RuntimeError):
@@ -131,7 +156,7 @@ class StopOwnedProcessTests(unittest.TestCase):
 
     def test_indeterminate_membership_never_dispatches_stop(self):
         with tempfile.TemporaryDirectory() as tmp:
-            run_dir = pathlib.Path(tmp) / "runs" / "r1"
+            run_dir = pathlib.Path(tmp).resolve() / "runs" / "r1"
             run_dir.mkdir(parents=True)
             calls = []
 
@@ -168,25 +193,27 @@ class StopOwnedProcessTests(unittest.TestCase):
             self._stop("inactive", run_id="*")
         self.assertEqual(self.dispatched, [])
 
-    def _scoped(self, *, members, owned, cgroup_after):
+    def _scoped(self, *, members, owned, cgroup_after, load_state="loaded"):
         """Derived-scope stop where the cgroup holds `members` before and
         `cgroup_after` after the stop; `owned` says if their cmdline matches."""
         with tempfile.TemporaryDirectory() as tmp:
-            run_dir = pathlib.Path(tmp) / "runs" / "r1"
+            run_dir = pathlib.Path(tmp).resolve() / "runs" / "r1"
             run_dir.mkdir(parents=True)
             (run_dir / "overlay.qcow2").write_text("disk")
             calls = []
+            unit = vm.run_scope_unit(run_dir, "r1") + ".scope"
 
             def fake_run(argv, **kwargs):
                 calls.append(argv)
                 if "show" in argv:
-                    out = ("ActiveState=failed\nLoadState=loaded\n"
-                           "ControlGroup=/user.slice/crq-vm-r1.scope\n")
+                    state = load_state if argv[-1] == unit else "not-found"
+                    out = ("ActiveState=failed\nLoadState=%s\n"
+                           "ControlGroup=/user.slice/%s\n" % (state, argv[-1]))
                     return mock.Mock(returncode=0, stdout=out, stderr="")
                 return mock.Mock(returncode=0, stdout="", stderr="")
 
             pids = iter([members, cgroup_after])
-            command = (str(run_dir / "overlay.qcow2") if owned else "other").encode()
+            command = DRIVE(run_dir / "overlay.qcow2") if owned else b"other"
             with mock.patch.object(vm.subprocess, "run", side_effect=fake_run), \
                  mock.patch.object(vm, "_cgroup_pids", side_effect=lambda *_: next(pids)), \
                  mock.patch.object(pathlib.Path, "read_bytes", return_value=command):
@@ -194,40 +221,64 @@ class StopOwnedProcessTests(unittest.TestCase):
                     result = vm.stop_owned_process(
                         {"path": str(run_dir), "run_id": "r1"}, purge=True)
                 except RuntimeError as exc:
-                    return exc, calls, (run_dir / "overlay.qcow2").exists()
-            return result, calls, (run_dir / "overlay.qcow2").exists()
+                    return exc, calls, (run_dir / "overlay.qcow2").exists(), unit
+            return result, calls, (run_dir / "overlay.qcow2").exists(), unit
 
     def test_scope_with_foreign_members_is_never_stopped(self):
-        error, calls, still_there = self._scoped(members=[4242], owned=False,
-                                                 cgroup_after=[])
+        error, calls, still_there, unit = self._scoped(members=[4242], owned=False,
+                                                       cgroup_after=[])
         self.assertIsInstance(error, RuntimeError)
         self.assertFalse(any("stop" in argv for argv in calls))
         self.assertEqual(
             calls, [["systemctl", "--user", "show", "-p", "ActiveState", "-p", "LoadState",
-                     "-p", "ControlGroup", "crq-vm-r1.scope"]])
+                     "-p", "ControlGroup", unit]])
         self.assertTrue(still_there)
 
     def test_failed_scope_with_populated_cgroup_keeps_files(self):
-        result, _, still_there = self._scoped(members=[4242], owned=True,
-                                              cgroup_after=[4242])
+        result, _, still_there, _ = self._scoped(members=[4242], owned=True,
+                                                 cgroup_after=[4242])
         self.assertFalse(result["stopped"])
         self.assertTrue(still_there)
 
     def test_failed_scope_with_empty_cgroup_is_purged(self):
-        result, _, still_there = self._scoped(members=[4242], owned=True,
-                                              cgroup_after=[])
+        result, _, still_there, _ = self._scoped(members=[4242], owned=True,
+                                                 cgroup_after=[])
         self.assertTrue(result["stopped"])
         self.assertFalse(still_there)
 
     def test_unknown_cgroup_state_keeps_files(self):
-        result, _, still_there = self._scoped(members=[4242], owned=True,
-                                              cgroup_after=None)
+        result, _, still_there, _ = self._scoped(members=[4242], owned=True,
+                                                 cgroup_after=None)
         self.assertFalse(result["stopped"])
         self.assertTrue(still_there)
 
+    def test_absent_scope_is_never_stopped(self):
+        result, calls, still_there, unit = self._scoped(
+            members=[], owned=True, cgroup_after=[], load_state="not-found")
+        self.assertTrue(result["stopped"])
+        self.assertFalse(any("stop" in argv for argv in calls))
+        self.assertEqual(
+            calls, [["systemctl", "--user", "show", "-p", "ActiveState", "-p", "LoadState",
+                     "-p", "ControlGroup", unit],
+                     ["systemctl", "--user", "show", "-p", "ActiveState", "-p", "LoadState",
+                      "-p", "ControlGroup", "crq-vm-r1.scope"]])
+        self.assertFalse(still_there)
+
+    def test_empty_scope_is_never_stopped(self):
+        result, calls, still_there, unit = self._scoped(
+            members=[], owned=True, cgroup_after=[])
+        self.assertTrue(result["stopped"])
+        self.assertFalse(any("stop" in argv for argv in calls))
+        self.assertEqual(
+            calls, [["systemctl", "--user", "show", "-p", "ActiveState", "-p", "LoadState",
+                     "-p", "ControlGroup", unit],
+                     ["systemctl", "--user", "show", "-p", "ActiveState", "-p", "LoadState",
+                      "-p", "ControlGroup", "crq-vm-r1.scope"]])
+        self.assertFalse(still_there)
+
     def test_busy_run_lock_blocks_stop_before_any_systemctl(self):
         with tempfile.TemporaryDirectory() as tmp:
-            run_dir = pathlib.Path(tmp) / "runs" / "r1"
+            run_dir = pathlib.Path(tmp).resolve() / "runs" / "r1"
             run_dir.mkdir(parents=True)
             with vm.run_lock(run_dir):
                 with mock.patch.object(vm.subprocess, "run") as dispatch:
@@ -248,6 +299,106 @@ class StopOwnedProcessTests(unittest.TestCase):
             for bad in ("*", "..", "a/b", "", "-x"):
                 with self.assertRaises(ValueError):
                     vm.load_run(pathlib.Path(tmp), bad, require_process=False)
+
+class LegacyScopeTests(unittest.TestCase):
+    """Interrupted launches from before the scope name bound the run directory."""
+
+    def _destroy(self, *, new, legacy, alias=False, owned_cmdline=True, foreign=None):
+        """`new`/`legacy`: (members before the stop, members after) or None for
+        an absent scope. Nothing real runs: systemctl and /proc are faked."""
+        with tempfile.TemporaryDirectory() as tmp:
+            real = pathlib.Path(tmp).resolve() / "runs" / "r1"
+            real.mkdir(parents=True)
+            (real / "overlay.qcow2").write_text("disk")
+            path = real
+            if alias:
+                path = pathlib.Path(tmp).resolve() / "runs" / "alias"
+                path.symlink_to(real)
+            new_unit = vm.run_scope_unit(real, "r1") + ".scope"
+            units = {new_unit: new, "crq-vm-r1.scope": legacy}
+            stopped_units = set()
+            calls = []
+
+            def fake_run(argv, **kwargs):
+                calls.append(argv)
+                unit = argv[-1]
+                if "stop" in argv:
+                    stopped_units.add(unit)
+                    return mock.Mock(returncode=0, stdout="", stderr="")
+                state = units[unit]
+                load = "not-found" if state is None else "loaded"
+                return mock.Mock(returncode=0, stderr="", stdout=(
+                    "ActiveState=failed\nLoadState=%s\nControlGroup=/user.slice/%s\n"
+                    % (load, unit)))
+
+            def pids(group):
+                unit = str(group).rsplit("/", 1)[-1]
+                state = units[unit]
+                if state is None:
+                    return []
+                return state[1] if unit in stopped_units else state[0]
+
+            cmdline = DRIVE(real / "overlay.qcow2") if owned_cmdline else b"other"
+            if foreign:  # another run's overlay path extending this one
+                cmdline = DRIVE(str(real / "overlay.qcow2") + foreign + str(real / "overlay.qcow2"))
+            with mock.patch.object(vm.subprocess, "run", side_effect=fake_run), \
+                 mock.patch.object(vm, "_cgroup_pids", side_effect=pids), \
+                 mock.patch.object(pathlib.Path, "read_bytes", return_value=cmdline):
+                result = vm.stop_owned_process(
+                    {"path": str(path), "run_id": "r1"}, purge=True)
+            return result, calls, stopped_units, (real / "overlay.qcow2").exists(), new_unit
+
+    def test_owned_legacy_scope_is_stopped_before_reporting_stopped(self):
+        result, calls, stopped, still_there, _ = self._destroy(
+            new=None, legacy=([4242], []))
+        self.assertEqual(stopped, {"crq-vm-r1.scope"})
+        self.assertTrue(result["stopped"])
+        self.assertFalse(still_there)
+
+    def test_owned_legacy_scope_that_stays_populated_keeps_the_files(self):
+        result, _, stopped, still_there, _ = self._destroy(
+            new=None, legacy=([4242], [4242]))
+        self.assertEqual(stopped, {"crq-vm-r1.scope"})
+        self.assertFalse(result["stopped"])
+        self.assertTrue(still_there)
+
+    def test_unrelated_legacy_scope_is_left_untouched(self):
+        # Another state directory owns the shared legacy name.
+        result, calls, stopped, still_there, _ = self._destroy(
+            new=None, legacy=([4242], [4242]), owned_cmdline=False)
+        self.assertEqual(stopped, set())
+        self.assertTrue(result["stopped"])
+        self.assertFalse(still_there)
+
+    def test_foreign_overlay_extending_the_selected_path_is_not_owned(self):
+        # `file=<run>/overlay.qcow2-backup/<run>/overlay.qcow2` merely contains
+        # this run's overlay path; the legacy scope stays untouched, no stop.
+        result, calls, stopped, still_there, _ = self._destroy(
+            new=None, legacy=([4242], [4242]), foreign="-backup")
+        self.assertEqual(stopped, set())
+        self.assertFalse(any("stop" in c for c in calls))
+        self.assertTrue(result["stopped"])
+        self.assertFalse(still_there)
+
+    def test_hashed_scope_behaviour_is_preserved(self):
+        result, _, stopped, _, new_unit = self._destroy(
+            new=([4242], []), legacy=None)
+        self.assertEqual(stopped, {new_unit})
+        self.assertTrue(result["stopped"])
+
+    def test_hashed_scope_with_foreign_members_still_refuses(self):
+        with self.assertRaises(RuntimeError):
+            self._destroy(new=([4242], [4242]), legacy=None, owned_cmdline=False)
+
+    def test_run_path_alias_is_proven_against_the_canonical_overlay(self):
+        # QEMU's command line carries the resolved overlay path, never the
+        # symlinked run directory, so the ownership needle must be resolved.
+        result, _, stopped, still_there, new_unit = self._destroy(
+            new=([4242], []), legacy=None, alias=True)
+        self.assertEqual(stopped, {new_unit})
+        self.assertTrue(result["stopped"])
+        self.assertFalse(still_there)
+
 
 
 class DownloadTests(unittest.TestCase):
@@ -368,12 +519,25 @@ class FetchImageTests(unittest.TestCase):
     def test_fetch_holds_an_exclusive_lock_on_the_images_directory(self):
         with tempfile.TemporaryDirectory() as temporary:
             state = pathlib.Path(temporary)
+
+            def check_lock(images, recorder):
+                # Assert from inside the fetch: the lock must already be held
+                # exclusively on the images-directory lock file and must not
+                # have been released while the fetch runs.
+                self.assertEqual(flock.call_count, 1)
+                fd, mode = flock.call_args.args
+                self.assertEqual(mode, vm.fcntl.LOCK_EX)
+                locked = os.fstat(fd)
+                expected = (images / ".fetch.lock").stat()
+                self.assertEqual((locked.st_dev, locked.st_ino),
+                                 (expected.st_dev, expected.st_ino))
+                return {"ok": 1}
+
             with mock.patch.object(vm.fcntl, "flock") as flock, \
                     mock.patch.object(vm, "_fetch_image_locked",
-                                      return_value={"ok": 1}):
+                                      side_effect=check_lock):
                 self.assertEqual(vm.fetch_image(state, vm.Recorder(state)),
                                  {"ok": 1})
-            self.assertEqual(flock.call_args.args[1], vm.fcntl.LOCK_EX)
 
     def test_digest_mismatch_removes_the_unverified_partial_file(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -514,6 +678,19 @@ class BoundsTests(unittest.TestCase):
         self.assertIn("MemorySwapMax=0", argv)
         self.assertEqual(argv[-1], "qemu-system-x86_64")
 
+    def test_scope_name_binds_the_canonical_run_directory(self):
+        with tempfile.TemporaryDirectory() as first, \
+                tempfile.TemporaryDirectory() as second:
+            one = vm.run_scope_unit(pathlib.Path(first) / "runs" / "r1", "r1")
+            two = vm.run_scope_unit(pathlib.Path(second) / "runs" / "r1", "r1")
+            # The same run id under two state directories must derive two
+            # different scopes: the run id alone does not prove ownership.
+            self.assertNotEqual(one, two)
+            self.assertNotEqual(one, "crq-vm-r1")
+            self.assertEqual(one,
+                             vm.run_scope_unit(pathlib.Path(first) / "runs" / "r1", "r1"))
+            self.assertTrue(one.startswith("crq-vm-r1-"))
+
     def test_memory_floor(self):
         meminfo = "MemTotal: 8000000 kB\nMemAvailable: 3000000 kB\n"
         self.assertEqual(vm.require_memory(meminfo), 3000000)
@@ -559,18 +736,18 @@ class ProcessIdentityTests(unittest.TestCase):
 
     def test_matching_process(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = self._proc(temporary, 123, "4242", b"qemu\0/run/overlay.qcow2\0")
+            root = self._proc(temporary, 123, "4242", DRIVE("/run/overlay.qcow2"))
             self.assertTrue(vm.process_matches(123, "4242", "/run/overlay.qcow2", root))
             self.assertEqual(vm.process_starttime(123, root), "4242")
 
     def test_starttime_mismatch_refuses(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = self._proc(temporary, 123, "4242", b"qemu\0/run/overlay.qcow2\0")
+            root = self._proc(temporary, 123, "4242", DRIVE("/run/overlay.qcow2"))
             self.assertFalse(vm.process_matches(123, "9999", "/run/overlay.qcow2", root))
 
     def test_wrong_overlay_refuses(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = self._proc(temporary, 123, "4242", b"qemu\0/other/overlay.qcow2\0")
+            root = self._proc(temporary, 123, "4242", DRIVE("/other/overlay.qcow2"))
             self.assertFalse(vm.process_matches(123, "4242", "/run/overlay.qcow2", root))
 
     def test_dead_or_unsafe_pid_refuses(self):
@@ -848,6 +1025,86 @@ class LifecycleTests(unittest.TestCase):
             self.assertFalse((run / "executed-host-script.py").exists())
             self.assertFalse((run / "executed-guest-probe.py").exists())
 
+    def _committed_probe_repo(self, repo, host_bytes):
+        """Commit the two scripts (``host_bytes`` is the host content) and
+        return the commit id whose blobs a run must match."""
+        repo = pathlib.Path(repo)
+        repo.mkdir(parents=True, exist_ok=True)
+        (repo / "vm-feasibility.py").write_bytes(host_bytes)
+        (repo / "vm-guest-probe.py").write_bytes(
+            (OPS / "vm-guest-probe.py").read_bytes())
+
+        def git(*argv):
+            subprocess.run(["git", *argv], cwd=str(repo), check=True,
+                           capture_output=True)
+        git("init", "-q")
+        git("-c", "user.email=probe@example.com",
+            "-c", "user.name=probe", "add", ".")
+        git("-c", "user.email=probe@example.com",
+            "-c", "user.name=probe", "commit", "-q", "--no-verify",
+            "-m", "probe")
+        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo),
+                              check=True, capture_output=True).stdout.decode().strip()
+
+    def _run_probe_cli(self, script, state, commit):
+        return subprocess.run(
+            [sys.executable, str(script), "--source-commit", commit,
+             "--state-dir", str(state), "--json", "run"],
+            capture_output=True, text=True, timeout=120)
+
+    def test_run_refuses_modified_bytes_before_any_preparation(self):
+        # A modified host script must be refused at launch, before the
+        # pipeline it carries can run: the launcher verifies the buffer it
+        # is about to execute against the stated commit first.
+        source = (OPS / "vm-feasibility.py").read_bytes()
+        modified = source.replace(
+            b'    recorder = Recorder(state)\n'
+            b'    stamps = {"start": host_stamp()}\n',
+            b'    raise RuntimeError("verified-launch-reached-pipeline")\n')
+        self.assertNotEqual(modified, source)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            repo = root / "repo"
+            commit = self._committed_probe_repo(repo, source)
+            (repo / "vm-feasibility.py").write_bytes(modified)
+            state = root / "state"
+            result = self._run_probe_cli(repo / "vm-feasibility.py", state,
+                                         commit)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr, "")
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["error"]["kind"], "thrown")
+        self.assertIn("vm-feasibility.py differs from its blob",
+                      payload["error"]["message"])
+        self.assertNotIn("verified-launch-reached-pipeline",
+                         payload["error"]["message"])
+        self.assertFalse((state / "runs").exists())
+
+    def test_run_pipeline_executes_from_the_verified_host_buffer(self):
+        # The executed pipeline must be the verified buffer itself, not the
+        # bytes the interpreter happened to load: the launcher hands the
+        # buffer to the relaunched module, which carries it in its namespace.
+        source = (OPS / "vm-feasibility.py").read_bytes()
+        modified = source.replace(
+            b'    recorder = Recorder(state)\n'
+            b'    stamps = {"start": host_stamp()}\n',
+            b'    if "_VERIFIED_HOST_BUFFER" not in globals():\n'
+            b'        raise SystemExit(9)\n'
+            b'    raise RuntimeError("verified-buffer-ran-the-pipeline")\n')
+        self.assertNotEqual(modified, source)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            repo = root / "repo"
+            commit = self._committed_probe_repo(repo, modified)
+            result = self._run_probe_cli(repo / "vm-feasibility.py",
+                                         root / "state", commit)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr, "")
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["error"]["kind"], "thrown")
+        self.assertEqual(payload["error"]["message"],
+                         "verified-buffer-ran-the-pipeline")
+
     def test_verify_source_scripts_against_a_real_commit(self):
         def git(cwd, *argv):
             subprocess.run(["git", *argv], cwd=str(cwd), check=True,
@@ -864,7 +1121,7 @@ class LifecycleTests(unittest.TestCase):
                 "-c", "user.name=probe", "add", ".")
             git(root, "-c", "user.email=probe@example.com",
                 "-c", "user.name=probe", "commit", "-q", "--no-verify",
-                "-m", "probe")
+                "--no-gpg-sign", "-m", "probe")
             commit = subprocess.run(["git", "rev-parse", "HEAD"],
                                     cwd=str(root), check=True,
                                     capture_output=True).stdout.decode().strip()
@@ -1560,6 +1817,10 @@ class EvidenceTests(unittest.TestCase):
         guest = pathlib.Path(base) / "executed-guest-probe.py"
         host.write_bytes(b"host bytes")
         guest.write_bytes(b"guest bytes")
+        stamp = {"at": "2024-01-01T00:00:00Z", "hostname": "probe-host",
+                 "kernel": "6.8.0-40-generic", "uptime_seconds": 3600.0,
+                 "load1": 0.05, "load5": 0.1, "load15": 0.15,
+                 "mem_available_kib": 4194304, "kvm_writable": True}
         return {
             "schema_version": vm.REPORT_SCHEMA,
             "image": {"sha256": DIGEST, "sums_verified": True,
@@ -1572,6 +1833,7 @@ class EvidenceTests(unittest.TestCase):
                                  "sha256": vm.sha256_file(guest),
                                  "remote_sha256": vm.sha256_file(guest),
                                  "verified": True}},
+            "host_stamps": {name: dict(stamp) for name in vm.REQUIRED_STAMPS},
             "phases": phases,
             "manager_restart": manager,
             "reboot": reboot,
@@ -1598,6 +1860,23 @@ class EvidenceTests(unittest.TestCase):
             problems = vm.verify_report(report, pathlib.Path(temporary))
             self.assertIn(
                 "provenance host_script artifact digest does not match", problems)
+
+    def test_verify_requires_host_load_stamps(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            report = self._bound_report(temporary)
+            self.assertEqual(vm.verify_report(report, pathlib.Path(temporary)), [])
+            stripped = json.loads(json.dumps(report))
+            del stripped["host_stamps"]
+            self.assertIn("host_stamps missing",
+                          vm.verify_report(stripped, pathlib.Path(temporary)))
+            partial = json.loads(json.dumps(report))
+            del partial["host_stamps"]["finish"]
+            self.assertIn("host stamp missing: finish",
+                          vm.verify_report(partial, pathlib.Path(temporary)))
+            fieldless = json.loads(json.dumps(report))
+            del fieldless["host_stamps"]["start"]["load1"]
+            self.assertIn("host stamp start lacks load1",
+                          vm.verify_report(fieldless, pathlib.Path(temporary)))
 
     def test_post_boundary_activation_refusal_is_required(self):
         phases = self._phases()

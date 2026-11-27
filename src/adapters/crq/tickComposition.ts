@@ -35,7 +35,11 @@ import {
   FixPrBacklog,
   refreshFixPrBacklog,
 } from '../../queue-runner/fixPrBacklog.js';
-import { repairArchiveLegacy, repairBackfill } from '../../queue-runner/repairBackfill.js';
+import {
+  repairArchiveLegacy,
+  repairBackfill,
+  repairEnqueue,
+} from '../../queue-runner/repairBackfill.js';
 import type { Item, Queue } from '../../queue-runner/repairBackfill.js';
 import type { HarvestReviewEffects } from '../../queue-runner/harvestReview.js';
 import { runReconcilePhase } from '../../queue-runner/tickDiscoveryPhase.js';
@@ -45,6 +49,8 @@ import type { GhFn } from '../forge-github/gh.js';
 import { composeTickPhases, type ComposeInput, type RemainingPhaseNames } from './composeTick.js';
 import { fileFixPrBacklogEffects } from './fixPrBacklogSource.js';
 import { createHarvestPhases, type LocalReviewJsonSeams } from './harvestWiring.js';
+import { fileHarvestReviewEffects, type HarvestReviewFileEffects } from './harvestReviewEffects.js';
+import type { GitPool } from './gitExec.js';
 import { fileHarvestRunReads } from './harvestRunReads.js';
 import { fileLocalReviewPublishEffects } from './localReviewPublish.js';
 import { readBackfillRollout } from './backfillRollout.js';
@@ -130,42 +136,41 @@ export const STAGED_GAPS: readonly TickGap[] = [
     phases: ['harvestItems', 'collectFinished'],
     python: 'harvest_review (crq.py:2619)',
     missing:
-      'no file-backed HarvestReviewEffects beyond the run-artifact reads: findings.md for non-local kinds, ' +
-      'removeWorktree, writeReceipt, repairEnqueue, backfillHarvest, requestPrReview and the coverage seam',
+      'fileHarvestReviewEffects binds findings.md for non-local kinds, removeWorktree, writeReceipt and ' +
+      'requestPrReview; the coverage seam stays injected, repairEnqueue is bound ' +
+      'only when the repairBackfill input (git, config) is supplied, and backfillHarvest is bound by backfillHarvestEffect (src/adapters/crq/backfillHarvestEffect.ts, differentially pinned, not routed) over the injected git, outbox, inbox, store, state_event, queue save and cleanup, but not the Python unverified-terminal retain strings or the quota-cause/no-cooldown outcomes, which throw; ' +
+      'the coverage seam has no harvest-side implementation (start-one CoverageEffects)',
   },
   {
     id: 'repair-harvest-effects',
     phases: ['harvestItems'],
     python: 'repair_tick.harvest (repair_tick.py:422)',
     missing:
-      'only the job/result reads are file-backed; worktree, verify, mechanical, markFindingOutcome, ' +
-      'cleanupHarvested and publish have no binding',
+      'file-backed: markFindingOutcome and recordUnpublishedFixedSibling (fileRepairOutcomeEffects) ' +
+      'and cleanupHarvested (fileRepairCleanup), none composed into the tick; the job/result reads ' +
+      'are bound in repairHarvestReads.ts; ' +
+      'bound offline, none composed into the tick or routed: makeWorktree/removeWorktree, verify and ' +
+      'mechanical (repairHarvestRunners.ts), requireCanonicalDelivery, saveQueue and replayBudget ' +
+      '(repairHarvestState.ts), publish (repairHarvestPublish.ts); ' +
+      'bound offline, differentially pinned, not composed or routed (repairHarvestForge.ts): the gh pr create ' +
+      'write, newItem with its clock and the save_queue admission-history compaction log (its loader half, ' +
+      'pendingCompactionLoader, is bound offline and pinned too, but the production loadQueueDocument ' +
+      'still refuses a queue needing compaction, so no runtime caller records one); the forge reads and the gitleaks invocation are pinned ' +
+      'against fakes but need a live gh, token and gitleaks at runtime',
   },
   {
     id: 'start-one-effects',
     phases: ['admit.startOne'],
     python: 'start_one, launch (crq.py:3198/:2004)',
     missing:
-      'per-kind LaunchEffects and CoverageEffects (measureMerged, buildSynthetic, legacyOrigins) have no implementation',
-  },
-  {
-    id: 'review-child',
-    phases: ['admit.startOne'],
-    python: 'cmd_review_child, python3 crq.py _review <run_id> (crq.py:2202/:2150)',
-    missing:
-      '`_review` is not routed in the TS runner; runReviewChild lacks --foreground, the tick kick and backfill proof',
-  },
-  {
-    id: 'repair-parity',
-    phases: ['repairBackfill', 'archiveLegacy', 'harvestItems'],
-    python: 'repair_tick differential',
-    missing: 'repair-side tick passes have no seeded differential against Python (separate S6 row)',
+      'fileLaunchEffects binds the launch effects and fileLaunchBindings (differentially pinned) binds its scans, blocked receipt, author lease, on-demand clone and queue save, but the caller must still compose them (gitleaks discovery semantics are pinned (`gitleaksDiscovery.ts`, `findGitleaksOnPath`, differentially pinned by `gitleaks_discovery_vectors.py` against Python 3.14 `shutil.which`, one helper behind `fileReviewGitleaks`, `repairPreparation` and `authorSnapshotInstall`), but the production binding stays unbound: which PATH and scratch root a caller passes is caller-owned and held; `provision` is not part of launch: it belongs to the review-v1 submit path and is bound by createReviewEffects, differentially pinned; the admission-history compaction log is bound offline (fileRepairSaveQueue and pendingCompactionLoader, differentially pinned) but the fileLaunchBindings queue save does not use it), and CoverageEffects select is bound by makeCoverageEffects only when its select input is supplied (coverageSelect.ts, differentially pinned by coverage_select_vectors.py; the live collaborators it takes stay unbound: c.launch (the reviewer process spawn), services/GitLedger.fetch (the real ArtifactStore, Outbox, Spool and publisher), the file-backed coverage.load/coverage.request and the publication-failure file probe; the gate collaborators and dispatch switch are listed below) (makeCoverageEffects also binds buildSynthetic only when its synthetic git deps are supplied, the clocks, liveItems, compareItems and depsMet only when its tick input is supplied, backfillDispatchConfigured only when its dispatch input is supplied (coverageTickSeams.ts, differentially pinned), plus mergeQueueSha, diffNameOnly, measureMerged, coverageCandidate, legacyOrigins, legacyRetryAllowed, rank4Gate, bindRun and cancelBeforeVendor; the clock, ordinary eligibility, usage refresh, outbox and queue writer arrive as Rank4Collaborators)',
   },
   {
     id: 'shadow-d2',
-    phases: ['tick', 'slot'],
+    phases: ['slot'],
     python: 'whole-tick shadow comparison',
-    missing: 'the D2 shadow compares the plan only; the composed phases are not shadowed',
+    missing:
+      'the composed tick is shadowed offline (runComposedShadow, composedShadow.test.ts) but not the slot, the XDG summary.json, the paseo schedule probe, merged discovery, gh-backed enrollment or start_one (stubbed alike on both sides), and one divergence is explained rather than fixed (the superseded-open retirement is not persisted)',
   },
 ];
 
@@ -213,8 +218,18 @@ export interface TickCompositionInput {
   readonly harvest?: {
     readonly local: LocalReviewJsonSeams;
     readonly reviewReceiptKind: string;
-    /** Every `harvest_review` effect except the run-artifact reads this module binds. */
-    readonly review: Omit<HarvestReviewEffects, keyof ReturnType<typeof fileHarvestRunReads>>;
+    /** Where `removeWorktree` sweeps: the pool `worktrees` paths live under and their name prefix. */
+    readonly worktree: { readonly pool: GitPool; readonly worktreePrefix: string };
+    /**
+     * Every `harvest_review` effect except the run-artifact reads and the file-backed review
+     * effects (findings, removeWorktree, receipt, requestPrReview) this module binds.
+     */
+    readonly review: Omit<
+      HarvestReviewEffects,
+      | keyof ReturnType<typeof fileHarvestRunReads>
+      | keyof ReturnType<typeof fileHarvestReviewEffects>
+    > &
+      Partial<HarvestReviewFileEffects>;
     readonly repairHarvest: (q: Queue, item: Item) => Promise<string[]>;
   };
   readonly reporting?: Pick<ReportingInput, 'roots'>;
@@ -351,7 +366,7 @@ export function composeFullTick(input: TickCompositionInput): TickComposition {
       })
     : null;
 
-  // --- harvest: the run artifacts are read here; everything else is the caller's effect.
+  // --- harvest: the run artifacts are read here; everything else is the caller's effect (an injected file effect overrides the bound one).
   const rejectHarvest = input.harvest ? null : open(INPUT_GAPS.harvest);
   const harvest = input.harvest
     ? createHarvestPhases({
@@ -359,6 +374,19 @@ export function composeFullTick(input: TickCompositionInput): TickComposition {
         reviewReceiptKind: input.harvest.reviewReceiptKind,
         review: {
           ...fileHarvestRunReads({ stateRoot: input.stateRoot, nowMs: now }),
+          ...fileHarvestReviewEffects({
+            stateRoot: input.stateRoot,
+            pool: input.harvest.worktree.pool,
+            worktreePrefix: input.harvest.worktree.worktreePrefix,
+            primaryClone: input.clone,
+          }),
+          // `repair_tick.enqueue` over the repair-backfill effects (git and config stay injected).
+          ...(repairEffects
+            ? {
+                repairEnqueue: (q: Queue, item: Item, meta: Item, runId: string) =>
+                  repairEnqueue(q, item, meta, repairEffects, runId),
+              }
+            : {}),
           ...input.harvest.review,
         } as HarvestReviewEffects,
         repairHarvest: input.harvest.repairHarvest,
@@ -417,13 +445,18 @@ export function composeFullTick(input: TickCompositionInput): TickComposition {
       if (rejectBacklog || backlogEffects === null || listOpenPrs === null)
         return (rejectBacklog as () => Promise<never>)();
       // `if not dry and backfill_repair_present(q)`: a tick with no backfill repair work makes no call.
-      if (!backfillRepairPresent(toPlain(queue))) return;
+      const plainQueue = toPlain(queue);
+      if (!backfillRepairPresent(plainQueue)) return;
       // `forge_window(ForgeBudget(requests=1, seconds=30))`; a spent budget is a failed read.
       const budget = new ForgeBudget({ requests: 1, seconds: 30 });
-      await refreshFixPrBacklog(backlog, {
-        ...backlogEffects,
-        listOpenPrs: () => boundedListing(listOpenPrs, budget.take()),
-      });
+      await refreshFixPrBacklog(
+        backlog,
+        {
+          ...backlogEffects,
+          listOpenPrs: () => boundedListing(listOpenPrs, budget.take()),
+        },
+        plainQueue,
+      );
     },
     harvestItems: harvest
       ? (q, dry) => harvest.harvestItems(q, dry)

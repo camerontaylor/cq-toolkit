@@ -384,7 +384,7 @@ def dispatch(config, role, job, wt, directory, judge=False):
                 return {'stop': 'blackout', 'summary': 'GLM peak blackout; fallback launch deferred'}
             attempted = True
             previous_directory = directory / provider
-            report = _dispatch(bounded_config, candidate, job, wt, previous_directory, judge)
+            report = _dispatch(bounded_config, candidate, job, wt, previous_directory, judge, deadline=deadline)
             report.update(driver=candidate['driver'], model=candidate['model'])
             if report.get('stop') != 'rate-limit':
                 return report
@@ -416,7 +416,7 @@ def review_diff_sections(diff):
     return sections
 
 
-def _dispatch(config, role, job, wt, directory, judge=False):
+def _dispatch(config, role, job, wt, directory, judge=False, deadline=None):
     directory.mkdir(parents=True, exist_ok=True)
     job = copy.deepcopy(job)
     if job.get('triage_context') is not None:
@@ -440,34 +440,54 @@ def _dispatch(config, role, job, wt, directory, judge=False):
     job['source_snapshot'] = snapshot
     atomic(directory / 'source-snapshot.json', snapshot)
     # The admission checks sample the clock before worktree retention and the
-    # snapshot scan above; either can outlast the margin they allowed, so the
-    # switch below could start a paid call inside the blackout. Sample the
-    # clock again at this last boundary before the call (never during one) and
-    # refuse to start when the window has opened or the remaining budget would
-    # still reach it.
-    if blocked(config.get('repair', {})):
+    # snapshot and review-diff scans above; either can outlast the margin they
+    # allowed, so the switch below could start a paid call on the earlier
+    # allowance or inside the blackout. The rung's shared dispatch deadline
+    # travels through preparation: sample the clock again at this last
+    # boundary before the call (never during one), charge the driver only the
+    # actual remaining time, and refuse to start when nothing remains. The
+    # same remaining time feeds the blackout check, so preparation that ate
+    # the margin defers instead of reaching the window.
+    if deadline is None:
+        bounded_config = config
+    else:
+        remaining = deadline - time.monotonic()
+        if remaining < 0.001:
+            return {'stop': 'budget', 'summary': 'repair dispatch wall-clock deadline reached'}
+        bounded_config = copy.deepcopy(config)
+        bounded_config['repair']['budget']['wall_clock_min'] = remaining / 60
+    if blocked(bounded_config.get('repair', {})):
         return {'stop': 'blackout', 'summary': 'GLM peak blackout began during preparation; driver call not started'}
     if role['driver'] == 'cq':
         if judge:
-            return cq.judge(config, role, job, wt, directory)
-        return cq.invoke(config, role, job, wt, directory)
+            return cq.judge(bounded_config, role, job, wt, directory)
+        return cq.invoke(bounded_config, role, job, wt, directory)
     if role['driver'] == 'codex':
-        return codex.invoke(config, role, job, wt, directory, judge=judge)
+        return codex.invoke(bounded_config, role, job, wt, directory, judge=judge)
     if role['driver'] == 'paseo' and judge:
-        return paseo.invoke(config, role, job, wt, directory)
+        return paseo.invoke(bounded_config, role, job, wt, directory)
     raise ValueError('unsupported role driver')
 
 
-def resume_worktree(result, wt):
+def resume_worktree(result, wt, wt_root, item, job_id):
     """Resume states record the rung's worktree (A2 is a suffixed checkout),
-    but process_item passes the original worktree on restart. Validate the
-    recorded tree and restore it before handling either resume state so
-    interrupted retention and deferred judging use the tree the result names."""
+    but process_item passes the original worktree on restart. Restore the
+    recorded tree before handling either resume state so interrupted retention
+    and deferred judging use the tree the result names, but only when it is this
+    job's own: a directory directly under the resolved worktree root named
+    ``crq-repair-<item>-<job>`` or the same name plus ``-A2`` (the rule recovery
+    and harvest cleanup apply). Any other recorded tree, including a foreign or
+    nested one, is never adopted; the caller then refuses a pending judge or
+    mechanical stage whose candidate is not the tree in hand."""
     recorded = result.get('worktree')
     if not recorded:
         return wt
     recorded = Path(recorded).resolve()
-    if recorded != Path(wt).resolve() and recorded.is_dir() and (recorded / '.git').exists():
+    if recorded == Path(wt).resolve():
+        return wt
+    owned = 'crq-repair-' + item + '-' + job_id
+    if (recorded.parent == Path(wt_root).resolve() and recorded.name in (owned, owned + '-A2')
+            and recorded.is_dir() and (recorded / '.git').exists()):
         return recorded
     return wt
 
@@ -495,7 +515,7 @@ def process(config, job, wt):
     if resume_progress:
         result = json.loads(progress_path.read_text())
     if result.get('dispatch_pending') or result.get('pending_judge') or result.get('pending_mechanical'):
-        wt = resume_worktree(result, wt)
+        wt = resume_worktree(result, wt, config['worktree_root'], job['item'], job['job'])
     if ((result.get('pending_judge') or result.get('pending_mechanical')) and result.get('worktree')
             and Path(result['worktree']).resolve() != Path(wt).resolve()):
         # The recorded candidate tree is gone: verifying or judging the base
@@ -1027,7 +1047,15 @@ def drain(config):
                     and job.get('finding', {}).get('severity') in ('critical', 'major')):
                 return 0
         return 1
-    drain_items(config, groups, sorted(groups, key=priority))
+    # drain_items returns only after every owned child is reaped. A worker that
+    # crashed, was signalled or lost its exit status is a failure the caller
+    # must see: keep the triage report and let run() exit non-zero. An
+    # intentional admission stop (a rate limit or a runner-disabled refusal) is
+    # not a worker failure and leaves the pass 'drained'.
+    failed = drain_items(config, groups, sorted(groups, key=priority))
+    if failed:
+        result['status'] = 'error'
+        result['error'] = 'worker failures: ' + ', '.join(sorted(failed))[:300]
     return result
 
 
@@ -1162,10 +1190,17 @@ def drain_items(config, groups, order):
     Never kill paid workers: on abort or admission failure, reap admitted children
     before releasing service.lock. The service's existing systemd cgroup remains
     the owner of emergency shutdown and its existing drain deadline.
+
+    Returns the items whose workers failed -- a non-zero exit other than a
+    rate-limit or runner-disabled stop, a signal, or a lost exit status --
+    aggregated only after the finally block has reaped every owned child.
+    Intentional admission stops are excluded so the caller can report worker
+    failures without treating a deliberate stop as one.
     """
     limit = worker_limit(config)
     active = {}
     stopped = False
+    _WORKER_FAILURES.clear()
     try:
         for item in order:
             while len(active) >= limit:
@@ -1290,6 +1325,7 @@ def drain_items(config, groups, order):
                 reap_item(active)
             except KeyboardInterrupt:
                 continue  # keep ownership until every admitted child has exited
+    return list(_WORKER_FAILURES)
 
 
 def refusal_published(active):
@@ -1308,6 +1344,14 @@ def refusal_published(active):
         if data:
             return True
     return False
+
+
+# Items whose reaped worker failed for a reason that is not an intentional
+# admission stop (a rate limit or a runner-disabled refusal): a non-zero exit,
+# a signal, or an exit status lost to an interrupt. reap_completed appends as
+# it reaps; drain_items clears at entry and returns the aggregate after its
+# finally has reaped every owned child.
+_WORKER_FAILURES = []
 
 
 def reap_completed(active):
@@ -1334,6 +1378,7 @@ def reap_completed(active):
             if lost:
                 narrate('repair item ' + item + ': worker exit status lost to an interrupt; stopping new admission')
                 failed = True
+                _WORKER_FAILURES.append(item)
             elif status:
                 code = os.waitstatus_to_exitcode(status)
                 message = ('provider pause; stopping new admission' if code == 2 else
@@ -1342,6 +1387,8 @@ def reap_completed(active):
                            'worker terminated by signal ' + str(-code))
                 narrate('repair item ' + item + ': ' + message)
                 failed = True
+                if code not in (2, 3):
+                    _WORKER_FAILURES.append(item)
     return failed, reaped
 
 
@@ -1561,13 +1608,25 @@ def run(argv=None):
         narrate('repair dispatch refused: --triage-dry-run takes no job selector')
         return 2, {'status': 'refused', 'reason': '--triage-dry-run takes no job selector'}
     if args.triage_dry_run:
-        # triage_phase returns its report only when triage is configured and
-        # has a rollout; otherwise it returns None having written nothing, so
-        # report that explicitly to keep one JSON artifact per exit.
-        result = triage_phase(config, dry_run=True)
-        if result is None:
-            return 0, {'status': 'no-triage', 'reason': 'triage is not configured for this state directory'}
-        return 0, result
+        # dry_run stops delivery, not judging: the preview dispatches paid
+        # judgments with the same job identity and output directory the drain
+        # uses, so it must hold service.lock or a concurrent pass could start
+        # a second judgment on the same pending row. Return busy when another
+        # pass owns the lock.
+        directory = ROOT / 'state/repair'
+        directory.mkdir(parents=True, exist_ok=True)
+        with (directory / 'service.lock').open('a') as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return 0, {'status': 'busy', 'reason': 'service.lock held by another repair pass'}
+            # triage_phase returns its report only when triage is configured and
+            # has a rollout; otherwise it returns None having written nothing, so
+            # report that explicitly to keep one JSON artifact per exit.
+            result = triage_phase(config, dry_run=True)
+            if result is None:
+                return 0, {'status': 'no-triage', 'reason': 'triage is not configured for this state directory'}
+            return 0, result
     if any(supplied) and not all(supplied):
         narrate('repair dispatch refused: --job, --source-sha and --finding-sha256 go together')
         return 2, {'status': 'refused', 'reason': '--job, --source-sha and --finding-sha256 go together'}

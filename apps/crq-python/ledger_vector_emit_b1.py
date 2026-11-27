@@ -462,6 +462,15 @@ def event_vectors() -> Dict[str, Any]:
     return _family("event", cases)
 
 
+def _wide_scopes(value: Dict[str, Any], reviewed_end: int) -> None:
+    """Three wide single-interval scopes: 400000 + 400000 + reviewed_end entries."""
+    payload = value["payload"]
+    for key, end in (("requested_scope", 400_000), ("input_scope", 400_000), ("reviewed_scope", reviewed_end)):
+        payload[key][0]["intervals"] = [[1, end]]
+    payload["scope_digest"] = ledger.digest(payload["requested_scope"])
+    payload["findings"] = []
+
+
 def validate_vectors() -> Dict[str, Any]:
     review = _review_findings()
     github = _review(source="run-github")
@@ -542,6 +551,16 @@ def validate_vectors() -> Dict[str, Any]:
              {"outcome": "completed",
               "completion": {"terminal": True, "skipped": False, "scope_verified": False,
                              "exit_code": 0, "errors": []}}))),
+        # S3b: a completed manual/agent report passes the vendor-credit gate
+        # because report_producer() records are exempt from creditable().
+        ("record-completed-with-evidence",
+         _regenerated(record, lambda v: (v["payload"].update(
+             {"outcome": "completed",
+              "completion": {"terminal": True, "skipped": False, "scope_verified": True,
+                             "exit_code": 0, "errors": []}}),
+             v["payload"]["provenance"].__setitem__("completion_evidence", "reviewer log")))),
+        ("vendor-run-completed-unauthenticated",
+         _regenerated(review, lambda v: v["payload"]["source"].__setitem__("authenticated", False))),
         ("missing-evidence", _regenerated(finding_event, lambda v: v["payload"].__setitem__("evidence", {}))),
         ("fixed-without-verification",
          _regenerated(finding_event, lambda v: v["payload"].update(
@@ -562,6 +581,15 @@ def validate_vectors() -> Dict[str, Any]:
          _regenerated(imported, lambda v: v["payload"].__setitem__("result", "duplicate"))),
         ("occurred-at-invalid",
          _regenerated(review, lambda v: v.__setitem__("occurred_at", "2026-02-30T00:00:00Z"))),
+        ("scope-entries-at-bound",
+         _regenerated(review, lambda v: _wide_scopes(v, 200_000))),
+        ("scope-entries-over-bound",
+         _regenerated(review, lambda v: _wide_scopes(v, 200_001))),
+        ("scope-entries-interval-error-precedes-bound",
+         _regenerated(review, lambda v: (_wide_scopes(v, 200_001),
+                                         v["payload"]["reviewed_scope"].append(
+                                             {"path": "src/b.ts", "blob": SHA,
+                                              "intervals": [[1, 1_000_001]]})))),
     ]
     return _family("validate", [
         _capture(name, "review_ledger.validate", {"value": value},
@@ -799,6 +827,16 @@ def sequence_vectors() -> Dict[str, Any]:
         "action": "dismissed", "evidence": {"reason": "fork"}, "actor": "operator"})
     imported = _import(result="credited", review_id=review_id)
     missing = _import(result="credited", review_id="f" * 64)
+    report = _record(source="note-2", outcome="completed",
+                     completion={"terminal": True, "skipped": False, "scope_verified": True,
+                                 "exit_code": 0, "errors": []},
+                     provenance={"authenticated_submitter": "queue-client",
+                                 "claimed_reviewer": "helper-agent",
+                                 "forge_evidence": "off-forge-import",
+                                 "completion_evidence": "reviewer log",
+                                 "scope_confidence": "unknown",
+                                 "independence": "agent lane: separate session, unverified"})
+    credited_report = _import(result="credited", review_id=report["id"], ident="2")
 
     def ids(values: List[Dict[str, Any]]) -> List[str]:
         return sorted(ledger.validate_sequence(values))
@@ -825,6 +863,8 @@ def sequence_vectors() -> Dict[str, Any]:
                  {"values": [review, collision_review]}, lambda: ids([review, collision_review])),
         _capture("import-credited-links-review", "review_ledger.validate_sequence",
                  {"values": [review, imported]}, lambda: ids([review, imported])),
+        _capture("import-credited-non-creditable-review", "review_ledger.validate_sequence",
+                 {"values": [report, credited_report]}, lambda: ids([report, credited_report])),
         _capture("import-missing-review", "review_ledger.validate_sequence",
                  {"values": [missing]}, lambda: ids([missing])),
         _capture("unknown-finding", "review_ledger.validate_sequence",

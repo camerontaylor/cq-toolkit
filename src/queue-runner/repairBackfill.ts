@@ -2,8 +2,9 @@
  * The queue side of `repair_tick.enqueue`, `backfill` and `archive_legacy`
  * (repair_tick.py:175-272, 848-892). Inactive: nothing imports this outside
  * tests. Items and queues are plain records edited in place; every read of the
- * run directory, inbox, receipts and git is injected. The review.ndjson parser
- * (`crq_repair.findings`) has no TS port, so `findings` is an injected effect.
+ * run directory, inbox, receipts and git is injected. `findings` is an injected
+ * effect; its file-backed implementation is `parseRepairFindings`
+ * (repairFindings.ts, `crq_repair.findings`).
  *
  * Python raises `KeyError`/`TypeError`/`AttributeError` for malformed records;
  * the port throws at the same points instead of inventing a default.
@@ -12,6 +13,7 @@ import { receiptDigest } from '../policy/crq/ids.js';
 import { JsonNumber } from '../policy/crq/jsonValue.js';
 import { itemRepo, sameRepo } from '../policy/crq/tickSchedule.js';
 import { pySplitLines } from './fixPrBacklog.js';
+import { PyError } from './pyErrors.js';
 
 type Rec = Record<string, unknown>;
 export type Item = Rec;
@@ -71,8 +73,20 @@ export interface RepairArchiveEffects {
 
 // ---------------------------------------------------------------- py helpers
 
+/** A dict. A retained `JsonNumber` is an object here but a Python int/float. */
 export const isRec = (v: unknown): v is Rec =>
-  typeof v === 'object' && v !== null && !Array.isArray(v);
+  typeof v === 'object' && v !== null && !Array.isArray(v) && !(v instanceof JsonNumber);
+
+/** `type(v).__name__` for a JSON value. */
+export function pyTypeName(v: unknown): string {
+  if (v === null || v === undefined) return 'NoneType';
+  if (v instanceof JsonNumber) return v.kind;
+  if (typeof v === 'boolean') return 'bool';
+  if (typeof v === 'number') return Number.isInteger(v) ? 'int' : 'float';
+  if (typeof v === 'bigint') return 'int';
+  if (typeof v === 'string') return 'str';
+  return Array.isArray(v) ? 'list' : 'dict';
+}
 
 export function truthy(v: unknown): boolean {
   // A retained `JsonNumber` (an object, so it would otherwise be truthy) is a
@@ -85,14 +99,20 @@ export function truthy(v: unknown): boolean {
   return true;
 }
 
-export function dict(v: unknown, what: string): Rec {
-  if (!isRec(v)) throw new TypeError(`${what} must be a dict`);
-  return v;
+/**
+ * A value used as a dict. Python's failure is the first operation on it: a
+ * `.get(...)` or `.values()` call is an `AttributeError` (the default), a
+ * `value[key]` subscript is a `TypeError`.
+ */
+export function dict(v: unknown, what: string, use: 'attribute' | 'subscript' = 'attribute'): Rec {
+  if (isRec(v)) return v;
+  if (use === 'subscript') throw new PyError('TypeError', `${what} must be a dict`);
+  throw new PyError('AttributeError', `${what} must be a dict`);
 }
 
 /** `d[key]` */
 function req(o: Rec, key: string): unknown {
-  if (!Object.hasOwn(o, key)) throw new Error(`KeyError: ${key}`);
+  if (!Object.hasOwn(o, key)) throw new PyError('KeyError', `'${key}'`);
   return o[key];
 }
 
@@ -106,9 +126,12 @@ function str(v: unknown, what: string): string {
   return v;
 }
 
-export function list(v: unknown, what: string): unknown[] {
-  if (!Array.isArray(v)) throw new TypeError(`${what} must be a list`);
-  return v;
+/** `for x in v`: a str yields its characters and a dict its keys; anything else is not iterable. */
+export function list(v: unknown, _what?: string): unknown[] {
+  if (Array.isArray(v)) return v;
+  if (typeof v === 'string') return [...v];
+  if (isRec(v)) return Object.keys(v);
+  throw new PyError('TypeError', `'${pyTypeName(v)}' object is not iterable`);
 }
 
 /** Python `==` over JSON values: `1 == 1.0 == True`, `None` equals only `None`. */
@@ -404,7 +427,8 @@ export async function repairEnqueue(
 export async function repairBackfill(q: Queue, fx: RepairBackfillEffects): Promise<void> {
   if (truthy(q.legacy_repair_backfilled)) return;
   const missing: Rec[] = [];
-  for (const item of q.items) {
+  for (const entry of list(req(q as Rec, 'items'), 'items')) {
+    const item = dict(entry, 'item') as Item;
     if (!sameRepo(itemRepo(item, fx.primaryRepo), fx.primaryRepo)) {
       // Foreign cycles are review evidence, never legacy repair debt.
       continue;
@@ -462,9 +486,9 @@ export async function repairBackfill(q: Queue, fx: RepairBackfillEffects): Promi
 /** `repair_tick.archive_legacy`: archive the legacy ledger once nothing is owed. */
 export async function repairArchiveLegacy(q: Queue, fx: RepairArchiveEffects): Promise<void> {
   if (truthy(q.legacy_repair_missing) || !truthy(q.legacy_repair_backfilled)) return;
-  const records = q.items.flatMap((i) =>
-    Object.values(dict(get(i, 'repair_runs', {}), 'repair_runs')).map((r) =>
-      dict(r, 'repair record'),
+  const records = (list(req(q as Rec, 'items'), 'items') as Item[]).flatMap((i) =>
+    Object.values(dict(get(dict(i, 'item'), 'repair_runs', {}), 'repair_runs')).map((r) =>
+      dict(r, 'repair record', 'subscript'),
     ),
   );
   if (records.some((r) => OPEN_STATES.includes(req(r, 'state') as string))) return;

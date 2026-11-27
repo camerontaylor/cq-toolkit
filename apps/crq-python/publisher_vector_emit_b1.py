@@ -546,6 +546,9 @@ def publish_vectors() -> Dict[str, Any]:
     unhashable_dependency = _import(ident="unhashable-dependency")
     unhashable_dependency["payload"]["review_id"] = []
     unhashable_dependency["payload"]["duplicate_id"] = None
+    stray_review_id = _import(ident="stray-review-id", review_id="f" * 64)
+    credited_missing = _import(ident="credited-missing", result="credited",
+                               review_id="e" * 64)
 
     return _family("publish", [
         _publish_case("idle-outbox", ledger_values=[idle]),
@@ -591,7 +594,12 @@ def publish_vectors() -> Dict[str, Any]:
         _publish_case("malformed-import-result-list-last", ledger_values=import_last,
                       direct=import_last_records),
         _publish_case("unhashable-import-dependency", ledger_values=[already],
-                      direct=[unhashable_dependency], refusals=(TypeError,)),
+                      direct=[unhashable_dependency]),
+        # A non-credited import whose review_id is a schema-valid string absent
+        # from history links only its duplicate_id, so it publishes; a credited
+        # import with a missing review still refuses.
+        _publish_case("stray-review-id-publishes", pending=[stray_review_id]),
+        _publish_case("credited-import-missing-review-refuses", pending=[credited_missing]),
         _publish_case("three-push-failures", pending=[failing], failures=3),
     ])
 

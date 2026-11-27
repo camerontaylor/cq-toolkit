@@ -257,7 +257,7 @@ function collapseWhitespace(text: string): string {
  * point matches CPython except for the overrides below (verified over every
  * non-surrogate scalar value against CPython 3.15).
  */
-function casefold(text: string): string {
+export function casefold(text: string): string {
   let folded = '';
   for (const character of text) {
     const code = character.codePointAt(0) as number;

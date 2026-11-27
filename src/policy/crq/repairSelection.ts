@@ -340,7 +340,8 @@ function pythonContains(container: JsonValue, item: string): boolean {
  * `next((i.get('repair_runs', {}).get(job['run']) for i in queue['items']
  * if i['id'] == job['item']), None)`: only the FIRST queue item whose id
  * matches is inspected. `drain_job` reads `i.get('id')` while `select_job`
- * reads `i['id']`; the policy keeps that difference. The id comparison is
+ * reads `i['id']`; the policy keeps that difference (as it does `queue.get('items', [])`
+ * against `queue['items']`). The id comparison is
  * Python `==`, so `1`, `1.0` and `true` name the same id (see
  * {@link pythonEqual}).
  */
@@ -351,6 +352,9 @@ function queueRecord(
   missingId: 'ignore' | 'malformed',
 ): JsonValue | undefined {
   if (!(queue instanceof JsonObject)) throw new ShapeError('queue');
+  // `drain_job` reads `queue.get('items', [])`: a missing key is an empty queue. `select_job`
+  // reads `queue['items']`: a missing key is a KeyError.
+  if (missingId === 'ignore' && !queue.has('items')) return undefined;
   const items = queue.get('items');
   if (!Array.isArray(items)) throw new ShapeError('items');
   for (const item of items) {

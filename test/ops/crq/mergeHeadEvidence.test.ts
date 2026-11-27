@@ -1,4 +1,6 @@
-import { describe, expect, test } from 'vitest';
+import { afterAll, beforeAll, describe, expect, test } from 'vitest';
+import { runGitIn } from '../../../src/adapters/crq/publishSource.js';
+import { createMergeTreeRepo, type MergeTreeRepo } from '../../helpers/mergeTreeRepo.js';
 import { mergeHeadEvidence } from '../../../src/ops/crq/internal/mergeHeadEvidence.js';
 import type { RunGit } from '../../../src/adapters/crq/ledgerGit.js';
 
@@ -7,7 +9,7 @@ const base = 'a'.repeat(40),
   actual = 'c'.repeat(40);
 const blob1 = 'd'.repeat(40),
   blob2 = 'e'.repeat(40);
-function git(extraPatch = '+later\n', mode = '100644'): RunGit {
+function git(extraPatch = '+later\n', mode = '100644', hunk = '@@ -2 +2 @@'): RunGit {
   return async (args) => {
     let output = '';
     if (args[0] === 'diff-tree' && args.includes('--name-only'))
@@ -21,7 +23,7 @@ function git(extraPatch = '+later\n', mode = '100644'): RunGit {
     } else if (args[0] === 'diff')
       output = args.includes(base)
         ? 'diff --git a/src/a.ts b/src/a.ts\n@@ -1 +1 @@\n-old\n+fixed  \n'
-        : `diff --git a/src/a.ts b/src/a.ts\n@@ -2 +2 @@\n${extraPatch}`;
+        : `diff --git a/src/a.ts b/src/a.ts\n${hunk}\n${extraPatch}`;
     return { args, code: 0, stdout: Buffer.from(output), stderr: '' };
   };
 }
@@ -39,7 +41,14 @@ describe('merge head containment proof', () => {
     });
   });
   test('rejects a later removal of the exact published line, including whitespace', async () => {
-    await expect(mergeHeadEvidence(input, git('-fixed  \n'))).rejects.toThrow('source changed');
+    // The published repair added "fixed  " at line 1; the head removes it from old line 1.
+    await expect(
+      mergeHeadEvidence(input, git('-fixed  \n', '100644', '@@ -1 +0,0 @@')),
+    ).rejects.toThrow('source changed');
+  });
+  test('credits a removal of identical text at a different location (#2297 parity)', async () => {
+    const proof = await mergeHeadEvidence(input, git('-fixed  \n'));
+    expect(proof?.containment?.['src/a.ts']).toMatchObject({ status: 'contained' });
   });
   test('refuses oversized and invalid evidence before comparing sources', async () => {
     await expect(
@@ -187,46 +196,94 @@ describe('containment oracle bounds and edge cases', () => {
   });
 });
 
-describe('root publication with real Git', () => {
-  test('compares the complete publication span against the empty tree', async () => {
-    const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
-    const { tmpdir } = await import('node:os');
-    const { join } = await import('node:path');
-    const { execFileSync } = await import('node:child_process');
-    const { runGitIn } = await import('../../../src/adapters/crq/publishSource.js');
-    const dir = await mkdtemp(join(tmpdir(), 'merge-head-root-'));
-    const run = (...args: string[]): string =>
-      execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' }).trim();
-    const commit = async (content: string, message: string): Promise<string> => {
-      await writeFile(join(dir, 'a.ts'), content);
-      run('add', 'a.ts');
-      run(
-        '-c',
-        'user.name=Test',
-        '-c',
-        'user.email=test@example.invalid',
-        'commit',
-        '-qm',
-        message,
-      );
-      return run('rev-parse', 'HEAD');
+describe('merge-tree credit with real Git', () => {
+  let repo: MergeTreeRepo;
+  beforeAll(async () => {
+    repo = await createMergeTreeRepo();
+  });
+  afterAll(async () => {
+    await repo.cleanup();
+  });
+  const prove = (merge: string | undefined, over: Record<string, unknown> = {}) =>
+    mergeHeadEvidence(
+      {
+        published: repo.published,
+        actual: repo.published,
+        commits: [repo.published],
+        anchors: [repo.path],
+        ...(merge === undefined ? {} : { merge }),
+        ...over,
+      },
+      runGitIn(repo.dir),
+    );
+
+  test('the fixture shapes are what the cases below claim', () => {
+    const ancestor = (a: string, b: string): boolean => {
+      try {
+        repo.git('merge-base', '--is-ancestor', a, b);
+        return true;
+      } catch {
+        return false;
+      }
     };
-    try {
-      run('init', '-q', '--object-format=sha1');
-      const root = await commit('old\n', 'root');
-      const fixed = await commit('fixed\n', 'fix');
-      const retained = await commit('fixed\nextra\n', 'extra');
-      const reverted = await commit('old\n', 'revert');
-      const input = { published: fixed, commits: [root, fixed], anchors: ['a.ts'] };
-      const git = runGitIn(dir);
-      expect(
-        (await mergeHeadEvidence({ ...input, actual: retained }, git))?.containment?.['a.ts'],
-      ).toMatchObject({ status: 'contained' });
-      await expect(mergeHeadEvidence({ ...input, actual: reverted }, git)).rejects.toThrow(
-        'source changed',
-      );
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    expect(ancestor(repo.published, repo.kept)).toBe(true);
+    expect(ancestor(repo.published, repo.dropped)).toBe(true);
+    expect(ancestor(repo.published, repo.squashed)).toBe(false);
+    expect(repo.git('rev-parse', `${repo.dropped}^{tree}`)).toBe(
+      repo.git('rev-parse', `${repo.target}^{tree}`),
+    );
+  });
+  test('credits a merge whose tree keeps the repair, with an unrelated target change', async () => {
+    expect((await prove(repo.kept))?.containment?.[repo.path]).toMatchObject({
+      status: 'contained',
+      actual: ['100644', expect.stringMatching(/^[0-9a-f]{40}$/)],
+    });
+  });
+  test('credits a squash merge whose PR head is not an ancestor of the merge', async () => {
+    expect((await prove(repo.squashed))?.containment?.[repo.path]).toMatchObject({
+      status: 'contained',
+    });
+  });
+  test('refuses a merge that contains the PR head but drops the repair from its tree', async () => {
+    // The PR head equals the published head, so a head-only comparison would credit this.
+    await expect(prove(repo.dropped)).rejects.toThrow('source changed');
+    expect((await prove(undefined))?.published_head).toBe(repo.published);
+  });
+  test('credits a plain merge whose tree is exactly the published tree', async () => {
+    expect((await prove(repo.identical))?.containment?.[repo.path]).toMatchObject({
+      status: 'identical',
+    });
+  });
+  test('refuses a merge that only reformatted the repaired line, pending revalidation', async () => {
+    await expect(prove(repo.reformatted)).rejects.toThrow('needs revalidation');
+  });
+  test('the port call shape that ignored the merge tree no longer credits a dropped repair', async () => {
+    // Probe 2295: {published, actual: published, commits, anchors} with no merge input is the
+    // head-only shape; the same repo with the dropped merge supplied must now throw.
+    expect((await prove(undefined))?.containment).toBeUndefined();
+    await expect(prove(repo.dropped)).rejects.toThrow('merged repair source changed');
+  });
+  test('refuses a merge commit whose own tree already reverted the repaired line', async () => {
+    await expect(prove(repo.revertTip)).rejects.toThrow('source changed');
+  });
+  test('refuses a reachable merge commit that never carried the repair', async () => {
+    await expect(prove(repo.wrong)).rejects.toThrow('source changed');
+  });
+  test('refuses an unreachable or malformed merge commit rather than falling back to the head', async () => {
+    await expect(prove(repo.unreachable)).rejects.toThrow('git evidence unavailable');
+    for (const merge of ['', 'not-a-commit', 'A'.repeat(40), repo.kept.slice(0, 39)])
+      await expect(prove(merge)).rejects.toThrow('merged repair commit unavailable');
+  });
+  test('still requires the observed PR head to descend from the published fix', async () => {
+    await expect(prove(repo.squashed, { actual: repo.base })).rejects.toThrow(
+      'not a descendant of the published fix',
+    );
+  });
+  test('an untouched head and merge need no source reads', async () => {
+    expect(await prove(repo.published)).toEqual({
+      published_head: repo.published,
+      actual_head: repo.published,
+      source_blobs: {},
+    });
   });
 });

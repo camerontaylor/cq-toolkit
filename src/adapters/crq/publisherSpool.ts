@@ -49,6 +49,19 @@ const OID_40 = /^[0-9a-f]{40}$/;
 /** Python's `Spool` alias/host pattern (`re.fullmatch`). */
 const HOST_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.:-]*$/;
 
+/**
+ * `not key.strip()`: Python whitespace (`str.isspace`) is Unicode `White_Space`
+ * plus U+001C..U+001F. JavaScript `trim()` differs both ways: it also strips
+ * U+FEFF and misses those four separators.
+ */
+function isPythonBlank(text: string): boolean {
+  for (const char of text) {
+    const code = char.codePointAt(0) as number;
+    if (!(code >= 0x1c && code <= 0x1f) && !/^\p{White_Space}$/u.test(char)) return false;
+  }
+  return true;
+}
+
 /** The rollout's `publisher_spool` document, reduced to what ssh needs. */
 export interface PublisherSpoolConfig {
   readonly sshAlias: string;
@@ -89,7 +102,7 @@ export function parsePublisherSpool(value: JsonValue | undefined): PublisherSpoo
   // isinstance gate below, exactly like Python.
   const selected = truthy(value.get('ssh_key')) ? value.get('ssh_key') : value.get('key');
   const key = typeof selected === 'string' ? selected : undefined;
-  if (typeof key !== 'string' || key.trim() === '' || /[\n\r\0]/.test(key)) {
+  if (typeof key !== 'string' || isPythonBlank(key) || /[\n\r\0]/.test(key)) {
     throw new SpoolConfigError('backfill rollout publisher_spool incomplete or invalid');
   }
   return { sshAlias: alias, sshKey: key };

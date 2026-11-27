@@ -1,5 +1,5 @@
 /**
- * The queue side of `repair_tick.harvest` (repair_tick.py:422-578), with
+ * The queue side of `repair_tick.harvest` (repair_tick.py:422-584), with
  * `record_terminal_failure` and `record_unpublished_siblings` (:339-421).
  * Inactive: nothing imports this outside tests.
  *
@@ -19,12 +19,15 @@ import {
   dict,
   get,
   isRec,
+  list,
+  pyTypeName,
   pyEq,
   REVIEW_RECEIPT_KIND,
   truthy,
   type Item,
   type Queue,
 } from './repairBackfill.js';
+import { JsonNumber } from '../policy/crq/jsonValue.js';
 import { clip300, excText, isPyError, PyError } from './pyErrors.js';
 
 type Rec = Record<string, unknown>;
@@ -49,7 +52,18 @@ export interface RepairHarvestEffects {
    * a `ValueError` (harvest terminalizes it); a read failure is an `OSError`.
    */
   readResult(jobId: string): Promise<unknown>;
-  /** `require_canonical_delivery(STATE.parent, job)`; a stale selection is a `ValueError`. */
+  /**
+   * `require_canonical_delivery(STATE.parent, job)`. A confirmed ownership
+   * mismatch is a `ValueError` (the run terminalizes as `stale`); the literal
+   * `canonical delivery state unavailable` read failure stays retryable
+   * without publishing. It is Python's `written_back=True` form: a row an
+   * earlier job of this same run already wrote back (status `fixed`,
+   * `needs-retriage`, `needs-human` or `dismissed`, receipt still naming this
+   * task) is owned only when its `previous_event_id` names this job's own
+   * retained `repair-outcome` event (actor `crq-repair`, same `repair_task`,
+   * action equal to the row status); an operator disposition that kept the
+   * receipt is a mismatch, as is any row naming another task.
+   */
   requireCanonicalDelivery(job: Rec): Promise<void>;
   /** `Path(p).resolve()`: a non-string never reaches it; an embedded NUL is a `ValueError`. */
   resolvePath(path: string): Promise<string>;
@@ -95,21 +109,98 @@ export interface RepairHarvestEffects {
     | undefined;
   /** `publish(c, q, item, run, record, fixed)`: publish, recover and finalize. */
   publish(q: Queue, item: Item, run: string, record: Rec, fixed: Rec[]): Promise<void>;
+  /**
+   * `c.REPLAY_BUDGET`: bound to a fresh budget once per tick by the caller
+   * (Python's `begin_tick`). Absent means unthrottled, like Python's `None`.
+   */
+  readonly replayBudget?: ReplayBudget | undefined;
+}
+
+/** A Python `int`/`float` (bool included) as a JS number, else `null`. */
+function pyNumberOrNull(v: unknown): number | null {
+  if (v instanceof JsonNumber) return Number(v.kind === 'int' ? v.integer : v.float);
+  if (typeof v === 'boolean') return v ? 1 : 0;
+  // Any int this large makes `now - last` far below zero on both sides, so the rounding cannot change the comparison.
+  if (typeof v === 'bigint') return Number(v);
+  return typeof v === 'number' ? v : null;
+}
+
+/**
+ * `ReplayBudget`: bounds the terminal-failure replays one tick may run, so a
+ * backlog degrades to slower catch-up instead of a tick that never saves. A
+ * record whose last attempt is under `retrySeconds` old is skipped, so runs
+ * that cannot settle do not monopolize the budget and starve the ones behind.
+ */
+export class ReplayBudget {
+  private count: number;
+  private readonly deadline: number;
+  private readonly clock: () => number;
+  private readonly wall: () => number;
+  private readonly retry: number;
+  private readonly limits: readonly [number, number];
+  private announced = false;
+
+  constructor(
+    limits: {
+      count?: number;
+      seconds?: number;
+      retrySeconds?: number;
+      clock?: () => number;
+      wall?: () => number;
+    } = {},
+  ) {
+    this.count = limits.count ?? 25;
+    this.clock = limits.clock ?? (() => performance.now() / 1000);
+    this.wall = limits.wall ?? (() => Date.now() / 1000);
+    this.retry = limits.retrySeconds ?? 900;
+    this.deadline = this.clock() + (limits.seconds ?? 240);
+    this.limits = [limits.count ?? 25, limits.seconds ?? 240];
+  }
+
+  exhausted(): boolean {
+    return this.count <= 0 || this.clock() >= this.deadline;
+  }
+
+  /** The log line for a tripped budget, once per tick (`undefined` afterwards). */
+  announce(): string | undefined {
+    if (this.announced) return undefined;
+    this.announced = true;
+    return `repair replay budget spent (${this.limits[0]} runs / ${this.limits[1]}s): remaining failed runs resume next tick`;
+  }
+
+  take(record: Rec): boolean {
+    if (this.exhausted()) return false;
+    const now = this.wall();
+    // `isinstance(last, (int, float))`: a bool counts, and a stored number is a `JsonNumber`.
+    const last = pyNumberOrNull(record.replay_attempted);
+    if (last !== null && now - last >= 0 && now - last < this.retry) return false;
+    // `time.time()` is always a float, so `1700000000.0` stays a float in the queue.
+    record.replay_attempted = JsonNumber.float(now);
+    this.count -= 1;
+    return true;
+  }
+}
+
+/** `replay_settled`: every string job's outcome is durably recorded. */
+export function replaySettled(record: Rec): boolean {
+  const recorded = get(record, 'siblings_recorded', []);
+  const jobs = get(record, 'jobs', []);
+  return (Array.isArray(jobs) ? jobs : []).every(
+    (j) => typeof j !== 'string' || pyContains(recorded, j),
+  );
+}
+
+/** Add `job` to `siblings_recorded` (sorted, de-duplicated), as Python's set union. */
+function flagRecorded(record: Rec, job: string): void {
+  const prior = get(record, 'siblings_recorded', []);
+  const have = (truthy(prior) ? list(prior) : []).filter((j): j is string => typeof j === 'string');
+  record.siblings_recorded = [...new Set([...have, job])].sort();
 }
 
 /** `d[key]` raising `KeyError('key')`. */
 function pyReq(o: Rec, key: string): unknown {
   if (!Object.hasOwn(o, key)) throw new PyError('KeyError', `'${key}'`);
   return o[key];
-}
-
-function pyTypeName(v: unknown): string {
-  if (v === null || v === undefined) return 'NoneType';
-  if (typeof v === 'boolean') return 'bool';
-  if (typeof v === 'number') return Number.isInteger(v) ? 'int' : 'float';
-  if (typeof v === 'bigint') return 'int';
-  if (typeof v === 'string') return 'str';
-  return Array.isArray(v) ? 'list' : 'dict';
 }
 
 /** `Path(value)` argument check (CPython 3.12+ wording). */
@@ -119,6 +210,39 @@ function pathArg(value: unknown): string {
     'TypeError',
     `argument should be a str or an os.PathLike object where __fspath__ returns a str, not '${pyTypeName(value)}'`,
   );
+}
+
+/** `value.<attr>` on a value that has no such attribute. */
+const attrError = (v: unknown, attr: string): PyError =>
+  new PyError('AttributeError', `'${pyTypeName(v)}' object has no attribute '${attr}'`);
+
+/** `value['key']` on a value that is not a dict (a str, list or scalar). */
+function subscriptError(v: unknown): PyError {
+  if (typeof v === 'string')
+    return new PyError('TypeError', "string indices must be integers, not 'str'");
+  if (Array.isArray(v)) {
+    return new PyError('TypeError', 'list indices must be integers or slices, not str');
+  }
+  return new PyError('TypeError', `'${pyTypeName(v)}' object is not subscriptable`);
+}
+
+/** `x + '.json'` where `x` is not a str. */
+function plusStrError(v: unknown): PyError {
+  if (Array.isArray(v))
+    return new PyError('TypeError', 'can only concatenate list (not "str") to list');
+  return new PyError(
+    'TypeError',
+    `unsupported operand type(s) for +: '${pyTypeName(v)}' and 'str'`,
+  );
+}
+
+/** `job in container`: list equality, str substring or dict key; a falsy container is empty. */
+function pyContains(container: unknown, job: string): boolean {
+  if (!truthy(container)) return false;
+  if (typeof container === 'string') return container.includes(job);
+  if (Array.isArray(container)) return container.some((e) => pyEq(e, job));
+  if (isRec(container)) return Object.hasOwn(container, job);
+  throw new PyError('TypeError', `argument of type '${pyTypeName(container)}' is not iterable`);
 }
 
 const asList = (v: unknown, what: string): unknown[] => {
@@ -144,8 +268,12 @@ export async function recordUnpublishedSiblings(
 ): Promise<void> {
   const failures: unknown[] = [];
   const jobs = get(record, 'jobs');
+  const prior = get(record, 'siblings_recorded', []);
+  const done: string[] = Array.isArray(prior)
+    ? prior.filter((j): j is string => typeof j === 'string')
+    : [];
   for (const other of truthy(jobs) ? asList(jobs, 'jobs') : []) {
-    if (typeof other !== 'string' || handled.has(other)) continue;
+    if (typeof other !== 'string' || handled.has(other) || done.includes(other)) continue;
     let result: unknown;
     let job: unknown;
     try {
@@ -156,7 +284,10 @@ export async function recordUnpublishedSiblings(
       throw e;
     }
     if (!isRec(result) || !isRec(job)) continue;
-    if (!truthy(get(job, 'canonical_finding_id'))) continue;
+    if (!truthy(get(job, 'canonical_finding_id'))) {
+      done.push(other);
+      continue;
+    }
     try {
       // Sibling results bypass harvest's validation: apply the same identity
       // and binding checks before the verdict dispatches, so a mismatched
@@ -194,11 +325,13 @@ export async function recordUnpublishedSiblings(
       } else if (verdict === 'FAILED' || verdict === 'NOT-FIXED' || verdict === 'STALE') {
         await fx.markFindingOutcome(job, result);
       }
+      done.push(other); // only after the write succeeded
     } catch (e) {
       if (!isCaught(e)) throw e;
       failures.push(e);
     }
   }
+  if (done.length > 0) record.siblings_recorded = done;
   if (failures.length > 0) throw failures[0];
 }
 
@@ -240,6 +373,7 @@ async function recordTerminalFailure(
   }
   await fx.saveQueue(q); // terminal identity before authoritative write-back
   if (expected !== null) await fx.markFindingOutcome(expected, failure);
+  flagRecorded(record, jobId);
   await recordUnpublishedSiblings(fx, record, new Set([jobId]));
 }
 
@@ -252,20 +386,30 @@ async function reconcileTerminal(
   dry: boolean,
   messages: string[],
 ): Promise<void> {
-  if (!dry && record.state === 'failed') {
+  const budget = fx.replayBudget;
+  const pending = !dry && record.state === 'failed' && !replaySettled(record);
+  if (pending && budget?.exhausted()) {
+    const line = budget.announce();
+    if (line !== undefined) messages.push(line);
+  }
+  if (pending && (budget === undefined || budget.take(record))) {
     // A terminal local failure can outlive a failed ledger write: replay the
     // retained FAILED outcomes through the ledger's idempotent event chain.
     const handled = new Set<string>();
-    for (const result of asList(get(record, 'verdicts', []), 'verdicts')) {
-      const r = dict(result, 'verdict');
+    for (const result of list(get(record, 'verdicts', []))) {
+      if (!isRec(result)) throw attrError(result, 'get');
+      const r = result;
       if (get(r, 'verdict') !== 'FAILED') continue;
       const reason = get(r, 'reason', '');
-      if (typeof reason !== 'string') throw new TypeError('reason must be a str');
+      if (typeof reason !== 'string') throw attrError(reason, 'startswith');
       if (reason.startsWith('invalid repair inbox: ')) {
         // The inbox was rejected (malformed or a swapped identity): keep it out
         // of the sibling replay so no finding decision is derived from it later.
         const rejected = get(r, 'job');
-        if (typeof rejected === 'string') handled.add(rejected);
+        if (typeof rejected === 'string') {
+          handled.add(rejected);
+          flagRecorded(record, rejected);
+        }
         continue;
       }
       if (!reason.startsWith('invalid repair result: ')) continue;
@@ -276,7 +420,7 @@ async function reconcileTerminal(
         throw new PyError('ValueError', 'terminal repair outcome identity mismatch');
       }
       const jobId = pyReq(r, 'job');
-      if (typeof jobId !== 'string') throw new TypeError('job must be a str');
+      if (typeof jobId !== 'string') throw plusStrError(jobId);
       const expected = dict(await fx.readJob(jobId), 'inbox job');
       if (!pyEq(get(expected, 'job'), jobId) || !pyEq(get(expected, 'item'), pyReq(item, 'id'))) {
         throw new PyError('ValueError', 'terminal repair job identity mismatch');
@@ -286,6 +430,7 @@ async function reconcileTerminal(
         await fx.saveQueue(q); // also retry any prior failed terminal save
         await fx.markFindingOutcome(expected, r);
       }
+      flagRecorded(record, jobId);
     }
     // A write-back that failed before the sibling decision is replayed here.
     await recordUnpublishedSiblings(fx, record, handled);
@@ -399,9 +544,10 @@ export async function repairHarvest(
 ): Promise<string[]> {
   const messages: string[] = [];
   const runs = get(item, 'repair_runs', {});
-  if (!isRec(runs)) throw new TypeError('repair_runs must be a dict');
+  if (!isRec(runs)) throw attrError(runs, 'items');
   for (const [run, rawRecord] of Object.entries(runs)) {
-    const record = dict(rawRecord, 'repair record');
+    if (!isRec(rawRecord)) throw subscriptError(rawRecord);
+    const record = rawRecord;
     const state = pyReq(record, 'state');
     if (typeof state === 'string' && TERMINAL.includes(state)) {
       await reconcileTerminal(fx, q, item, record, dry, messages);
@@ -413,7 +559,12 @@ export async function repairHarvest(
     let predecessor: unknown = pyReq(record, 'base');
     const jobs = asList(pyReq(record, 'jobs'), 'jobs');
     for (const jobId of jobs) {
-      if (typeof jobId !== 'string') throw new TypeError('job id must be a str');
+      if (typeof jobId !== 'string') {
+        throw new PyError(
+          'TypeError',
+          `unsupported operand type(s) for /: 'PosixPath' and '${pyTypeName(jobId)}'`,
+        );
+      }
       if (!(await fx.resultExists(jobId))) break;
       let expected: Rec;
       try {
@@ -425,7 +576,12 @@ export async function repairHarvest(
         // still harvest. An OSError is not a content defect (descriptor
         // exhaustion, a transient I/O fault): it propagates so the tick retries
         // the read, as Python's uncaught read error does.
-        if (!isPyError(e, 'ValueError') && !(e instanceof TypeError)) throw e;
+        if (
+          !isPyError(e, 'ValueError', 'TypeError', 'AttributeError') &&
+          !(e instanceof TypeError)
+        ) {
+          throw e;
+        }
         if (!dry) await recordTerminalFailure(fx, q, item, record, verdicts, null, jobId, e);
         break;
       }
@@ -452,6 +608,13 @@ export async function repairHarvest(
         await fx.requireCanonicalDelivery(expected);
       } catch (e) {
         if (!isPyError(e, 'ValueError')) throw e;
+        if (excText(e).includes('canonical delivery state unavailable')) {
+          // An unreadable triage row leaves ownership unproven, not lost:
+          // unlike a confirmed mismatch this can pass on a later tick, so keep
+          // the run retryable instead of stranding the retained verified
+          // result in a terminal state. Publish nothing from this tick.
+          break;
+        }
         if (!dry) {
           record.state = 'stale';
           record.error = excText(e);

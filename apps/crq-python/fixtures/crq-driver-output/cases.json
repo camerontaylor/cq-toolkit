@@ -1,0 +1,1911 @@
+{
+ "codex": [
+  {
+   "expect": {
+    "ok": true,
+    "result": "{\"changed\": true, \"summary\": \"s\", \"commits\": [\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"], \"stop\": \"ok\"}"
+   },
+   "judge": false,
+   "label": "fixer ok",
+   "output_b64": "eyJjaGFuZ2VkIjogdHJ1ZSwgInN1bW1hcnkiOiAicyIsICJjb21taXRzIjogWyJhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhIl19"
+  },
+  {
+   "expect": {
+    "ok": true,
+    "result": "{\"changed\": true, \"summary\": \"s\", \"commits\": [], \"stop\": \"ok\"}"
+   },
+   "judge": false,
+   "label": "fixer ok with empty commits",
+   "output_b64": "eyJjaGFuZ2VkIjogdHJ1ZSwgInN1bW1hcnkiOiAicyIsICJjb21taXRzIjogW119"
+  },
+  {
+   "expect": {
+    "ok": true,
+    "result": "{\"changed\": true, \"summary\": \"s\", \"commits\": [\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"], \"extra\": [1, {\"a\": null}], \"zed\": 1.5, \"stop\": \"ok\"}"
+   },
+   "judge": false,
+   "label": "fixer ok with extra keys passes through",
+   "output_b64": "eyJjaGFuZ2VkIjogdHJ1ZSwgInN1bW1hcnkiOiAicyIsICJjb21taXRzIjogWyJhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhIl0sICJleHRyYSI6IFsxLCB7ImEiOiBudWxsfV0sICJ6ZWQiOiAxLjV9"
+  },
+  {
+   "expect": {
+    "ok": true,
+    "result": "{\"stop\": \"ok\", \"changed\": false, \"summary\": \"s\", \"commits\": []}"
+   },
+   "judge": false,
+   "label": "fixer stop key is overwritten in place",
+   "output_b64": "eyJzdG9wIjoieCIsImNoYW5nZWQiOmZhbHNlLCJzdW1tYXJ5IjoicyIsImNvbW1pdHMiOltdfQ=="
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output misses required fields\", \"commits\": []}",
+    "ok": false
+   },
+   "judge": false,
+   "label": "fixer changed as int 1 is refused",
+   "output_b64": "eyJjaGFuZ2VkIjogMSwgInN1bW1hcnkiOiAicyIsICJjb21taXRzIjogWyJhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhIl19"
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output misses required fields\", \"commits\": []}",
+    "ok": false
+   },
+   "judge": false,
+   "label": "fixer changed as int 0 is refused",
+   "output_b64": "eyJjaGFuZ2VkIjogMCwgInN1bW1hcnkiOiAicyIsICJjb21taXRzIjogWyJhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhIl19"
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output misses required fields\", \"commits\": []}",
+    "ok": false
+   },
+   "judge": false,
+   "label": "fixer changed as string is refused",
+   "output_b64": "eyJjaGFuZ2VkIjogInRydWUiLCAic3VtbWFyeSI6ICJzIiwgImNvbW1pdHMiOiBbImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiXX0="
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output misses required fields\", \"commits\": []}",
+    "ok": false
+   },
+   "judge": false,
+   "label": "fixer changed null is refused",
+   "output_b64": "eyJjaGFuZ2VkIjogbnVsbCwgInN1bW1hcnkiOiAicyIsICJjb21taXRzIjogWyJhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhIl19"
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output misses required fields\", \"commits\": []}",
+    "ok": false
+   },
+   "judge": false,
+   "label": "fixer summary null is refused",
+   "output_b64": "eyJjaGFuZ2VkIjogdHJ1ZSwgInN1bW1hcnkiOiBudWxsLCAiY29tbWl0cyI6IFsiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSJdfQ=="
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output misses required fields\", \"commits\": []}",
+    "ok": false
+   },
+   "judge": false,
+   "label": "fixer summary number is refused",
+   "output_b64": "eyJjaGFuZ2VkIjogdHJ1ZSwgInN1bW1hcnkiOiA3LCAiY29tbWl0cyI6IFsiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSJdfQ=="
+  },
+  {
+   "expect": {
+    "ok": true,
+    "result": "{\"changed\": true, \"summary\": \"\", \"commits\": [\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"], \"stop\": \"ok\"}"
+   },
+   "judge": false,
+   "label": "fixer empty summary is accepted",
+   "output_b64": "eyJjaGFuZ2VkIjogdHJ1ZSwgInN1bW1hcnkiOiAiIiwgImNvbW1pdHMiOiBbImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiXX0="
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output misses required fields\", \"commits\": []}",
+    "ok": false
+   },
+   "judge": false,
+   "label": "fixer commits as string is refused",
+   "output_b64": "eyJjaGFuZ2VkIjogdHJ1ZSwgInN1bW1hcnkiOiAicyIsICJjb21taXRzIjogImFiYyJ9"
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output misses required fields\", \"commits\": []}",
+    "ok": false
+   },
+   "judge": false,
+   "label": "fixer commits as object is refused",
+   "output_b64": "eyJjaGFuZ2VkIjogdHJ1ZSwgInN1bW1hcnkiOiAicyIsICJjb21taXRzIjoge319"
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output misses required fields\", \"commits\": []}",
+    "ok": false
+   },
+   "judge": false,
+   "label": "fixer commits with a non-string member is refused",
+   "output_b64": "eyJjaGFuZ2VkIjogdHJ1ZSwgInN1bW1hcnkiOiAicyIsICJjb21taXRzIjogWyJhIiwgMV19"
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output misses required fields\", \"commits\": []}",
+    "ok": false
+   },
+   "judge": false,
+   "label": "fixer commits with a null member is refused",
+   "output_b64": "eyJjaGFuZ2VkIjogdHJ1ZSwgInN1bW1hcnkiOiAicyIsICJjb21taXRzIjogW251bGxdfQ=="
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output misses required fields\", \"commits\": []}",
+    "ok": false
+   },
+   "judge": false,
+   "label": "fixer commits nested list member is refused",
+   "output_b64": "eyJjaGFuZ2VkIjogdHJ1ZSwgInN1bW1hcnkiOiAicyIsICJjb21taXRzIjogW1siYSJdXX0="
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output misses required fields\", \"commits\": []}",
+    "ok": false
+   },
+   "judge": false,
+   "label": "fixer missing changed",
+   "output_b64": "eyJzdW1tYXJ5IjoicyIsImNvbW1pdHMiOltdfQ=="
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output misses required fields\", \"commits\": []}",
+    "ok": false
+   },
+   "judge": false,
+   "label": "fixer missing summary",
+   "output_b64": "eyJjaGFuZ2VkIjp0cnVlLCJjb21taXRzIjpbXX0="
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output misses required fields\", \"commits\": []}",
+    "ok": false
+   },
+   "judge": false,
+   "label": "fixer missing commits",
+   "output_b64": "eyJjaGFuZ2VkIjp0cnVlLCJzdW1tYXJ5IjoicyJ9"
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output misses required fields\", \"commits\": []}",
+    "ok": false
+   },
+   "judge": false,
+   "label": "fixer empty object",
+   "output_b64": "e30="
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output misses required fields\", \"commits\": []}",
+    "ok": false
+   },
+   "judge": false,
+   "label": "fixer judge-shaped object",
+   "output_b64": "eyJ2ZXJkaWN0IjogInZhbGlkIiwgInJlYXNvbiI6ICJyIn0="
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output misses required fields\", \"commits\": []}",
+    "ok": false
+   },
+   "judge": false,
+   "label": "fixer wrong-typed field with a missing one reports required fields",
+   "output_b64": "eyJjaGFuZ2VkIjoxfQ=="
+  },
+  {
+   "expect": {
+    "ok": true,
+    "result": "{\"changed\": true, \"summary\": \"s\", \"commits\": [], \"stop\": \"ok\"}"
+   },
+   "judge": false,
+   "label": "fixer duplicate keys: the last value wins",
+   "output_b64": "eyJjaGFuZ2VkIjpmYWxzZSwic3VtbWFyeSI6InMiLCJjb21taXRzIjpbXSwiY2hhbmdlZCI6dHJ1ZX0="
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output misses required fields\", \"commits\": []}",
+    "ok": false
+   },
+   "judge": false,
+   "label": "fixer duplicate key makes a valid field invalid",
+   "output_b64": "eyJjaGFuZ2VkIjp0cnVlLCJzdW1tYXJ5IjoicyIsImNvbW1pdHMiOltdLCJjaGFuZ2VkIjoieCJ9"
+  },
+  {
+   "expect": {
+    "ok": true,
+    "result": "{\"changed\": true, \"summary\": \"s\", \"commits\": [], \"n\": NaN, \"i\": -Infinity, \"stop\": \"ok\"}"
+   },
+   "judge": false,
+   "label": "fixer NaN in an extra field",
+   "output_b64": "eyJjaGFuZ2VkIjp0cnVlLCJzdW1tYXJ5IjoicyIsImNvbW1pdHMiOltdLCJuIjpOYU4sImkiOi1JbmZpbml0eX0="
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output misses required fields\", \"commits\": []}",
+    "ok": false
+   },
+   "judge": false,
+   "label": "fixer NaN in a typed field",
+   "output_b64": "eyJjaGFuZ2VkIjpOYU4sInN1bW1hcnkiOiJzIiwiY29tbWl0cyI6W119"
+  },
+  {
+   "expect": {
+    "ok": true,
+    "result": "{\"changed\": true, \"summary\": \"s\", \"commits\": [], \"stop\": \"ok\"}"
+   },
+   "judge": false,
+   "label": "fixer surrounding JSON whitespace",
+   "output_b64": "IAkNCnsiY2hhbmdlZCI6dHJ1ZSwic3VtbWFyeSI6InMiLCJjb21taXRzIjpbXX0gCg=="
+  },
+  {
+   "expect": {
+    "ok": true,
+    "result": "{\"changed\": true, \"summary\": \"\\u00e9\\ud83d\\ude00\", \"commits\": [], \"stop\": \"ok\"}"
+   },
+   "judge": false,
+   "label": "fixer non-ascii summary",
+   "output_b64": "eyJjaGFuZ2VkIjp0cnVlLCJzdW1tYXJ5Ijoiw6nwn5iAIiwiY29tbWl0cyI6W119"
+  },
+  {
+   "expect": {
+    "ok": true,
+    "result": "{\"changed\": true, \"summary\": \"\\ud83d\\ude00\", \"commits\": [], \"stop\": \"ok\"}"
+   },
+   "judge": false,
+   "label": "fixer escaped surrogate pair",
+   "output_b64": "eyJjaGFuZ2VkIjp0cnVlLCJzdW1tYXJ5IjoiXHVkODNkXHVkZTAwIiwiY29tbWl0cyI6W119"
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output unparseable\", \"commits\": []}",
+    "ok": false
+   },
+   "judge": false,
+   "label": "fixer array output",
+   "output_b64": "W10="
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output unparseable\", \"commits\": []}",
+    "ok": false
+   },
+   "judge": false,
+   "label": "fixer array of fixer objects",
+   "output_b64": "W3siY2hhbmdlZCI6dHJ1ZSwic3VtbWFyeSI6InMiLCJjb21taXRzIjpbXX1d"
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output unparseable\", \"commits\": []}",
+    "ok": false
+   },
+   "judge": false,
+   "label": "fixer string output",
+   "output_b64": "Ingi"
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output unparseable\", \"commits\": []}",
+    "ok": false
+   },
+   "judge": false,
+   "label": "fixer null output",
+   "output_b64": "bnVsbA=="
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output unparseable\", \"commits\": []}",
+    "ok": false
+   },
+   "judge": false,
+   "label": "fixer number output",
+   "output_b64": "MQ=="
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output unparseable\", \"commits\": []}",
+    "ok": false
+   },
+   "judge": false,
+   "label": "fixer true output",
+   "output_b64": "dHJ1ZQ=="
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output unparseable\", \"commits\": []}",
+    "ok": false
+   },
+   "judge": false,
+   "label": "fixer empty output",
+   "output_b64": ""
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output unparseable\", \"commits\": []}",
+    "ok": false
+   },
+   "judge": false,
+   "label": "fixer whitespace-only output",
+   "output_b64": "ICAK"
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output unparseable\", \"commits\": []}",
+    "ok": false
+   },
+   "judge": false,
+   "label": "fixer truncated object",
+   "output_b64": "eyJjaGFuZ2VkIjp0cnVlLCJzdW1tYXJ5IjoicyI="
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output unparseable\", \"commits\": []}",
+    "ok": false
+   },
+   "judge": false,
+   "label": "fixer trailing garbage",
+   "output_b64": "eyJjaGFuZ2VkIjogdHJ1ZSwgInN1bW1hcnkiOiAicyIsICJjb21taXRzIjogWyJhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhIl19IHg="
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output unparseable\", \"commits\": []}",
+    "ok": false
+   },
+   "judge": false,
+   "label": "fixer two objects",
+   "output_b64": "eyJjaGFuZ2VkIjogdHJ1ZSwgInN1bW1hcnkiOiAicyIsICJjb21taXRzIjogWyJhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhIl19eyJjaGFuZ2VkIjogdHJ1ZSwgInN1bW1hcnkiOiAicyIsICJjb21taXRzIjogWyJhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhIl19"
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output unparseable\", \"commits\": []}",
+    "ok": false
+   },
+   "judge": false,
+   "label": "fixer trailing comma",
+   "output_b64": "eyJjaGFuZ2VkIjp0cnVlLCJzdW1tYXJ5IjoicyIsImNvbW1pdHMiOltdLH0="
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output unparseable\", \"commits\": []}",
+    "ok": false
+   },
+   "judge": false,
+   "label": "fixer single quotes",
+   "output_b64": "eydjaGFuZ2VkJzp0cnVlfQ=="
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output unparseable\", \"commits\": []}",
+    "ok": false
+   },
+   "judge": false,
+   "label": "fixer leading BOM",
+   "output_b64": "77u/eyJjaGFuZ2VkIjogdHJ1ZSwgInN1bW1hcnkiOiAicyIsICJjb21taXRzIjogWyJhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhIl19"
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output unparseable\", \"commits\": []}",
+    "ok": false
+   },
+   "judge": false,
+   "label": "fixer invalid UTF-8",
+   "output_b64": "eyJjaGFuZ2VkIjp0cnVlLCJzdW1tYXJ5Ijoi/yIsImNvbW1pdHMiOltdfQ=="
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output unparseable\", \"commits\": []}",
+    "ok": false
+   },
+   "judge": false,
+   "label": "fixer lone UTF-8 continuation byte",
+   "output_b64": "gA=="
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output unparseable\", \"commits\": []}",
+    "ok": false
+   },
+   "judge": false,
+   "label": "fixer NUL byte",
+   "output_b64": "eyJjaGFuZ2VkIjp0cnVlLCJzdW1tYXJ5IjoicyIsImNvbW1pdHMiOltdfQA="
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output unparseable\", \"commits\": []}",
+    "ok": false
+   },
+   "judge": false,
+   "label": "fixer raw newline in a string",
+   "output_b64": "eyJjaGFuZ2VkIjp0cnVlLCJzdW1tYXJ5IjoiYQpiIiwiY29tbWl0cyI6W119"
+  },
+  {
+   "expect": {
+    "ok": true,
+    "result": "{\"changed\": true, \"summary\": \"s\", \"commits\": [], \"stop\": \"ok\"}"
+   },
+   "judge": false,
+   "label": "fixer CRLF between tokens",
+   "output_b64": "ew0KImNoYW5nZWQiOnRydWUsDQoic3VtbWFyeSI6InMiLA0KImNvbW1pdHMiOltdDQp9"
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output unparseable\", \"commits\": []}",
+    "ok": false
+   },
+   "judge": false,
+   "label": "fixer form feed whitespace is not JSON whitespace",
+   "output_b64": "DHsiY2hhbmdlZCI6dHJ1ZSwic3VtbWFyeSI6InMiLCJjb21taXRzIjpbXX0="
+  },
+  {
+   "expect": {
+    "ok": true,
+    "result": "{\"changed\": true, \"summary\": \"\\ud800\", \"commits\": [], \"stop\": \"ok\"}"
+   },
+   "judge": false,
+   "label": "fixer bare lone surrogate escape",
+   "output_b64": "eyJjaGFuZ2VkIjp0cnVlLCJzdW1tYXJ5IjoiXHVkODAwIiwiY29tbWl0cyI6W119"
+  },
+  {
+   "expect": {
+    "ok": true,
+    "result": "{\"changed\": true, \"summary\": \"s\", \"commits\": [], \"x\": [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]], \"stop\": \"ok\"}"
+   },
+   "judge": false,
+   "label": "fixer deep nesting in an extra key",
+   "output_b64": "eyJjaGFuZ2VkIjp0cnVlLCJzdW1tYXJ5IjoicyIsImNvbW1pdHMiOltdLCJ4IjpbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW11dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dfQ=="
+  },
+  {
+   "expect": {
+    "ok": true,
+    "result": "{\"changed\": true, \"summary\": \"s\", \"commits\": [], \"x\": 123456789012345678901234567890, \"stop\": \"ok\"}"
+   },
+   "judge": false,
+   "label": "fixer huge integer extra",
+   "output_b64": "eyJjaGFuZ2VkIjp0cnVlLCJzdW1tYXJ5IjoicyIsImNvbW1pdHMiOltdLCJ4IjoxMjM0NTY3ODkwMTIzNDU2Nzg5MDEyMzQ1Njc4OTB9"
+  },
+  {
+   "expect": {
+    "ok": true,
+    "result": "{\"changed\": true, \"summary\": \"s\", \"commits\": [], \"x\": 1.0, \"y\": 100000.0, \"z\": 0, \"stop\": \"ok\"}"
+   },
+   "judge": false,
+   "label": "fixer float forms extra",
+   "output_b64": "eyJjaGFuZ2VkIjp0cnVlLCJzdW1tYXJ5IjoicyIsImNvbW1pdHMiOltdLCJ4IjoxLjAsInkiOjFlNSwieiI6LTB9"
+  },
+  {
+   "expect": {
+    "ok": true,
+    "result": "{\"changed\": true, \"summary\": \"s\", \"commits\": [], \"stop\": \"ok\"}"
+   },
+   "judge": false,
+   "label": "fixer key with unicode escape",
+   "output_b64": "eyJjaGFuZ1x1MDA2NWQiOnRydWUsInN1bW1hcnkiOiJzIiwiY29tbWl0cyI6W119"
+  },
+  {
+   "expect": {
+    "ok": true,
+    "result": "{\"__proto__\": {\"a\": 1}, \"changed\": true, \"summary\": \"s\", \"commits\": [], \"stop\": \"ok\"}"
+   },
+   "judge": false,
+   "label": "fixer proto-style key passes through",
+   "output_b64": "eyJfX3Byb3RvX18iOnsiYSI6MX0sImNoYW5nZWQiOnRydWUsInN1bW1hcnkiOiJzIiwiY29tbWl0cyI6W119"
+  },
+  {
+   "expect": {
+    "ok": true,
+    "result": "{\"verdict\": \"valid\", \"reason\": \"r\", \"stop\": \"ok\"}"
+   },
+   "judge": true,
+   "label": "judge valid",
+   "output_b64": "eyJ2ZXJkaWN0IjogInZhbGlkIiwgInJlYXNvbiI6ICJyIn0="
+  },
+  {
+   "expect": {
+    "ok": true,
+    "result": "{\"verdict\": \"invalid\", \"reason\": \"r\", \"stop\": \"ok\"}"
+   },
+   "judge": true,
+   "label": "judge invalid",
+   "output_b64": "eyJ2ZXJkaWN0IjogImludmFsaWQiLCAicmVhc29uIjogInIifQ=="
+  },
+  {
+   "expect": {
+    "ok": true,
+    "result": "{\"verdict\": \"unsure\", \"reason\": \"r\", \"stop\": \"ok\"}"
+   },
+   "judge": true,
+   "label": "judge unsure",
+   "output_b64": "eyJ2ZXJkaWN0IjogInVuc3VyZSIsICJyZWFzb24iOiAiciJ9"
+  },
+  {
+   "expect": {
+    "ok": true,
+    "result": "{\"verdict\": \"valid\", \"reason\": \"r\", \"note\": [1, 2], \"other\": {\"k\": \"v\"}, \"stop\": \"ok\"}"
+   },
+   "judge": true,
+   "label": "judge extra keys pass through",
+   "output_b64": "eyJ2ZXJkaWN0IjogInZhbGlkIiwgInJlYXNvbiI6ICJyIiwgIm5vdGUiOiBbMSwgMl0sICJvdGhlciI6IHsiayI6ICJ2In19"
+  },
+  {
+   "expect": {
+    "ok": true,
+    "result": "{\"verdict\": \"valid\", \"reason\": 5, \"stop\": \"ok\"}"
+   },
+   "judge": true,
+   "label": "judge reason is passed through unchecked: number",
+   "output_b64": "eyJ2ZXJkaWN0IjogInZhbGlkIiwgInJlYXNvbiI6IDV9"
+  },
+  {
+   "expect": {
+    "ok": true,
+    "result": "{\"verdict\": \"valid\", \"reason\": null, \"stop\": \"ok\"}"
+   },
+   "judge": true,
+   "label": "judge reason is passed through unchecked: null",
+   "output_b64": "eyJ2ZXJkaWN0IjogInZhbGlkIiwgInJlYXNvbiI6IG51bGx9"
+  },
+  {
+   "expect": {
+    "ok": true,
+    "result": "{\"verdict\": \"valid\", \"reason\": {\"a\": 1}, \"stop\": \"ok\"}"
+   },
+   "judge": true,
+   "label": "judge reason is passed through unchecked: object",
+   "output_b64": "eyJ2ZXJkaWN0IjogInZhbGlkIiwgInJlYXNvbiI6IHsiYSI6IDF9fQ=="
+  },
+  {
+   "expect": {
+    "ok": true,
+    "result": "{\"verdict\": \"valid\", \"stop\": \"ok\", \"reason\": \"r\"}"
+   },
+   "judge": true,
+   "label": "judge stop key is overwritten in place",
+   "output_b64": "eyJ2ZXJkaWN0IjoidmFsaWQiLCJzdG9wIjoieCIsInJlYXNvbiI6InIifQ=="
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex verdict outside schema enum\", \"commits\": [], \"verdict\": \"unsure\", \"reason\": \"codex verdict outside schema enum\"}",
+    "ok": false
+   },
+   "judge": true,
+   "label": "judge capitalised verdict is outside the enum",
+   "output_b64": "eyJ2ZXJkaWN0IjogIlZhbGlkIiwgInJlYXNvbiI6ICJyIn0="
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex verdict outside schema enum\", \"commits\": [], \"verdict\": \"unsure\", \"reason\": \"codex verdict outside schema enum\"}",
+    "ok": false
+   },
+   "judge": true,
+   "label": "judge padded verdict is outside the enum",
+   "output_b64": "eyJ2ZXJkaWN0IjogInZhbGlkICIsICJyZWFzb24iOiAiciJ9"
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex verdict outside schema enum\", \"commits\": [], \"verdict\": \"unsure\", \"reason\": \"codex verdict outside schema enum\"}",
+    "ok": false
+   },
+   "judge": true,
+   "label": "judge unknown verdict",
+   "output_b64": "eyJ2ZXJkaWN0IjogIm1heWJlIiwgInJlYXNvbiI6ICJyIn0="
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex verdict outside schema enum\", \"commits\": [], \"verdict\": \"unsure\", \"reason\": \"codex verdict outside schema enum\"}",
+    "ok": false
+   },
+   "judge": true,
+   "label": "judge empty verdict",
+   "output_b64": "eyJ2ZXJkaWN0IjogIiIsICJyZWFzb24iOiAiciJ9"
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex verdict outside schema enum\", \"commits\": [], \"verdict\": \"unsure\", \"reason\": \"codex verdict outside schema enum\"}",
+    "ok": false
+   },
+   "judge": true,
+   "label": "judge null verdict",
+   "output_b64": "eyJ2ZXJkaWN0IjogbnVsbCwgInJlYXNvbiI6ICJyIn0="
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex verdict outside schema enum\", \"commits\": [], \"verdict\": \"unsure\", \"reason\": \"codex verdict outside schema enum\"}",
+    "ok": false
+   },
+   "judge": true,
+   "label": "judge true verdict",
+   "output_b64": "eyJ2ZXJkaWN0IjogdHJ1ZSwgInJlYXNvbiI6ICJyIn0="
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex verdict outside schema enum\", \"commits\": [], \"verdict\": \"unsure\", \"reason\": \"codex verdict outside schema enum\"}",
+    "ok": false
+   },
+   "judge": true,
+   "label": "judge number verdict",
+   "output_b64": "eyJ2ZXJkaWN0IjogMSwgInJlYXNvbiI6ICJyIn0="
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex verdict outside schema enum\", \"commits\": [], \"verdict\": \"unsure\", \"reason\": \"codex verdict outside schema enum\"}",
+    "ok": false
+   },
+   "judge": true,
+   "label": "judge list verdict",
+   "output_b64": "eyJ2ZXJkaWN0IjogWyJ2YWxpZCJdLCAicmVhc29uIjogInIifQ=="
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex verdict outside schema enum\", \"commits\": [], \"verdict\": \"unsure\", \"reason\": \"codex verdict outside schema enum\"}",
+    "ok": false
+   },
+   "judge": true,
+   "label": "judge object verdict",
+   "output_b64": "eyJ2ZXJkaWN0IjogeyJ2YWxpZCI6IDF9LCAicmVhc29uIjogInIifQ=="
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output misses required fields\", \"commits\": [], \"verdict\": \"unsure\", \"reason\": \"codex output misses required fields\"}",
+    "ok": false
+   },
+   "judge": true,
+   "label": "judge missing verdict",
+   "output_b64": "eyJyZWFzb24iOiJyIn0="
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output misses required fields\", \"commits\": [], \"verdict\": \"unsure\", \"reason\": \"codex output misses required fields\"}",
+    "ok": false
+   },
+   "judge": true,
+   "label": "judge missing reason",
+   "output_b64": "eyJ2ZXJkaWN0IjoidmFsaWQifQ=="
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output misses required fields\", \"commits\": [], \"verdict\": \"unsure\", \"reason\": \"codex output misses required fields\"}",
+    "ok": false
+   },
+   "judge": true,
+   "label": "judge fixer-shaped object",
+   "output_b64": "eyJjaGFuZ2VkIjogdHJ1ZSwgInN1bW1hcnkiOiAicyIsICJjb21taXRzIjogWyJhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhIl19"
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output misses required fields\", \"commits\": [], \"verdict\": \"unsure\", \"reason\": \"codex output misses required fields\"}",
+    "ok": false
+   },
+   "judge": true,
+   "label": "judge empty object",
+   "output_b64": "e30="
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex verdict outside schema enum\", \"commits\": [], \"verdict\": \"unsure\", \"reason\": \"codex verdict outside schema enum\"}",
+    "ok": false
+   },
+   "judge": true,
+   "label": "judge duplicate verdict: the last value wins",
+   "output_b64": "eyJ2ZXJkaWN0IjoidmFsaWQiLCJyZWFzb24iOiJyIiwidmVyZGljdCI6ImJhZCJ9"
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output unparseable\", \"commits\": [], \"verdict\": \"unsure\", \"reason\": \"codex output unparseable\"}",
+    "ok": false
+   },
+   "judge": true,
+   "label": "judge array output",
+   "output_b64": "W10="
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output unparseable\", \"commits\": [], \"verdict\": \"unsure\", \"reason\": \"codex output unparseable\"}",
+    "ok": false
+   },
+   "judge": true,
+   "label": "judge empty output",
+   "output_b64": ""
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output unparseable\", \"commits\": [], \"verdict\": \"unsure\", \"reason\": \"codex output unparseable\"}",
+    "ok": false
+   },
+   "judge": true,
+   "label": "judge BOM",
+   "output_b64": "77u/eyJ2ZXJkaWN0IjogInZhbGlkIiwgInJlYXNvbiI6ICJyIn0="
+  },
+  {
+   "expect": {
+    "failure": "{\"stop\": \"error\", \"changed\": false, \"summary\": \"codex output unparseable\", \"commits\": [], \"verdict\": \"unsure\", \"reason\": \"codex output unparseable\"}",
+    "ok": false
+   },
+   "judge": true,
+   "label": "judge invalid UTF-8",
+   "output_b64": "eyJ2ZXJkaWN0IjoidmFsaWQiLCJyZWFzb24iOiLDKCJ9"
+  },
+  {
+   "expect": {
+    "ok": true,
+    "result": "{\"verdict\": \"valid\", \"reason\": NaN, \"stop\": \"ok\"}"
+   },
+   "judge": true,
+   "label": "judge NaN reason",
+   "output_b64": "eyJ2ZXJkaWN0IjoidmFsaWQiLCJyZWFzb24iOk5hTn0="
+  }
+ ],
+ "cq": [
+  {
+   "created": [
+    "abc.jsonl"
+   ],
+   "end": "timeout",
+   "existing": [],
+   "expect": {
+    "record": {
+     "harness": "cq",
+     "sessionId": "abc",
+     "sessionIds": [
+      "abc"
+     ],
+     "sessionsDir": "<sessions>",
+     "workId": null
+    },
+    "stop": "budget"
+   },
+   "label": "wall clock with one created session"
+  },
+  {
+   "created": [],
+   "end": "timeout",
+   "existing": [],
+   "expect": {
+    "record": {
+     "harness": "cq",
+     "sessionId": null,
+     "sessionIds": [],
+     "sessionsDir": null,
+     "workId": null
+    },
+    "stop": "budget"
+   },
+   "label": "wall clock with no sessions",
+   "no_dir": true
+  },
+  {
+   "created": [],
+   "end": "timeout",
+   "existing": [],
+   "expect": {
+    "record": {
+     "harness": "cq",
+     "sessionId": null,
+     "sessionIds": [],
+     "sessionsDir": null,
+     "workId": null
+    },
+    "stop": "budget"
+   },
+   "label": "wall clock with a regular file at the sessions path",
+   "sessions_is_file": true
+  },
+  {
+   "created": [],
+   "end": "timeout",
+   "existing": [],
+   "expect": {
+    "record": {
+     "harness": "cq",
+     "sessionId": null,
+     "sessionIds": [],
+     "sessionsDir": null,
+     "workId": null
+    },
+    "stop": "budget"
+   },
+   "label": "wall clock with an empty sessions dir"
+  },
+  {
+   "created": [],
+   "end": "timeout",
+   "existing": [
+    "old.jsonl"
+   ],
+   "expect": {
+    "record": {
+     "harness": "cq",
+     "sessionId": null,
+     "sessionIds": [
+      "old"
+     ],
+     "sessionsDir": "<sessions>",
+     "workId": null
+    },
+    "stop": "budget"
+   },
+   "label": "wall clock never claims an earlier run session"
+  },
+  {
+   "created": [
+    "b.jsonl",
+    "a.jsonl"
+   ],
+   "end": "timeout",
+   "existing": [],
+   "expect": {
+    "record": {
+     "harness": "cq",
+     "sessionId": null,
+     "sessionIds": [
+      "a",
+      "b"
+     ],
+     "sessionsDir": "<sessions>",
+     "workId": null
+    },
+    "stop": "budget"
+   },
+   "label": "wall clock with two created sessions has no current id"
+  },
+  {
+   "created": [
+    "mid.jsonl"
+   ],
+   "end": "timeout",
+   "existing": [
+    "z-old.jsonl",
+    "a-old.jsonl"
+   ],
+   "expect": {
+    "record": {
+     "harness": "cq",
+     "sessionId": "mid",
+     "sessionIds": [
+      "a-old",
+      "mid",
+      "z-old"
+     ],
+     "sessionsDir": "<sessions>",
+     "workId": null
+    },
+    "stop": "budget"
+   },
+   "label": "wall clock with one created among older sessions"
+  },
+  {
+   "created": [
+    "m.jsonl"
+   ],
+   "end": "timeout",
+   "existing": [
+    "\uffff.jsonl",
+    "\ud83d\ude00.jsonl"
+   ],
+   "expect": {
+    "record": {
+     "harness": "cq",
+     "sessionId": "m",
+     "sessionIds": [
+      "m",
+      "\uffff",
+      "\ud83d\ude00"
+     ],
+     "sessionsDir": "<sessions>",
+     "workId": null
+    },
+    "stop": "budget"
+   },
+   "label": "wall clock sorts session ids by code point"
+  },
+  {
+   "created": [],
+   "end": "timeout",
+   "existing": [
+    "x.jsonl",
+    "x.json",
+    "x.jsonl.bak",
+    "README"
+   ],
+   "expect": {
+    "record": {
+     "harness": "cq",
+     "sessionId": null,
+     "sessionIds": [
+      "x"
+     ],
+     "sessionsDir": "<sessions>",
+     "workId": null
+    },
+    "stop": "budget"
+   },
+   "label": "wall clock ignores non-jsonl files"
+  },
+  {
+   "created": [],
+   "end": "timeout",
+   "existing": [
+    "note.txt"
+   ],
+   "expect": {
+    "record": {
+     "harness": "cq",
+     "sessionId": null,
+     "sessionIds": [],
+     "sessionsDir": "<sessions>",
+     "workId": null
+    },
+    "stop": "budget"
+   },
+   "label": "wall clock with only a non-jsonl file lists the dir but no ids"
+  },
+  {
+   "created": [
+    "a.b.jsonl"
+   ],
+   "end": "timeout",
+   "existing": [],
+   "expect": {
+    "record": {
+     "harness": "cq",
+     "sessionId": "a.b",
+     "sessionIds": [
+      "a.b"
+     ],
+     "sessionsDir": "<sessions>",
+     "workId": null
+    },
+    "stop": "budget"
+   },
+   "label": "multi-dot session name keeps the inner dots"
+  },
+  {
+   "created": [
+    ".jsonl"
+   ],
+   "end": "timeout",
+   "existing": [],
+   "expect": {
+    "record": {
+     "harness": "cq",
+     "sessionId": ".jsonl",
+     "sessionIds": [
+      ".jsonl"
+     ],
+     "sessionsDir": "<sessions>",
+     "workId": null
+    },
+    "stop": "budget"
+   },
+   "label": "a bare .jsonl file is its own stem"
+  },
+  {
+   "created": [
+    ".jsonl"
+   ],
+   "end": "timeout",
+   "existing": [
+    "x.jsonl"
+   ],
+   "expect": {
+    "record": {
+     "harness": "cq",
+     "sessionId": ".jsonl",
+     "sessionIds": [
+      ".jsonl",
+      "x"
+     ],
+     "sessionsDir": "<sessions>",
+     "workId": null
+    },
+    "stop": "budget"
+   },
+   "label": "a bare .jsonl file among others"
+  },
+  {
+   "created": [
+    "..jsonl"
+   ],
+   "end": "timeout",
+   "existing": [],
+   "expect": {
+    "record": {
+     "harness": "cq",
+     "sessionId": "..jsonl",
+     "sessionIds": [
+      "..jsonl"
+     ],
+     "sessionsDir": "<sessions>",
+     "workId": null
+    },
+    "stop": "budget"
+   },
+   "label": "double-dot name"
+  },
+  {
+   "created": [
+    "s\u00e9\ud83d\ude00.jsonl"
+   ],
+   "end": "timeout",
+   "existing": [],
+   "expect": {
+    "record": {
+     "harness": "cq",
+     "sessionId": "s\u00e9\ud83d\ude00",
+     "sessionIds": [
+      "s\u00e9\ud83d\ude00"
+     ],
+     "sessionsDir": "<sessions>",
+     "workId": null
+    },
+    "stop": "budget"
+   },
+   "label": "unicode session id"
+  },
+  {
+   "created": [
+    "abc.jsonl"
+   ],
+   "end": "timeout",
+   "existing": [],
+   "expect": {
+    "record": {
+     "harness": "cq",
+     "sessionId": "abc",
+     "sessionIds": [
+      "abc"
+     ],
+     "sessionsDir": "<sessions>",
+     "workId": "w-1"
+    },
+    "stop": "budget"
+   },
+   "label": "work id from the environment",
+   "work_id": "w-1"
+  },
+  {
+   "created": [
+    "abc.jsonl"
+   ],
+   "end": "timeout",
+   "existing": [],
+   "expect": {
+    "record": {
+     "harness": "cq",
+     "sessionId": "abc",
+     "sessionIds": [
+      "abc"
+     ],
+     "sessionsDir": "<sessions>",
+     "workId": ""
+    },
+    "stop": "budget"
+   },
+   "label": "empty work id stays an empty string",
+   "work_id": ""
+  },
+  {
+   "created": [
+    "s1.jsonl"
+   ],
+   "end": "stdout",
+   "existing": [],
+   "expect": {
+    "record": {
+     "harness": "cq",
+     "sessionId": "s1",
+     "sessionIds": [
+      "s1"
+     ],
+     "sessionsDir": "<sessions>",
+     "workId": null
+    },
+    "stop": "ok"
+   },
+   "label": "normal run with one created session",
+   "stdout": "{\"status\":\"ok\",\"value\":{\"verdict\":\"pass\",\"changed\":false,\"commits\":[],\"summary\":\"s\"}}"
+  },
+  {
+   "created": [
+    "s1.jsonl"
+   ],
+   "end": "stdout",
+   "existing": [],
+   "expect": {
+    "record": {
+     "harness": "cq",
+     "sessionId": "vsid",
+     "sessionIds": [
+      "s1"
+     ],
+     "sessionsDir": "<sessions>",
+     "workId": null
+    },
+    "stop": "ok"
+   },
+   "label": "normal run value sessionId wins",
+   "stdout": "{\"status\":\"ok\",\"value\":{\"verdict\":\"pass\",\"sessionId\":\"vsid\"}}"
+  },
+  {
+   "created": [
+    "s1.jsonl"
+   ],
+   "end": "stdout",
+   "existing": [],
+   "expect": {
+    "record": {
+     "harness": "cq",
+     "sessionId": "s1",
+     "sessionIds": [
+      "s1"
+     ],
+     "sessionsDir": "<sessions>",
+     "workId": null
+    },
+    "stop": "ok"
+   },
+   "label": "normal run non-string sessionId falls back to the created file",
+   "stdout": "{\"status\":\"ok\",\"value\":{\"verdict\":\"pass\",\"sessionId\":7}}"
+  },
+  {
+   "created": [
+    "s1.jsonl"
+   ],
+   "end": "stdout",
+   "existing": [],
+   "expect": {
+    "record": {
+     "harness": "cq",
+     "sessionId": "s1",
+     "sessionIds": [
+      "s1"
+     ],
+     "sessionsDir": "<sessions>",
+     "workId": null
+    },
+    "stop": "ok"
+   },
+   "label": "normal run empty sessionId falls back to the created file",
+   "stdout": "{\"status\":\"ok\",\"value\":{\"verdict\":\"pass\",\"sessionId\":\"\"}}"
+  },
+  {
+   "created": [],
+   "end": "stdout",
+   "existing": [],
+   "expect": {
+    "record": {
+     "harness": "cq",
+     "sessionId": null,
+     "sessionIds": [],
+     "sessionsDir": null,
+     "workId": null
+    },
+    "stop": "ok"
+   },
+   "label": "normal run non-string sessionId without a created file is null",
+   "stdout": "{\"status\":\"ok\",\"value\":{\"verdict\":\"pass\",\"sessionId\":[\"x\"]}}"
+  },
+  {
+   "created": [
+    "a.jsonl",
+    "b.jsonl"
+   ],
+   "end": "stdout",
+   "existing": [],
+   "expect": {
+    "record": {
+     "harness": "cq",
+     "sessionId": "vsid",
+     "sessionIds": [
+      "a",
+      "b"
+     ],
+     "sessionsDir": "<sessions>",
+     "workId": null
+    },
+    "stop": "ok"
+   },
+   "label": "normal run value sessionId wins over two created files",
+   "stdout": "{\"status\":\"ok\",\"value\":{\"verdict\":\"pass\",\"sessionId\":\"vsid\"}}"
+  },
+  {
+   "created": [
+    "a.jsonl",
+    "b.jsonl"
+   ],
+   "end": "stdout",
+   "existing": [],
+   "expect": {
+    "record": {
+     "harness": "cq",
+     "sessionId": null,
+     "sessionIds": [
+      "a",
+      "b"
+     ],
+     "sessionsDir": "<sessions>",
+     "workId": null
+    },
+    "stop": "ok"
+   },
+   "label": "normal run two created files have no current id",
+   "stdout": "{\"status\":\"ok\",\"value\":{\"verdict\":\"pass\",\"changed\":false,\"commits\":[],\"summary\":\"s\"}}"
+  },
+  {
+   "created": [],
+   "end": "stdout",
+   "existing": [
+    "old.jsonl"
+   ],
+   "expect": {
+    "record": {
+     "harness": "cq",
+     "sessionId": null,
+     "sessionIds": [
+      "old"
+     ],
+     "sessionsDir": "<sessions>",
+     "workId": null
+    },
+    "stop": "ok"
+   },
+   "label": "normal run never claims an earlier run session",
+   "stdout": "{\"status\":\"ok\",\"value\":{\"verdict\":\"pass\",\"changed\":false,\"commits\":[],\"summary\":\"s\"}}"
+  },
+  {
+   "created": [
+    "s1.jsonl"
+   ],
+   "end": "stdout",
+   "existing": [],
+   "expect": {
+    "record": {
+     "harness": "cq",
+     "sessionId": "s1",
+     "sessionIds": [
+      "s1"
+     ],
+     "sessionsDir": "<sessions>",
+     "workId": null
+    },
+    "stop": "error"
+   },
+   "label": "normal run unparseable stdout still links the session",
+   "stdout": "not json"
+  },
+  {
+   "created": [
+    "s1.jsonl"
+   ],
+   "end": "stdout",
+   "existing": [],
+   "expect": {
+    "record": {
+     "harness": "cq",
+     "sessionId": "s1",
+     "sessionIds": [
+      "s1"
+     ],
+     "sessionsDir": "<sessions>",
+     "workId": null
+    },
+    "stop": "error"
+   },
+   "label": "normal run non-object stdout still links the session",
+   "stdout": "[1]"
+  },
+  {
+   "created": [
+    "s1.jsonl"
+   ],
+   "end": "stdout",
+   "existing": [],
+   "expect": {
+    "record": {
+     "harness": "cq",
+     "sessionId": "s1",
+     "sessionIds": [
+      "s1"
+     ],
+     "sessionsDir": "<sessions>",
+     "workId": null
+    },
+    "stop": "error"
+   },
+   "label": "normal run non-object value still links the session",
+   "stdout": "{\"value\":[1]}"
+  },
+  {
+   "created": [],
+   "end": "stdout",
+   "existing": [],
+   "expect": {
+    "record": {
+     "harness": "cq",
+     "sessionId": "rsid",
+     "sessionIds": [],
+     "sessionsDir": null,
+     "workId": null
+    },
+    "stop": "ok"
+   },
+   "label": "normal run result key is read when value is absent",
+   "stdout": "{\"status\":\"ok\",\"result\":{\"verdict\":\"pass\",\"sessionId\":\"rsid\"}}"
+  },
+  {
+   "created": [
+    "s1.jsonl"
+   ],
+   "end": "stdout",
+   "existing": [],
+   "expect": {
+    "record": {
+     "harness": "cq",
+     "sessionId": "s1",
+     "sessionIds": [
+      "s1"
+     ],
+     "sessionsDir": "<sessions>",
+     "workId": null
+    },
+    "stop": "error"
+   },
+   "label": "normal run error status still links the session",
+   "stdout": "{\"status\":\"error\",\"error\":\"boom\"}"
+  },
+  {
+   "created": [],
+   "end": "stdout",
+   "existing": [],
+   "expect": {
+    "record": {
+     "harness": "cq",
+     "sessionId": null,
+     "sessionIds": [],
+     "sessionsDir": null,
+     "workId": null
+    },
+    "stop": "ok"
+   },
+   "label": "normal run no sessions dir",
+   "no_dir": true,
+   "stdout": "{\"status\":\"ok\",\"value\":{\"verdict\":\"pass\",\"changed\":false,\"commits\":[],\"summary\":\"s\"}}"
+  },
+  {
+   "created": [],
+   "end": "stdout",
+   "existing": [],
+   "expect": {
+    "record": {
+     "harness": "cq",
+     "sessionId": null,
+     "sessionIds": [],
+     "sessionsDir": null,
+     "workId": null
+    },
+    "stop": "ok"
+   },
+   "label": "normal run with a regular file at the sessions path",
+   "sessions_is_file": true,
+   "stdout": "{\"status\":\"ok\",\"value\":{\"verdict\":\"pass\",\"changed\":false,\"commits\":[],\"summary\":\"s\"}}"
+  }
+ ],
+ "paseo": [
+  {
+   "expect": {
+    "persisted": "{\"verdict\": \"valid\", \"reason\": \"r\"}",
+    "result": "{\"verdict\": \"valid\", \"reason\": \"r\", \"stop\": \"ok\"}"
+   },
+   "label": "plain verdict",
+   "logs": "{\"verdict\":\"valid\",\"reason\":\"r\"}",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "persisted": "{\"reason\": \"r\", \"verdict\": \"invalid\"}",
+    "result": "{\"reason\": \"r\", \"verdict\": \"invalid\", \"stop\": \"ok\"}"
+   },
+   "label": "verdict reason first",
+   "logs": "{\"reason\":\"r\",\"verdict\":\"invalid\"}",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "persisted": "{\"verdict\": \"unsure\", \"reason\": \"\"}",
+    "result": "{\"verdict\": \"unsure\", \"reason\": \"\", \"stop\": \"ok\"}"
+   },
+   "label": "verdict unsure",
+   "logs": "{\"verdict\":\"unsure\",\"reason\":\"\"}",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "persisted": "{\"verdict\": \"valid\", \"reason\": \"r\"}",
+    "result": "{\"verdict\": \"valid\", \"reason\": \"r\", \"stop\": \"ok\"}"
+   },
+   "label": "prose before the object",
+   "logs": "Here you go:\n{\"verdict\":\"valid\",\"reason\":\"r\"}",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "persisted": "{\"verdict\": \"valid\", \"reason\": \"r\"}",
+    "result": "{\"verdict\": \"valid\", \"reason\": \"r\", \"stop\": \"ok\"}"
+   },
+   "label": "prose before the object contains a brace-free preamble",
+   "logs": "answer -> {\"verdict\":\"valid\",\"reason\":\"r\"}\n",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "persisted": "{\"verdict\": \"valid\", \"reason\": \"r\"}",
+    "result": "{\"verdict\": \"valid\", \"reason\": \"r\", \"stop\": \"ok\"}"
+   },
+   "label": "trailing newline",
+   "logs": "{\"verdict\":\"valid\",\"reason\":\"r\"}\n",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "persisted": "{\"verdict\": \"valid\", \"reason\": \"r\"}",
+    "result": "{\"verdict\": \"valid\", \"reason\": \"r\", \"stop\": \"ok\"}"
+   },
+   "label": "trailing spaces and tabs",
+   "logs": "{\"verdict\":\"valid\",\"reason\":\"r\"} \t\r\n",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "persisted": "{\"verdict\": \"valid\", \"reason\": \"r\"}",
+    "result": "{\"verdict\": \"valid\", \"reason\": \"r\", \"stop\": \"ok\"}"
+   },
+   "label": "trailing form feed is Python whitespace",
+   "logs": "{\"verdict\":\"valid\",\"reason\":\"r\"}\f",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "persisted": "{\"verdict\": \"valid\", \"reason\": \"r\"}",
+    "result": "{\"verdict\": \"valid\", \"reason\": \"r\", \"stop\": \"ok\"}"
+   },
+   "label": "trailing vertical tab is Python whitespace",
+   "logs": "{\"verdict\":\"valid\",\"reason\":\"r\"}\u000b",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "persisted": "{\"verdict\": \"valid\", \"reason\": \"r\"}",
+    "result": "{\"verdict\": \"valid\", \"reason\": \"r\", \"stop\": \"ok\"}"
+   },
+   "label": "trailing file separator is Python whitespace",
+   "logs": "{\"verdict\":\"valid\",\"reason\":\"r\"}\u001c\u001d\u001e\u001f",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "persisted": "{\"verdict\": \"valid\", \"reason\": \"r\"}",
+    "result": "{\"verdict\": \"valid\", \"reason\": \"r\", \"stop\": \"ok\"}"
+   },
+   "label": "trailing NEL is Python whitespace",
+   "logs": "{\"verdict\":\"valid\",\"reason\":\"r\"}\u0085",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "persisted": "{\"verdict\": \"valid\", \"reason\": \"r\"}",
+    "result": "{\"verdict\": \"valid\", \"reason\": \"r\", \"stop\": \"ok\"}"
+   },
+   "label": "trailing no-break space is Python whitespace",
+   "logs": "{\"verdict\":\"valid\",\"reason\":\"r\"}\u00a0",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "persisted": "{\"verdict\": \"valid\", \"reason\": \"r\"}",
+    "result": "{\"verdict\": \"valid\", \"reason\": \"r\", \"stop\": \"ok\"}"
+   },
+   "label": "trailing ideographic space is Python whitespace",
+   "logs": "{\"verdict\":\"valid\",\"reason\":\"r\"}\u3000",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "raises": "ValueError"
+   },
+   "label": "trailing zero-width space is not whitespace",
+   "logs": "{\"verdict\":\"valid\",\"reason\":\"r\"}\u200b",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "raises": "ValueError"
+   },
+   "label": "trailing BOM is not whitespace",
+   "logs": "{\"verdict\":\"valid\",\"reason\":\"r\"}\ufeff",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "raises": "ValueError"
+   },
+   "label": "trailing NUL is not whitespace",
+   "logs": "{\"verdict\":\"valid\",\"reason\":\"r\"}\u0000",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "raises": "ValueError"
+   },
+   "label": "trailing prose",
+   "logs": "{\"verdict\":\"valid\",\"reason\":\"r\"} thanks",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "raises": "ValueError"
+   },
+   "label": "trailing second valid verdict",
+   "logs": "{\"verdict\":\"valid\",\"reason\":\"r\"}{\"verdict\":\"valid\",\"reason\":\"r\"}",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "raises": "ValueError"
+   },
+   "label": "trailing invalid verdict after a valid one",
+   "logs": "{\"verdict\":\"valid\",\"reason\":\"r\"}\n{\"verdict\":\"invalid\",\"reason\":\"x\"}",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "raises": "ValueError"
+   },
+   "label": "trailing brace",
+   "logs": "{\"verdict\":\"valid\",\"reason\":\"r\"}}",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "raises": "ValueError"
+   },
+   "label": "trailing newline then prose",
+   "logs": "{\"verdict\":\"valid\",\"reason\":\"r\"}\nDone.",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "raises": "ValueError"
+   },
+   "label": "extra key",
+   "logs": "{\"verdict\":\"valid\",\"reason\":\"r\",\"extra\":1}",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "raises": "ValueError"
+   },
+   "label": "missing reason",
+   "logs": "{\"verdict\":\"valid\"}",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "raises": "ValueError"
+   },
+   "label": "missing verdict",
+   "logs": "{\"reason\":\"r\"}",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "raises": "ValueError"
+   },
+   "label": "empty object",
+   "logs": "{}",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "raises": "ValueError"
+   },
+   "label": "different key names",
+   "logs": "{\"verdict\":\"valid\",\"why\":\"r\"}",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "raises": "ValueError"
+   },
+   "label": "verdict outside the enum",
+   "logs": "{\"verdict\":\"maybe\",\"reason\":\"r\"}",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "raises": "ValueError"
+   },
+   "label": "verdict capitalised",
+   "logs": "{\"verdict\":\"Valid\",\"reason\":\"r\"}",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "raises": "ValueError"
+   },
+   "label": "verdict null",
+   "logs": "{\"verdict\":null,\"reason\":\"r\"}",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "raises": "ValueError"
+   },
+   "label": "verdict list",
+   "logs": "{\"verdict\":[\"valid\"],\"reason\":\"r\"}",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "raises": "ValueError"
+   },
+   "label": "verdict object",
+   "logs": "{\"verdict\":{},\"reason\":\"r\"}",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "raises": "ValueError"
+   },
+   "label": "verdict true",
+   "logs": "{\"verdict\":true,\"reason\":\"r\"}",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "raises": "ValueError"
+   },
+   "label": "reason number",
+   "logs": "{\"verdict\":\"valid\",\"reason\":1}",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "raises": "ValueError"
+   },
+   "label": "reason null",
+   "logs": "{\"verdict\":\"valid\",\"reason\":null}",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "raises": "ValueError"
+   },
+   "label": "reason list",
+   "logs": "{\"verdict\":\"valid\",\"reason\":[\"r\"]}",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "raises": "ValueError"
+   },
+   "label": "reason NaN",
+   "logs": "{\"verdict\":\"valid\",\"reason\":NaN}",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "persisted": "{\"verdict\": \"unsure\", \"reason\": \"r\"}",
+    "result": "{\"verdict\": \"unsure\", \"reason\": \"r\", \"stop\": \"ok\"}"
+   },
+   "label": "duplicate keys: the last value wins",
+   "logs": "{\"verdict\":\"valid\",\"reason\":\"r\",\"verdict\":\"unsure\"}",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "persisted": "{\"verdict\": \"valid\", \"reason\": \"r\"}",
+    "result": "{\"verdict\": \"valid\", \"reason\": \"r\", \"stop\": \"ok\"}"
+   },
+   "label": "duplicate key leaves an extra-looking pair",
+   "logs": "{\"verdict\":\"valid\",\"verdict\":\"valid\",\"reason\":\"r\"}",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "persisted": "{\"verdict\": \"valid\", \"reason\": \"a } { \\\" b\"}",
+    "result": "{\"verdict\": \"valid\", \"reason\": \"a } { \\\" b\", \"stop\": \"ok\"}"
+   },
+   "label": "braces and quotes inside the reason",
+   "logs": "{\"verdict\":\"valid\",\"reason\":\"a } { \\\" b\"}",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "persisted": "{\"verdict\": \"valid\", \"reason\": \"a\\\\\"}",
+    "result": "{\"verdict\": \"valid\", \"reason\": \"a\\\\\", \"stop\": \"ok\"}"
+   },
+   "label": "escaped backslash before the closing quote",
+   "logs": "{\"verdict\":\"valid\",\"reason\":\"a\\\\\"}",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "persisted": "{\"verdict\": \"valid\", \"reason\": \"\\u00e9\\ud83d\\ude00\"}",
+    "result": "{\"verdict\": \"valid\", \"reason\": \"\\u00e9\\ud83d\\ude00\", \"stop\": \"ok\"}"
+   },
+   "label": "unicode reason",
+   "logs": "{\"verdict\":\"valid\",\"reason\":\"\u00e9\ud83d\ude00\"}",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "persisted": "{\"verdict\": \"valid\", \"reason\": \"\\u00e9\\ud83d\\ude00\"}",
+    "result": "{\"verdict\": \"valid\", \"reason\": \"\\u00e9\\ud83d\\ude00\", \"stop\": \"ok\"}"
+   },
+   "label": "escaped unicode reason",
+   "logs": "{\"verdict\":\"valid\",\"reason\":\"\\u00e9\\ud83d\\ude00\"}",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "raises": "ValueError"
+   },
+   "label": "nested object in reason",
+   "logs": "{\"verdict\":\"valid\",\"reason\":{\"a\":1}}",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "persisted": "{\"verdict\": \"valid\", \"reason\": \"r\"}",
+    "result": "{\"verdict\": \"valid\", \"reason\": \"r\", \"stop\": \"ok\"}"
+   },
+   "label": "array before the object",
+   "logs": "[1] {\"verdict\":\"valid\",\"reason\":\"r\"}",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "raises": "ValueError"
+   },
+   "label": "first brace opens a non-verdict object",
+   "logs": "{\"note\":1} {\"verdict\":\"valid\",\"reason\":\"r\"}",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "raises": "JSONDecodeError"
+   },
+   "label": "truncated object",
+   "logs": "{\"verdict\":\"valid\",\"reason\":\"r\"",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "raises": "JSONDecodeError"
+   },
+   "label": "unterminated string",
+   "logs": "{\"verdict\":\"valid\",\"reason\":\"r",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "raises": "JSONDecodeError"
+   },
+   "label": "trailing comma",
+   "logs": "{\"verdict\":\"valid\",\"reason\":\"r\",}",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "raises": "JSONDecodeError"
+   },
+   "label": "single quotes",
+   "logs": "{'verdict':'valid','reason':'r'}",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "raises": "JSONDecodeError"
+   },
+   "label": "unquoted keys",
+   "logs": "{verdict:\"valid\",reason:\"r\"}",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "raises": "JSONDecodeError"
+   },
+   "label": "raw newline inside the reason",
+   "logs": "{\"verdict\":\"valid\",\"reason\":\"a\nb\"}",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "raises": "ValueError"
+   },
+   "label": "no brace at all",
+   "logs": "valid",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "raises": "ValueError"
+   },
+   "label": "empty logs",
+   "logs": "",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "raises": "ValueError"
+   },
+   "label": "whitespace-only logs",
+   "logs": " \n",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "raises": "ValueError"
+   },
+   "label": "non-zero logs exit with a valid body",
+   "logs": "{\"verdict\":\"valid\",\"reason\":\"r\"}",
+   "returncode": 1
+  },
+  {
+   "expect": {
+    "raises": "ValueError"
+   },
+   "label": "non-zero logs exit with no body",
+   "logs": "",
+   "returncode": 2
+  },
+  {
+   "expect": {
+    "raises": "JSONDecodeError"
+   },
+   "label": "brace only",
+   "logs": "{",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "raises": "ValueError"
+   },
+   "label": "code fence around the object",
+   "logs": "```json\n{\"verdict\":\"valid\",\"reason\":\"r\"}\n```",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "raises": "ValueError"
+   },
+   "label": "code fence after the object",
+   "logs": "{\"verdict\":\"valid\",\"reason\":\"r\"}\n```",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "persisted": "{\"verdict\": \"valid\", \"reason\": \"r\"}",
+    "result": "{\"verdict\": \"valid\", \"reason\": \"r\", \"stop\": \"ok\"}"
+   },
+   "label": "BOM before the object",
+   "logs": "\ufeff{\"verdict\":\"valid\",\"reason\":\"r\"}",
+   "returncode": 0
+  },
+  {
+   "expect": {
+    "persisted": "{\"verdict\": \"valid\", \"reason\": \"r\"}",
+    "result": "{\"verdict\": \"valid\", \"reason\": \"r\", \"stop\": \"ok\"}"
+   },
+   "label": "whitespace inside the object",
+   "logs": "{ \"verdict\" : \"valid\" ,\n \"reason\" : \"r\" }",
+   "returncode": 0
+  }
+ ],
+ "schema": "cq.crq-driver-output-vector/v1",
+ "source": "apps/crq-python/crq_repair/drivers"
+}

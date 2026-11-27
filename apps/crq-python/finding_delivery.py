@@ -250,8 +250,9 @@ class Inbox:
                 evidence["repair_base"] = repair_base
             if failure_class:
                 evidence["failure_class"] = failure_class
+            retained = self.publication.retained()
             if action == "needs-retriage" and failure_class and failure_class != "owner-decision":
-                events = {v["id"]: v for v in self.publication.retained() if v.get("event_type") == "finding-event"}
+                events = {v["id"]: v for v in retained if v.get("event_type") == "finding-event"}
                 previous = row.get("previous_event_id")
                 count = 0
                 seen = set()
@@ -276,7 +277,7 @@ class Inbox:
             # Retained outbox records survive acknowledgment and caller crashes.
             if any(v["event_type"] == "finding-event" and
                    v["source_key"] == "repair-outcome:" + token
-                   for v in self.publication.retained()):
+                   for v in retained):
                 return
             value = ledger.event("finding-event", "repair-outcome:" + token, at,
                                  {"finding_id": fid, "review_id": row["review_id"],
@@ -385,10 +386,13 @@ class Inbox:
             # successor has been applied, including events already acknowledged.
             while remaining:
                 advanced = False
-                for value in remaining[:]:
+                kept = []
+                for value in remaining:
                     if self._recover_event(value):
-                        remaining.remove(value)
                         advanced = True
+                    else:
+                        kept.append(value)
+                remaining = kept
                 if not advanced:
                     break  # Publication validates missing predecessors/forks.
 

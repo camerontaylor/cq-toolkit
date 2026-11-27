@@ -76,10 +76,8 @@ export interface StartOneEffects {
   planItem(item: StartRecord): Promise<PlanOutcome>;
   /** `launch(q, item, plan)`: the run id. May throw {@link StartAuthorRefused}. */
   launch(item: StartRecord, plan: StartPlan): Promise<string>;
-  /** `coverage_fallback`; `ordinaryEligible` is passed only when Python passes it. */
-  coverageFallback(options: {
-    ordinaryEligible?: boolean;
-  }): Promise<{ started: string | null; hasCoverage: boolean }>;
+  /** `coverage_fallback(q, log, dry, only)`. */
+  coverageFallback(): Promise<{ started: string | null; hasCoverage: boolean }>;
   event(kind: 'skipped', data: Record<string, string>): Promise<void>;
   /** `crq.iso()` for item notes. */
   nowIso(): string;
@@ -126,12 +124,13 @@ export async function startOne(
   const reservationsBefore = effects.startsCount();
   queue.backfill_ordinary_exhausted = false;
   const selection = sortItems(liveItems(queue), context) as StartRecord[];
-  let turn =
+  const turn =
     only === null &&
     backgroundTurn(queue) &&
     selection.some((item) => isPending(item) && rank(item, context) < 2);
   if (turn) {
-    // Rank 2-3 plans first; their ordinary gates establish eligibility.
+    // Rank 2-3 plans first for fairness; rank-4 backfill is strictly lowest and
+    // never launches ahead of a pending rank 0-3 item (f5cd311ad).
     const lane = (item: StartRecord): number => {
       const r = rank(item, context);
       return r >= 2 && r <= 3 ? 0 : 1;
@@ -154,17 +153,6 @@ export async function startOne(
 
   let broke = false;
   for (const item of selection) {
-    if (
-      turn &&
-      item.operator_priority !== true &&
-      !(rank(item, context) >= 2 && rank(item, context) <= 3)
-    ) {
-      turn = false;
-      if (stopOnCoverage(await effects.coverageFallback({ ordinaryEligible: false }))) {
-        broke = true;
-        break;
-      }
-    }
     if (only !== null && item.id !== only) continue;
     if (!isPending(item)) continue;
     if (item.kind === REVIEW_RECEIPT_KIND && !captureCurrent && !item.capture) {
@@ -173,7 +161,7 @@ export async function startOne(
     }
     if (item.kind === 'coverage' || item.kind === BACKFILL_KIND) {
       if (item.operator_priority === true) {
-        if (stopOnCoverage(await effects.coverageFallback({}))) {
+        if (stopOnCoverage(await effects.coverageFallback())) {
           broke = true;
           break;
         }
@@ -196,7 +184,7 @@ export async function startOne(
     }
     if (additionalCycle(item)) {
       // Coverage gets first refusal even though it uses a fallback.
-      if (stopOnCoverage(await effects.coverageFallback({}))) {
+      if (stopOnCoverage(await effects.coverageFallback())) {
         broke = true;
         break;
       }
@@ -306,7 +294,7 @@ export async function startOne(
   }
   if (!broke) {
     queue.backfill_ordinary_exhausted = only === null;
-    const result = await effects.coverageFallback({});
+    const result = await effects.coverageFallback();
     started = result.started;
     hasCoverage = result.hasCoverage;
     if (started === null) log.push('no eligible item this tick');

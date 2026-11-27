@@ -1,12 +1,15 @@
 import { execFileSync } from 'node:child_process';
 import {
+  chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
+  readlinkSync,
   rmSync,
-  statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -44,6 +47,10 @@ interface Spec {
   /** `runs/<run>/meta.json` (object) and `review` (any text) per run. */
   readonly runs?: Record<string, { meta?: unknown; review?: string }>;
   readonly ledger?: string[];
+  /** Symlinks under the state root: relative path -> link target text. */
+  readonly symlinks?: Record<string, string>;
+  /** A state directory chmod 000 once the layout is written (restored before the tree is read). */
+  readonly lock?: string;
   /** `c.git(*args)` answers keyed by `args.join(' ')`; anything else raises. */
   readonly git?: Record<string, string>;
   /** `findings()` rows per run (a list of `{finding, source}`). */
@@ -92,7 +99,7 @@ result['queue'] = q
 print(json.dumps(result))
 `;
 
-function layout(root: string, spec: Spec): void {
+function layout(root: string, spec: Spec): () => void {
   for (const [rel, doc] of Object.entries(spec.state ?? {})) {
     const path = join(root, 'state', rel);
     mkdirSync(dirname(path), { recursive: true });
@@ -106,6 +113,15 @@ function layout(root: string, spec: Spec): void {
   }
   mkdirSync(join(root, 'ledger'), { recursive: true });
   for (const name of spec.ledger ?? []) writeFileSync(join(root, 'ledger', name), name);
+  for (const [rel, target] of Object.entries(spec.symlinks ?? {})) {
+    const path = join(root, 'state', rel);
+    mkdirSync(dirname(path), { recursive: true });
+    symlinkSync(target, path);
+  }
+  if (spec.lock === undefined) return () => undefined;
+  const locked = join(root, 'state', spec.lock);
+  chmodSync(locked, 0o000);
+  return () => chmodSync(locked, 0o755);
 }
 
 function tree(root: string): Record<string, string> {
@@ -113,7 +129,9 @@ function tree(root: string): Record<string, string> {
   const walk = (dir: string): void => {
     for (const name of readdirSync(dir).sort()) {
       const path = join(dir, name);
-      if (statSync(path).isDirectory()) walk(path);
+      const stat = lstatSync(path);
+      if (stat.isSymbolicLink()) out[relative(root, path)] = `-> ${readlinkSync(path)}`;
+      else if (stat.isDirectory()) walk(path);
       else out[relative(root, path)] = readFileSync(path, 'utf8');
     }
   };
@@ -131,12 +149,17 @@ interface Outcome {
 function runPython(spec: Spec): Outcome {
   const root = mkdtempSync(join(tmpdir(), 'repair-bf-py-'));
   dirs.push(root);
-  layout(root, spec);
-  const out = JSON.parse(
-    execFileSync('python3', ['-I', '-c', PY, PYTHON_DIR, root, JSON.stringify(spec)], {
-      encoding: 'utf8',
-    }),
-  ) as { ret?: boolean; error?: boolean; queue: unknown };
+  const restore = layout(root, spec);
+  let out: { ret?: boolean; error?: boolean; queue: unknown };
+  try {
+    out = JSON.parse(
+      execFileSync('python3', ['-I', '-c', PY, PYTHON_DIR, root, JSON.stringify(spec)], {
+        encoding: 'utf8',
+      }),
+    ) as typeof out;
+  } finally {
+    restore();
+  }
   return {
     ret: out.ret,
     error: out.error === true,
@@ -148,7 +171,7 @@ function runPython(spec: Spec): Outcome {
 async function runTs(spec: Spec): Promise<Outcome> {
   const root = mkdtempSync(join(tmpdir(), 'repair-bf-ts-'));
   dirs.push(root);
-  layout(root, spec);
+  const restore = layout(root, spec);
   const q = JSON.parse(JSON.stringify(spec.queue)) as Queue;
   const fx = fileRepairBackfillEffects({
     stateRoot: join(root, 'state'),
@@ -186,6 +209,7 @@ async function runTs(spec: Spec): Promise<Outcome> {
   } catch {
     error = true;
   }
+  restore();
   return { ret, error, queue: JSON.stringify(q), files: tree(root) };
 }
 
@@ -650,6 +674,181 @@ describe('repairBackfill vs the real repair_tick.backfill', () => {
   });
 });
 
+// A slot `crq-<run>-F<n>` already holding another finding's completed job. The
+// real `repair_tick.enqueue` neither rewrites that job (its result exists) nor
+// refuses: it appends the foreign job id to the record and binds the blocker to
+// it, so the foreign verdict stands in for this finding and the legacy ledger
+// can archive over it. The port deliberately refuses the whole enqueue before
+// any write and records the cycle as debt. Each test runs both sides on one
+// fixture, pins Python's behavior as the oracle, then pins the port's.
+describe('occupied slot: another finding’s completed job (Python oracle vs port)', () => {
+  const F3 = { severity: 'minor', path: 'c.ts', line: 9, body: 'fix c' };
+  const INBOX1 = 'repair/inbox/crq-r1-F1.json';
+  const INBOX2 = 'repair/inbox/crq-r1-F2.json';
+  const occupant = (n: number, finding: Record<string, unknown>) => ({
+    job: `crq-r1-F${n}`,
+    finding,
+    repair_base: 'h0',
+  });
+  type Item = {
+    repair_runs?: Record<string, { jobs: string[]; state: string }>;
+    blocking?: Array<{ repair_job?: string }>;
+    last_error?: string;
+  };
+  const items = (out: Outcome): Item[] => (JSON.parse(out.queue) as { items: Item[] }).items;
+  const enqueue = (over: Partial<Spec>): Spec => ({
+    mode: 'enqueue',
+    queue: { items: [openItem({ blocking: [{ run: 'r1', run_finding: 1 }] })] },
+    itemIndex: 0,
+    meta: META,
+    git: GIT,
+    findings: { r1: rows(F2) }, // finding B now wants slot 1, which holds finding A
+    state: {
+      [INBOX1]: occupant(1, F1),
+      'repair/crq-r1-F1/result.json': { verdict: 'FIXED' },
+    },
+    ...over,
+  });
+  const backfill = (over: Partial<Spec>): Spec => ({
+    mode: 'backfill',
+    queue: { items: [openItem({ blocking: [{ run: 'r1', run_finding: 1 }] })] },
+    git: GIT,
+    findings: { r1: rows(F2) },
+    runs: { r1: { meta: { ...META }, review: 'x' } },
+    state: {
+      [INBOX1]: occupant(1, F1),
+      'repair/crq-r1-F1/result.json': { verdict: 'FIXED' },
+    },
+    ...over,
+  });
+  const canLock = process.getuid?.() !== 0; // root ignores the mode bits
+  const inboxFinding = (out: Outcome): unknown =>
+    (JSON.parse(out.files[`state/${INBOX1}`] as string) as { finding: unknown }).finding;
+
+  it('Python keeps the foreign job and binds the blocker to it; the port refuses, files identical', async () => {
+    const spec = enqueue({});
+    const py = runPython(spec);
+    expect(py.error).toBe(false);
+    expect(py.ret).toBe(true);
+    expect(items(py)[0]?.repair_runs?.r1?.jobs).toEqual(['crq-r1-F1']);
+    expect(items(py)[0]?.blocking?.[0]?.repair_job).toBe('crq-r1-F1');
+    // Neither side rewrites the occupant (its result exists): the inbox still names finding A.
+    expect(JSON.parse(py.files[`state/${INBOX1}`] as string)).toEqual(occupant(1, F1));
+
+    const ts = await runTs(spec);
+    expect(ts.error).toBe(false);
+    expect(ts.ret).toBe(false);
+    expect(items(ts)[0]?.repair_runs).toEqual({});
+    expect(items(ts)[0]?.blocking?.[0]?.repair_job).toBeUndefined();
+    expect(items(ts)[0]?.last_error).toBe(
+      "repair not enqueued: crq-r1-F1 holds a different finding's completed job",
+    );
+    expect(ts.files).toEqual(py.files);
+  });
+
+  it('refuses before writing any earlier free slot; Python would have written it', async () => {
+    const spec = enqueue({
+      queue: { items: [openItem({ blocking: [{ run: 'r1', run_finding: 2 }] })] },
+      findings: { r1: rows(F1, F2) }, // slot 1 is free, slot 2 holds finding C
+      state: {
+        [INBOX2]: occupant(2, F3),
+        'repair/crq-r1-F2/result.json': { verdict: 'FIXED' },
+      },
+    });
+    const py = runPython(spec);
+    expect(py.ret).toBe(true);
+    expect(items(py)[0]?.repair_runs?.r1?.jobs).toEqual(['crq-r1-F1', 'crq-r1-F2']);
+    expect(py.files[`state/${INBOX1}`]).toContain('fix a'); // slot 1 written for finding A
+    expect(JSON.parse(py.files[`state/${INBOX2}`] as string)).toEqual(occupant(2, F3));
+
+    const ts = await runTs(spec);
+    expect(ts.ret).toBe(false);
+    expect(items(ts)[0]?.repair_runs).toEqual({});
+    expect(items(ts)[0]?.last_error).toContain('crq-r1-F2 holds');
+    expect(ts.files[`state/${INBOX1}`]).toBeUndefined(); // no partial write
+    expect(JSON.parse(ts.files[`state/${INBOX2}`] as string)).toEqual(occupant(2, F3));
+  });
+
+  it('is parity while the foreign job has no result: both rebind the stale orphan', async () => {
+    const out = await same(enqueue({ state: { [INBOX1]: occupant(1, F1) } }));
+    expect(out.ret).toBe(true);
+    expect(inboxFinding(out)).toEqual(F2);
+    expect(items(out)[0]?.blocking?.[0]?.repair_job).toBe('crq-r1-F1');
+  });
+
+  it('is parity when the result path cannot exist (ENOTDIR): absent on both sides', async () => {
+    const out = await same(
+      enqueue({ state: { [INBOX1]: occupant(1, F1), 'repair/crq-r1-F1': 'not a dir' } }),
+    );
+    expect(out.ret).toBe(true);
+    expect(inboxFinding(out)).toEqual(F2);
+  });
+
+  it('is parity when the occupant is the same finding: reused, never refused', async () => {
+    const out = await same(enqueue({ findings: { r1: rows(F1) } }));
+    expect(out.ret).toBe(true);
+    expect(items(out)[0]?.repair_runs?.r1?.jobs).toEqual(['crq-r1-F1']);
+  });
+
+  it.skipIf(!canLock)(
+    'retries on a permission error: Python swallows it and rebinds, the port raises untouched',
+    async () => {
+      const spec = enqueue({ lock: 'repair/crq-r1-F1' });
+      const py = runPython(spec);
+      expect(py.error).toBe(false);
+      expect(inboxFinding(py)).toEqual(F2);
+
+      const ts = await runTs(spec);
+      expect(ts.error).toBe(true);
+      expect(JSON.parse(ts.files[`state/${INBOX1}`] as string)).toEqual(occupant(1, F1));
+      expect(items(ts)[0]?.repair_runs).toEqual({});
+    },
+  );
+
+  const LEDGER = ['a-findings.md', 'notes.md'];
+  const archiveSpec = (queue: Spec['queue']): Spec => ({ mode: 'archive', queue, ledger: LEDGER });
+  const archived = (out: Outcome): string[] =>
+    Object.keys(out.files).filter((f) => f.startsWith('ledger/archive/'));
+
+  it('backfill: Python stamps the cycle done and the ledger archives; the port records debt and never archives', async () => {
+    const spec = backfill({});
+    const py = runPython(spec);
+    const pyQueue = JSON.parse(py.queue) as Record<string, unknown> & { items: Item[] };
+    expect(pyQueue.legacy_repair_missing).toEqual([]);
+    expect(pyQueue.legacy_repair_backfilled).toBe(ISO);
+    expect(pyQueue.items[0]?.repair_runs?.r1?.state).toBe('queued');
+    // Queued still holds the archive; once the record is terminal Python archives
+    // the ledger over the foreign verdict.
+    expect(archived(runPython(archiveSpec(pyQueue)))).toEqual([]);
+    const settled = structuredClone(pyQueue);
+    const record = settled.items[0]?.repair_runs?.r1;
+    if (record === undefined) throw new Error('Python queued no repair record');
+    record.state = 'done';
+    expect(archived(runPython(archiveSpec(settled)))).toEqual(['ledger/archive/a-findings.md']);
+
+    const ts = await runTs(spec);
+    const tsQueue = JSON.parse(ts.queue) as Record<string, unknown> & { items: Item[] };
+    expect(ts.error).toBe(false);
+    expect(tsQueue.legacy_repair_missing).toEqual([
+      {
+        item: 'pr-5',
+        run: 'r1',
+        reason: "repair not enqueued: crq-r1-F1 holds a different finding's completed job",
+      },
+    ]);
+    expect(tsQueue.legacy_repair_backfilled).toBeUndefined();
+    expect(tsQueue.items[0]?.repair_runs).toEqual({});
+    expect(tsQueue.items[0]?.blocking?.[0]?.repair_job).toBeUndefined();
+    // No record to settle and no stamp: the archive holds, and the ledger stays put.
+    expect(archived(await runTs(archiveSpec(tsQueue)))).toEqual([]);
+  });
+
+  it('backfill is parity once the slot is free of a completed foreign result', async () => {
+    const out = await same(backfill({ state: { [INBOX1]: occupant(1, F1) } }));
+    expect(out.queue).toContain('legacy_repair_backfilled');
+  });
+});
+
 describe('repairArchiveLegacy vs the real repair_tick.archive_legacy', () => {
   const archive = (queue: Record<string, unknown>, over: Partial<Spec> = {}): Spec => ({
     mode: 'archive',
@@ -704,6 +903,24 @@ describe('repairArchiveLegacy vs the real repair_tick.archive_legacy', () => {
     expect(out.queue).toContain('legacy_ledger_archived');
   });
 
+  it('gives a rejected-inbox failure the same archive credit as any failed run: state decides, not the verdict', async () => {
+    const rejected = {
+      job: 'crq-r-F1',
+      item: 'x',
+      verdict: 'FAILED',
+      reason: 'invalid repair inbox: repair job identity mismatch',
+      finding: null,
+    };
+    const out = await same(
+      archive({
+        legacy_repair_backfilled: 'T',
+        items: [openItem({ repair_runs: { r: { state: 'failed', verdicts: [rejected] } } })],
+      }),
+    );
+    expect(out.queue).toContain('legacy_ledger_archived');
+    expect(Object.keys(out.files)).toContain('ledger/archive/a-findings.md');
+  });
+
   it('raises on a repair record without a state', async () => {
     await same(
       archive({ legacy_repair_backfilled: 'T', items: [openItem({ repair_runs: { r: {} } })] }),
@@ -737,6 +954,121 @@ describe('injected effects only', () => {
     expect(calls).toEqual(['has:r9']);
     expect(q.legacy_repair_missing).toEqual([]);
     expect(q.legacy_repair_backfilled).toBe(ISO);
+  });
+});
+
+// `(STATE/repair/<job>/result.json).exists()` guards the stale-orphan rebind in
+// `enqueue`. Python 3.14 answers False for every stat OSError; the TS adapter
+// agrees only where nothing can exist there (ENOENT, ENOTDIR). A fault that
+// leaves a completed result possibly hidden (EACCES, ELOOP) raises instead, so
+// an unknown state never authorises overwriting the inbox job.
+describe('repairEnqueue result.json stat errors (Python 3.14 Path.exists)', () => {
+  const stale = { job: 'crq-r1-F1', finding: F1, repair_base: 'old', source: { id: 's' } };
+  const INBOX = 'repair/inbox/crq-r1-F1.json';
+  const orphan = (over: Partial<Spec> = {}): Spec => ({
+    mode: 'enqueue',
+    queue: { items: [openItem()] },
+    itemIndex: 0,
+    meta: META,
+    git: GIT,
+    findings: { r1: rows(F1) },
+    state: { [INBOX]: stale },
+    ...over,
+  });
+  const inboxAfter = (out: Outcome): Record<string, unknown> =>
+    JSON.parse(out.files[`state/${INBOX}`] as string) as Record<string, unknown>;
+  const canLock = process.getuid?.() !== 0; // root ignores the mode bits
+
+  it('rebinds the orphan when the result path cannot exist (ENOTDIR), as Python does', async () => {
+    const out = await same(orphan({ state: { [INBOX]: stale, 'repair/crq-r1-F1': 'not a dir' } }));
+    expect(out.ret).toBe(true);
+    expect(inboxAfter(out).repair_base).toBe('h0');
+  });
+
+  it('rebinds the orphan behind a dangling result.json link (ENOENT), as Python does', async () => {
+    const out = await same(
+      orphan({ symlinks: { 'repair/crq-r1-F1/result.json': 'missing.json' } }),
+    );
+    expect(out.ret).toBe(true);
+    expect(inboxAfter(out).repair_base).toBe('h0');
+  });
+
+  it('keeps the orphan whose present result is readable', async () => {
+    const out = await same(
+      orphan({ state: { [INBOX]: stale, 'repair/crq-r1-F1/result.json': {} } }),
+    );
+    expect(inboxAfter(out).repair_base).toBe('old');
+  });
+
+  it.skipIf(!canLock)(
+    'does not rebind when the result directory is unreadable (EACCES); Python would',
+    async () => {
+      const spec = orphan({
+        state: { [INBOX]: stale, 'repair/crq-r1-F1/result.json': { verdict: 'FIXED' } },
+        lock: 'repair/crq-r1-F1',
+      });
+      // The runtime baseline treats the unreadable result as absent and overwrites the job.
+      const py = runPython(spec);
+      expect(py.error).toBe(false);
+      expect(inboxAfter(py).repair_base).toBe('h0');
+      // The port refuses: the completed result may be hidden, so the job is untouched
+      // and no repair record is made; the next tick retries.
+      const ts = await runTs(spec);
+      expect(ts.error).toBe(true);
+      expect(inboxAfter(ts)).toEqual(stale);
+      expect(
+        (JSON.parse(ts.queue) as { items: Array<{ repair_runs?: Record<string, unknown> }> })
+          .items[0]?.repair_runs?.r1,
+      ).toBeUndefined();
+    },
+  );
+
+  it('does not rebind behind a result.json symlink loop (ELOOP); Python would', async () => {
+    const spec = orphan({ symlinks: { 'repair/crq-r1-F1/result.json': 'result.json' } });
+    const py = runPython(spec);
+    expect(py.error).toBe(false);
+    expect(inboxAfter(py).repair_base).toBe('h0');
+    const ts = await runTs(spec);
+    expect(ts.error).toBe(true);
+    expect(inboxAfter(ts)).toEqual(stale);
+  });
+
+  it.skipIf(!canLock)('classifies each stat errno at the adapter boundary', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'repair-bf-errno-'));
+    dirs.push(root);
+    const state = join(root, 'state');
+    const file = (job: string): string => join(state, 'repair', job);
+    mkdirSync(file('present'), { recursive: true });
+    writeFileSync(join(file('present'), 'result.json'), '{}');
+    mkdirSync(file('locked'), { recursive: true });
+    writeFileSync(join(file('locked'), 'result.json'), '{}');
+    writeFileSync(file('plain'), 'x');
+    mkdirSync(file('loop'), { recursive: true });
+    symlinkSync('result.json', join(file('loop'), 'result.json'));
+    const fx = fileRepairBackfillEffects({
+      stateRoot: state,
+      runsRoot: join(root, 'runs'),
+      ledgerRoot: join(root, 'ledger'),
+      primaryRepo: 'o/r',
+      defaultRef: 'origin/main',
+      mergedCurrentEnabled: false,
+      maxRoundsPerPin: 2,
+      iso: () => ISO,
+      git: async () => '',
+      findings: async () => [],
+    });
+    expect(await fx.resultExists('present')).toBe(true);
+    expect(await fx.resultExists('missing')).toBe(false); // ENOENT
+    expect(await fx.resultExists('plain')).toBe(false); // ENOTDIR
+    await expect(fx.resultExists('loop')).rejects.toMatchObject({ code: 'ELOOP' });
+    chmodSync(file('locked'), 0o000);
+    try {
+      await expect(fx.resultExists('locked')).rejects.toMatchObject({ code: 'EACCES' });
+    } finally {
+      chmodSync(file('locked'), 0o755);
+    }
+    // The unreadable state is transient: once access returns the answer is true.
+    expect(await fx.resultExists('locked')).toBe(true);
   });
 });
 

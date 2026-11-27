@@ -95,7 +95,7 @@ function fsDecode(bytes: Uint8Array): string {
  * `sorted(directory.glob('*.json'))` as file-name buffers: every `.json`
  * entry, code-point order, and an unlistable directory is empty.
  */
-async function sortedJsonNames(directory: string): Promise<readonly Buffer[]> {
+export async function sortedJsonNames(directory: string): Promise<readonly Buffer[]> {
   let names: Buffer[];
   try {
     names = await readdir(directory, { encoding: 'buffer' });

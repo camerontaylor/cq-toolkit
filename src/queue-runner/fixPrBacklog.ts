@@ -1,6 +1,6 @@
 /**
  * The tick's view of open backfill fix PRs (repair_tick.py:46-53, 580-644).
- * Inactive: nothing imports this outside tests. Python keeps it in the
+ * Python keeps it in the
  * module-global `TICK_BACKLOG`; here it is an object the caller owns, so one
  * tick cannot leak its cap view into the next.
  *
@@ -140,13 +140,14 @@ export async function reviewStartLimit(
 const isoSeconds = (ms: number): string => new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
 
 /**
- * `refresh_fix_pr_backlog`: count open fix PRs on GitHub (never the queue,
- * whose cached state lags), write the file once per tick before any publish,
+ * `refresh_fix_pr_backlog`: GitHub supplies open PRs, while the queue attributes
+ * legacy retry branches to backfill runs. Write the file before any publish,
  * then publish the view. Any failure returns null and leaves the view unread.
  */
 export async function refreshFixPrBacklog(
   backlog: FixPrBacklog,
   effects: FixPrBacklogEffects,
+  queue: { items?: readonly Item[] },
 ): Promise<FixPrBacklog | null> {
   backlog.reset();
   let open: number;
@@ -154,13 +155,22 @@ export async function refreshFixPrBacklog(
   try {
     const prs = await effects.listOpenPrs();
     if (!Array.isArray(prs)) throw new TypeError('gh pr list must return an array');
+    const legacyBackfill = new Set<string>();
+    for (const item of queue.items ?? []) {
+      if (!pyStr(item.id).startsWith(BACKFILL_ITEM) || item.repair_runs == null) continue;
+      if (typeof item.repair_runs !== 'object' || Array.isArray(item.repair_runs))
+        throw new TypeError('repair runs must be an object');
+      for (const run of Object.keys(item.repair_runs)) {
+        if (run.startsWith('revalidated-')) legacyBackfill.add('crq/fix-' + run);
+      }
+    }
     open = 0;
     for (const pr of prs) {
       if (typeof pr !== 'object' || pr === null || Array.isArray(pr)) {
         throw new TypeError('gh pr list entry must be an object');
       }
-      const head = (pr as Record<string, unknown>).headRefName;
-      if ((head === undefined ? '' : pyStr(head)).startsWith(BACKFILL_BRANCH)) open += 1;
+      const head = pyStr((pr as Record<string, unknown>).headRefName);
+      if (head.startsWith(BACKFILL_BRANCH) || legacyBackfill.has(head)) open += 1;
     }
     limit = await reviewStartLimit(effects);
     await effects.writeBacklog({ at: isoSeconds(effects.nowMs()), open, limit });

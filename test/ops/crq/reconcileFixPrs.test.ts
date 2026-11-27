@@ -83,7 +83,10 @@ describe('fix-run eligibility', () => {
   test('only an unmerged, open fix PR is eligible', () => {
     expect(fixRunEligible(item({ fix_pr: { number: 1 } }))).toBe(true);
     expect(fixRunEligible(item({ fix_pr: { number: 1 }, fix_merged: 'yes' }))).toBe(false);
-    expect(fixRunEligible(item({ fix_pr: { number: 1 }, fix_closed: 'yes' }))).toBe(false);
+    const fresh = `${new Date().toISOString().slice(0, 19)}Z`;
+    expect(fixRunEligible(item({ fix_pr: { number: 1 }, fix_closed: fresh }))).toBe(false);
+    // An unreadable closed stamp is due, so it can never silence a run forever.
+    expect(fixRunEligible(item({ fix_pr: { number: 1 }, fix_closed: 'yes' }))).toBe(true);
     expect(fixRunEligible(item({}))).toBe(false);
     expect(fixRunEligible(item({ fix_pr: null }))).toBe(false);
     expect(fixRunEligible(item({ fix_pr: {} }))).toBe(false);
@@ -186,7 +189,10 @@ describe('runReconcileFixPrs', () => {
           r1: { fix_pr: { number: 1 } },
           r2: { fix_pr: { number: 2 } },
           done: { fix_pr: { number: 3 }, fix_merged: 'yes' },
-          closed: { fix_pr: { number: 4 }, fix_closed: 'yes' },
+          closed: {
+            fix_pr: { number: 4 },
+            fix_closed: `${new Date().toISOString().slice(0, 19)}Z`,
+          },
           'no-pr': {},
         },
       }),

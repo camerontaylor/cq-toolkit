@@ -38,6 +38,8 @@ export const LEDGER_SCHEMA_VERSION = 'cq.review-ledger/v1';
 export const LEDGER_REPOSITORY = 'camerontaylor/cq-toolkit';
 
 const MAX_INTERVAL_LINE = 1_000_000n;
+/** `review_ledger.SCOPE_ENTRIES`: decoded entries one review record may carry. */
+const MAX_SCOPE_ENTRIES = 1_000_000n;
 
 /** `review_ledger.IntegrityError`: publication must stop and be reconciled. */
 export class LedgerIntegrityError extends Error {
@@ -566,6 +568,26 @@ export function ledgerIntervals(rows: JsonValue): Set<number> {
   return result;
 }
 
+/**
+ * `review_ledger.scope_entries`: decoded entries summed across the requested,
+ * input and reviewed scopes, from the interval bounds alone. Each row gets the
+ * same interval rules as `ledgerIntervalRanges` (so a row error still wins over
+ * the aggregate bound) without expanding a single line.
+ */
+function ledgerScopeEntries(payload: JsonObject): bigint {
+  let total = 0n;
+  for (const key of ['requested_scope', 'input_scope', 'reviewed_scope']) {
+    for (const row of arrayField(payload, key)) {
+      for (const [first, final] of ledgerIntervalRanges(
+        field(requireObject(row, 'scope row'), 'intervals'),
+      )) {
+        total += BigInt(final - first + 1);
+      }
+    }
+  }
+  return total;
+}
+
 /** `review_ledger.scope` with a chosen interval representation. */
 function ledgerScopeOf<T>(
   rows: JsonValue,
@@ -692,6 +714,7 @@ function validateReview(record: JsonObject, payload: JsonObject): void {
     if (supersedes === stringField(record, 'id')) fail('record cannot supersede itself');
   }
 
+  if (ledgerScopeEntries(payload) > MAX_SCOPE_ENTRIES) fail('scope entries exceed record bound');
   const requestedRows = arrayField(payload, 'requested_scope');
   // Validation only compares these three scopes, and a schema-valid record may
   // hold many bounded rows per scope. Keep them as ranges so the whole payload
@@ -750,7 +773,13 @@ function validateReview(record: JsonObject, payload: JsonObject): void {
     }
   }
 
-  if (payload.get('outcome') === 'completed' && !ledgerCreditable(record)) {
+  // Manual/agent reports are exempt: they can never satisfy the vendor credit
+  // gate, so their completion is judged by validate_provenance instead.
+  if (
+    payload.get('outcome') === 'completed' &&
+    !ledgerReportProducer(record) &&
+    !ledgerCreditable(record)
+  ) {
     fail('completed review lacks authenticated scoped completion');
   }
 }
@@ -875,6 +904,14 @@ export function ledgerValueEqual(left: JsonValue, right: JsonValue): boolean {
   return left === right;
 }
 
+/** `review_ledger.report_producer`: true for manual/agent (S3b) review records. */
+export function ledgerReportProducer(value: JsonValue): boolean {
+  if (!(value instanceof JsonObject) || value.get('event_type') !== 'review') return false;
+  const source = ledgerSubscript(ledgerSubscript(value, 'payload'), 'source');
+  const type = ledgerSubscript(source, 'type');
+  return type === 'manual' || type === 'agent';
+}
+
 /** `review_ledger.creditable`: the only completion authority for a review. */
 export function ledgerCreditable(value: JsonValue): boolean {
   if (!(value instanceof JsonObject) || value.get('event_type') !== 'review') return false;
@@ -921,7 +958,7 @@ export function ledgerRecordPath(value: JsonValue): string {
 export function ledgerValidateSequence(values: readonly JsonValue[]): Map<string, JsonValue> {
   const sources = new Map<string, string>();
   const ids = new Map<string, JsonValue>();
-  const reviews = new Set<string>();
+  const reviews = new Map<string, JsonValue>();
   const findings = new Map<string, string>();
   const tips = new Map<string, string | null>();
 
@@ -940,7 +977,7 @@ export function ledgerValidateSequence(values: readonly JsonValue[]): Map<string
     const payload = objectField(record, 'payload');
     switch (stringField(record, 'event_type')) {
       case 'review': {
-        reviews.add(ident);
+        reviews.set(ident, value);
         for (const row of arrayField(payload, 'findings')) {
           const finding = requireObject(row, 'finding');
           const findingId = stringField(finding, 'id');
@@ -972,6 +1009,12 @@ export function ledgerValidateSequence(values: readonly JsonValue[]): Map<string
             : payload.get('duplicate_id');
         if (pythonTruthy(linked) && (typeof linked !== 'string' || !reviews.has(linked))) {
           fail('import references missing review');
+        }
+        if (payload.get('result') === 'credited') {
+          const linkedReview = typeof linked === 'string' ? reviews.get(linked) : undefined;
+          if (linkedReview === undefined || !ledgerCreditable(linkedReview)) {
+            fail('credited import references a non-creditable review');
+          }
         }
         break;
       }

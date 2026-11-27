@@ -1800,6 +1800,79 @@ const severityRank = (value: JsonValue): number => {
   return Object.hasOwn(SEVERITY_RANK, key) ? (SEVERITY_RANK[key] as number) : 0;
 };
 
+/**
+ * One finding event as `pr_review_findings.load_findings` reads it: the
+ * severity/path/line/title/text row with the line range normalised.
+ */
+export function normalisedFinding(event: JsonObject): Record<string, JsonValue> {
+  const fileName = event.has('fileName') ? event.get('fileName') : undefined;
+  const finding: Record<string, JsonValue> = {
+    severity: pythonStr(
+      event.has('severity') && pythonTruthy(event.get('severity'))
+        ? (event.get('severity') as JsonValue)
+        : 'none',
+    ),
+    path: typeof fileName === 'string' ? fileName : null,
+    start: lineValue(event.get('startLine')),
+    end: lineValue(event.get('endLine')),
+    // Python `str(event.get("title") or "")`: falsy values fall through.
+    title: pythonStrip(
+      pythonStr(
+        event.has('title') && pythonTruthy(event.get('title'))
+          ? (event.get('title') as JsonValue)
+          : '',
+      ),
+    ),
+    text: pythonStrip(
+      pythonStr(
+        event.has('comment') && pythonTruthy(event.get('comment'))
+          ? (event.get('comment') as JsonValue)
+          : event.has('title') && pythonTruthy(event.get('title'))
+            ? (event.get('title') as JsonValue)
+            : '',
+      ),
+    ),
+  };
+  const startValue: JsonValue = finding.start ?? null;
+  const endValue: JsonValue = finding.end ?? null;
+  // Python `_line` yields arbitrary-size positive ints; truthiness is
+  // presence, not a 2^53-capped read.
+  const start = lineValue(
+    event.has('startLine') ? (event.get('startLine') as JsonValue) : undefined,
+  );
+  const end = lineValue(event.has('endLine') ? (event.get('endLine') as JsonValue) : undefined);
+  const startPresent = start !== null;
+  const endPresent = end !== null;
+  if (startPresent && !endPresent) {
+    finding.end = startValue;
+  }
+  if (endPresent && !startPresent) {
+    finding.start = endValue;
+  }
+  if (startPresent && endPresent) {
+    const startInt = (start as JsonNumber).integer as bigint;
+    const endInt = (end as JsonNumber).integer as bigint;
+    if (startInt > endInt) {
+      finding.start = endValue;
+      finding.end = startValue;
+    }
+  }
+  return finding;
+}
+
+/** CPython 3.12+ `int(str)` digit limit; `json.loads` refuses a longer integer token. */
+export const MAX_INT_STR_DIGITS = 4300;
+
+/** True when `json.loads` would raise ValueError: an integer token past the limit, anywhere. */
+export function hasOversizedInt(value: JsonValue): boolean {
+  if (value instanceof JsonNumber) {
+    return value.kind === 'int' && value.raw.replace(/^-/, '').length > MAX_INT_STR_DIGITS;
+  }
+  if (Array.isArray(value)) return value.some(hasOversizedInt);
+  if (value instanceof JsonObject) return value.entries.some(([, v]) => hasOversizedInt(v));
+  return false;
+}
+
 export function loadFindings(text: string, highestSeverity = false): Finding[] {
   const out: Finding[] = [];
   const seen = new Map<string, number>();
@@ -1817,59 +1890,9 @@ export function loadFindings(text: string, highestSeverity = false): Finding[] {
     } catch {
       continue;
     }
+    if (hasOversizedInt(event)) continue;
     if (!(event instanceof JsonObject) || event.get('type') !== 'finding') continue;
-    const fileName = event.has('fileName') ? event.get('fileName') : undefined;
-    const finding: Record<string, JsonValue> = {
-      severity: pythonStr(
-        event.has('severity') && pythonTruthy(event.get('severity'))
-          ? (event.get('severity') as JsonValue)
-          : 'none',
-      ),
-      path: typeof fileName === 'string' ? fileName : null,
-      start: lineValue(event.get('startLine')),
-      end: lineValue(event.get('endLine')),
-      // Python `str(event.get("title") or "")`: falsy values fall through.
-      title: pythonStrip(
-        pythonStr(
-          event.has('title') && pythonTruthy(event.get('title'))
-            ? (event.get('title') as JsonValue)
-            : '',
-        ),
-      ),
-      text: pythonStrip(
-        pythonStr(
-          event.has('comment') && pythonTruthy(event.get('comment'))
-            ? (event.get('comment') as JsonValue)
-            : event.has('title') && pythonTruthy(event.get('title'))
-              ? (event.get('title') as JsonValue)
-              : '',
-        ),
-      ),
-    };
-    const startValue: JsonValue = finding.start ?? null;
-    const endValue: JsonValue = finding.end ?? null;
-    // Python `_line` yields arbitrary-size positive ints; truthiness is
-    // presence, not a 2^53-capped read.
-    const start = lineValue(
-      event.has('startLine') ? (event.get('startLine') as JsonValue) : undefined,
-    );
-    const end = lineValue(event.has('endLine') ? (event.get('endLine') as JsonValue) : undefined);
-    const startPresent = start !== null;
-    const endPresent = end !== null;
-    if (startPresent && !endPresent) {
-      finding.end = startValue;
-    }
-    if (endPresent && !startPresent) {
-      finding.start = endValue;
-    }
-    if (startPresent && endPresent) {
-      const startInt = (start as JsonNumber).integer as bigint;
-      const endInt = (end as JsonNumber).integer as bigint;
-      if (startInt > endInt) {
-        finding.start = endValue;
-        finding.end = startValue;
-      }
-    }
+    const finding = normalisedFinding(event);
     const key = pythonJsonText(
       new JsonObject([
         ['path', finding.path ?? null],

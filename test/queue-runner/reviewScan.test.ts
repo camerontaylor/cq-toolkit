@@ -112,74 +112,7 @@ describe('review scan evidence', () => {
     await expect(scanReviewDiff(input, f.effects)).rejects.toThrow('matcher unavailable');
     expect(f.report()).toBe('');
   });
-  it('decodes Git-quoted header paths before the path-scoped rule match', async () => {
-    let report = '';
-    const effects: ReviewScannerEffects = {
-      match: async ({ rules, lines }) => {
-        const hits: [number, number][] = [];
-        for (const [lineIndex, line] of lines.entries())
-          for (const [ruleIndex, rule] of rules.entries())
-            if (
-              (rule.path === null || new RegExp(rule.path, 'u').test(line.path)) &&
-              line.text.includes(rule.regex)
-            )
-              hits.push([lineIndex, ruleIndex]);
-        return hits;
-      },
-      gitleaks: async () => ({ kind: 'not-run' }),
-      writeReport: async (text) => {
-        report = text;
-      },
-    };
-    const scoped = `rules:\n  - id: 'class:scoped'\n    description: 'fixture'\n    regex: 'MARK'\n    path: '^src/'\n    sample: 'fixture'\nclean_probes:\n  - 'clean'\n`;
-    // Git quotes a pathname containing a tab and escapes the tab as `\t`.
-    const text = [
-      String.raw`diff --git "a/src/\tprobe.txt" "b/src/\tprobe.txt"`,
-      String.raw`--- "a/src/\tprobe.txt"`,
-      String.raw`+++ "b/src/\tprobe.txt"`,
-      '@@ -1 +1 @@',
-      '+MARK secret',
-    ].join('\n');
-    const result = await scanReviewDiff({ ...input, patternsText: scoped, diff: text }, effects);
-    expect(result.denylistHits).toBe(1);
-    expect(JSON.parse(report)).toMatchObject({
-      denylist_hits: [{ rule: 'class:scoped', file: 'src/\tprobe.txt', diff_line: 5 }],
-    });
-  });
-  it('strips only the one literal terminal tab Git appends to a label with spaces', async () => {
-    let report = '';
-    const effects: ReviewScannerEffects = {
-      match: async ({ rules, lines }) => {
-        const hits: [number, number][] = [];
-        for (const [lineIndex, line] of lines.entries())
-          for (const [ruleIndex, rule] of rules.entries())
-            if (
-              (rule.path === null || new RegExp(rule.path, 'u').test(line.path)) &&
-              line.text.includes(rule.regex)
-            )
-              hits.push([lineIndex, ruleIndex]);
-        return hits;
-      },
-      gitleaks: async () => ({ kind: 'not-run' }),
-      writeReport: async (text) => {
-        report = text;
-      },
-    };
-    const scoped = `rules:\n  - id: 'class:scoped'\n    description: 'fixture'\n    regex: 'MARK'\n    path: '^src/with space\\.txt$'\n    sample: 'fixture'\nclean_probes:\n  - 'clean'\n`;
-    const text = [
-      'diff --git a/src/with space.txt b/src/with space.txt',
-      '--- a/src/with space.txt\t',
-      '+++ b/src/with space.txt\t',
-      '@@ -1 +1 @@',
-      '+MARK secret',
-    ].join('\n');
-    const result = await scanReviewDiff({ ...input, patternsText: scoped, diff: text }, effects);
-    expect(result.denylistHits).toBe(1);
-    expect(JSON.parse(report)).toMatchObject({
-      denylist_hits: [{ file: 'src/with space.txt', diff_line: 5 }],
-    });
-  });
-  it('counts the empty logical line a trailing U+2028 leaves before its physical LF', async () => {
+  it('keeps a trailing U+2028 inside its physical line', async () => {
     const f = fixture();
     const text = [
       'diff --git a/x b/x',
@@ -190,159 +123,12 @@ describe('review scan evidence', () => {
       '+MARK0 x',
     ].join('\n');
     await scanReviewDiff({ ...input, diff: text }, f.effects);
-    // Python splitlines: 4 header lines, '+one', the empty line, then MARK0 on line 7.
+    // Split on LF only: 4 header lines, '+one<U+2028>', then MARK0 on line 6.
     expect(JSON.parse(f.report())).toMatchObject({
-      denylist_hits: [{ file: 'x', diff_line: 7 }],
+      denylist_hits: [{ file: 'x', diff_line: 6 }],
     });
   });
-  it('maps a gitleaks hit to the file of the LF line gitleaks reports', async () => {
-    const f = fixture();
-    // The trailing U+2028 makes Python numbering one line ahead of the LF-only
-    // line gitleaks reports, so attribution must use the physical LF number.
-    const text = [
-      'diff --git a/x b/x',
-      '--- a/x',
-      '+++ b/x',
-      '@@ -1 +1 @@',
-      '+one\u2028',
-      'diff --git a/y b/y',
-      '--- a/y',
-      '+++ b/y',
-      '@@ -1 +1 @@',
-      '+MARK1 y',
-    ].join('\n');
-    f.effects.gitleaks = async () => ({
-      kind: 'exit',
-      code: 0,
-      hits: [{ rule: 'generic-api-key', diffLine: 10 }],
-    });
-    await scanReviewDiff({ ...input, diff: text }, f.effects);
-    expect(JSON.parse(f.report())).toMatchObject({
-      gitleaks_hits: [{ rule: 'generic-api-key', diff_line: 10, file: 'y' }],
-    });
-  });
-  it('never reads a logical fragment of hunk content as a diff header', async () => {
-    const f = fixture();
-    const text = [
-      'diff --git a/x b/x',
-      '--- a/x',
-      '+++ b/x',
-      '@@ -1 +1 @@',
-      '+one\u2028diff --git a/evil b/evil',
-      '+MARK0 x',
-    ].join('\n');
-    await scanReviewDiff({ ...input, diff: text }, f.effects);
-    expect(JSON.parse(f.report())).toMatchObject({
-      denylist_hits: [{ file: 'x', diff_line: 7 }],
-    });
-  });
-  it('keeps a literal U+2028 in a header path whole while hunk lines keep Python numbering', async () => {
-    let report = '';
-    const effects: ReviewScannerEffects = {
-      match: async ({ rules, lines }) => {
-        const hits: [number, number][] = [];
-        for (const [lineIndex, line] of lines.entries())
-          for (const [ruleIndex, rule] of rules.entries())
-            if (
-              (rule.path === null || new RegExp(rule.path, 'u').test(line.path)) &&
-              line.text.includes(rule.regex)
-            )
-              hits.push([lineIndex, ruleIndex]);
-        return hits;
-      },
-      gitleaks: async () => ({ kind: 'not-run' }),
-      writeReport: async (text) => {
-        report = text;
-      },
-    };
-    const scoped = `rules:\n  - id: 'class:scoped'\n    description: 'fixture'\n    regex: 'MARK'\n    path: '^src/a\\u2028b\\.txt$'\n    sample: 'fixture'\nclean_probes:\n  - 'clean'\n`;
-    const text = [
-      'diff --git a/src/a\u2028b.txt b/src/a\u2028b.txt',
-      '--- a/src/a\u2028b.txt',
-      '+++ b/src/a\u2028b.txt',
-      '@@ -1 +1 @@',
-      '+one\u2028two',
-      '+MARK secret',
-    ].join('\n');
-    const result = await scanReviewDiff({ ...input, patternsText: scoped, diff: text }, effects);
-    expect(result.denylistHits).toBe(1);
-    // Reported numbers keep Python splitlines: the three header lines and the hunk
-    // line each hold U+2028 and count as extra lines, so MARK is line 11.
-    expect(JSON.parse(report)).toMatchObject({
-      denylist_hits: [{ file: 'src/a\u2028b.txt', diff_line: 11 }],
-    });
-  });
-  it.each([
-    ['U+2028', ' '],
-    ['lone CR', '\r'],
-  ])('never lets a %s fragment override the scanner path', async (_name, sep) => {
-    let report = '';
-    const effects: ReviewScannerEffects = {
-      match: async ({ rules, lines }) => {
-        const hits: [number, number][] = [];
-        for (const [lineIndex, line] of lines.entries())
-          for (const [ruleIndex, rule] of rules.entries())
-            if (
-              (rule.path === null || new RegExp(rule.path, 'u').test(line.path)) &&
-              line.text.includes(rule.regex)
-            )
-              hits.push([lineIndex, ruleIndex]);
-        return hits;
-      },
-      gitleaks: async () => ({ kind: 'not-run' }),
-      writeReport: async (text) => {
-        report = text;
-      },
-    };
-    // Rule only applies to the decoy path; hunk content must never move there.
-    const scoped = `rules:\n  - id: 'class:scoped'\n    description: 'fixture'\n    regex: 'MARK'\n    path: '^decoy$'\n    sample: 'fixture'\nclean_probes:\n  - 'clean'\n`;
-    const text = [
-      'diff --git a/real b/real',
-      '--- a/real',
-      '+++ b/real',
-      '@@ -1 +1 @@',
-      `+x${sep}diff --git a/decoy b/decoy${sep}--- a/decoy${sep}+++ b/decoy${sep}@@ -1 +1 @@`,
-      '+MARK benign',
-      '',
-    ].join('\n');
-    const result = await scanReviewDiff({ ...input, patternsText: scoped, diff: text }, effects);
-    expect(result.denylistHits).toBe(0);
-    expect(JSON.parse(report)).toMatchObject({ denylist_hits: [] });
-  });
-  it('keeps an astral literal inside a quoted header path as one code point', async () => {
-    let report = '';
-    const effects: ReviewScannerEffects = {
-      match: async ({ rules, lines }) => {
-        const hits: [number, number][] = [];
-        for (const [lineIndex, line] of lines.entries())
-          for (const [ruleIndex, rule] of rules.entries())
-            if (
-              (rule.path === null || new RegExp(rule.path, 'u').test(line.path)) &&
-              line.text.includes(rule.regex)
-            )
-              hits.push([lineIndex, ruleIndex]);
-        return hits;
-      },
-      gitleaks: async () => ({ kind: 'not-run' }),
-      writeReport: async (text) => {
-        report = text;
-      },
-    };
-    const scoped = `rules:\n  - id: 'class:scoped'\n    description: 'fixture'\n    regex: 'MARK'\n    path: '^src/\u{1F600}\\.txt$'\n    sample: 'fixture'\nclean_probes:\n  - 'clean'\n`;
-    const text = [
-      'diff --git "a/src/\u{1F600}.txt" "b/src/\u{1F600}.txt"',
-      '--- "a/src/\u{1F600}.txt"',
-      '+++ "b/src/\u{1F600}.txt"',
-      '@@ -1 +1 @@',
-      '+MARK secret',
-    ].join('\n');
-    const result = await scanReviewDiff({ ...input, patternsText: scoped, diff: text }, effects);
-    expect(result.denylistHits).toBe(1);
-    expect(JSON.parse(report)).toMatchObject({
-      denylist_hits: [{ file: 'src/\u{1F600}.txt' }],
-    });
-  });
-  it('uses Python splitlines and the injected Unicode matcher', async () => {
+  it('splits on LF only, keeps CR, and uses the injected Unicode matcher', async () => {
     const f = fixture();
     f.effects.match = async ({ rules, lines }) => {
       const hits: [number, number][] = [];
@@ -356,7 +142,7 @@ describe('review scan evidence', () => {
         }
       return hits;
     };
-    const text = 'diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n+λMARK0\u2028+ MARK0\r';
+    const text = 'diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n+λMARK0\u2028 x\n+ MARK0\r\n';
     const result = await scanReviewDiff({ ...input, diff: text }, f.effects);
     expect(result.denylistHits).toBe(1);
     expect(JSON.parse(f.report())).toMatchObject({

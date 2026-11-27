@@ -27,9 +27,8 @@
  * parity), an unsupported lock exits 1 typed, and usage errors exit 2.
  */
 import { execFile } from 'node:child_process';
-import { accessSync, constants as fsConstants, statSync } from 'node:fs';
 import { lstat, mkdir, readFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { parseDenylistPatterns, type GitleaksEffects } from '../../ops/dev/denylist.js';
 import { makeSubprocessDevEffects } from '../../ops/dev/effects.js';
 import type {
@@ -54,6 +53,7 @@ import { checkCanonicalFindingId } from '../../policy/crq/repairBinding.js';
 import { withFixInstructions } from '../../policy/crq/repairGates.js';
 import type { RunnerArtifact, RunnerResult } from '../../queue-runner/runner.js';
 import { atomicWrite } from './atomic.js';
+import { findGitleaksOnPath } from './gitleaksDiscovery.js';
 import { fileFindingStore, type FindingStore } from './findingStore.js';
 import { withLock } from './lock.js';
 import { makeRepairScan } from './repairScan.js';
@@ -388,8 +388,9 @@ function makeRepairGateGit(clone: string): RepairGateGit {
 }
 
 /**
- * `shutil.which('gitleaks')`: the absolute path of an executable regular file
- * on the given `PATH`.
+ * `shutil.which('gitleaks')` (`findGitleaksOnPath`, differentially pinned): the absolute
+ * path of the first executable non-directory `gitleaks` on the given `PATH`. Empty entries
+ * are skipped here (Python reads them as the cwd): a named, stricter deviation.
  *
  * The probe and the scan must name the SAME file. A relative `PATH` entry is
  * resolved here, against this adapter process's working directory (as the
@@ -399,18 +400,7 @@ function makeRepairGateGit(clone: string): RepairGateGit {
  */
 function gitleaksExecutableOnPath(path: string | undefined): string | undefined {
   if (path === undefined) return undefined;
-  for (const directory of path.split(':')) {
-    if (directory === '') continue;
-    const candidate = resolve(directory, 'gitleaks');
-    try {
-      if (!statSync(candidate).isFile()) continue;
-      accessSync(candidate, fsConstants.X_OK);
-      return candidate;
-    } catch {
-      continue;
-    }
-  }
-  return undefined;
+  return findGitleaksOnPath(path, { emptyEntries: 'skip' }) ?? undefined;
 }
 
 /**

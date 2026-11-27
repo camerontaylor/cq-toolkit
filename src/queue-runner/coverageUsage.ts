@@ -153,16 +153,9 @@ export async function coverageFallback(
   log: string[],
   dry: boolean,
   only: unknown,
-  ordinaryEligible: boolean | undefined,
   fx: CoverageEffects,
 ): Promise<CoverageResult> {
-  const previous = q.backfill_ordinary_exhausted ?? false;
-  if (ordinaryEligible === false) q.backfill_ordinary_exhausted = true;
-  try {
-    return await coverageFallbackInner(q, log, dry, only, fx);
-  } finally {
-    q.backfill_ordinary_exhausted = previous;
-  }
+  return coverageFallbackInner(q, log, dry, only, fx);
 }
 
 async function coverageFallbackInner(
