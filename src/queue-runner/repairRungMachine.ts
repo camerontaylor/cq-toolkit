@@ -54,7 +54,12 @@ import {
   subscript as pySubscript,
   type RepairProgressSelectionReads,
 } from './repairProgressSelection.js';
-import { decideResumeCandidate, pathArg, type RepairResumeProbes } from './repairResume.js';
+import {
+  decideResumeCandidate,
+  pathArg,
+  type RepairResumeOwner,
+  type RepairResumeProbes,
+} from './repairResume.js';
 
 type Dict = Record<string, unknown>;
 
@@ -333,6 +338,37 @@ async function verifyCitation(
 }
 
 /**
+ * The owner argument triple of `resume_worktree`, read in Python's order and
+ * only when a resume state is set. Outside one the owner is never consulted, so
+ * an unreadable config or job must not raise.
+ *
+ * Deviation: Python raises a non-string `worktree_root` / `item` as a lazy
+ * `TypeError` after the recorded-tree checks; here it raises at the read.
+ */
+function resumeOwner(result: Dict, config: unknown, job: unknown): RepairResumeOwner {
+  const resuming =
+    pyTruthy(pyGet(result, 'dispatch_pending')) ||
+    pyTruthy(pyGet(result, 'pending_judge')) ||
+    pyTruthy(pyGet(result, 'pending_mechanical'));
+  if (!resuming) return { worktreeRoot: '', itemId: '', jobId: '' };
+  const fields = [
+    pySubscript(config, 'worktree_root'),
+    pySubscript(job, 'item'),
+    pySubscript(job, 'job'),
+  ];
+  for (const value of fields) {
+    if (typeof value !== 'string') {
+      throw new PyError('TypeError', `expected str, not '${pyTypeName(value)}'`);
+    }
+  }
+  return {
+    worktreeRoot: fields[0] as string,
+    itemId: fields[1] as string,
+    jobId: fields[2] as string,
+  };
+}
+
+/**
  * `process(config, job, wt)`: run (or resume) one repair job to a result.
  *
  * Returns the result `process` returns (the prior one untouched when it is
@@ -363,7 +399,10 @@ export async function runRepairProcess(
   pyGet(resultValue, 'dispatch_pending');
   const result = resultValue as Dict;
   let wt = normalizePosixPath(request.worktree);
-  const decision = await decideResumeCandidate(result, wt, effects.probes);
+  // `resume_worktree(result, wt, config['worktree_root'], job['item'], job['job'])`
+  // evaluates its arguments (KeyError, in that order) only in a resume state.
+  const owner = resumeOwner(result, config, job);
+  const decision = await decideResumeCandidate(result, wt, effects.probes, owner);
   if (decision.kind === 'refuse-missing-candidate') {
     update(result, [
       ['verdict', 'FAILED'],
