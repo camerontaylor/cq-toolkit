@@ -24,7 +24,9 @@
  *   the `_pending_admission_compaction` global): there is no TS equivalent, so a
  *   queue that still needs the compaction pass is refused at load, never saved here;
  * - gitleaks discovery: the caller supplies the binding (`fileReviewGitleaks`);
- * - `provision` (the on-demand `git clone`): not part of `launch`.
+ * - `provision` (the on-demand `git clone`): not part of `launch`; its only caller is the
+ *   review-v1 `submit` path, bound by `createReviewEffects` (`provisionRepo`, pinned by
+ *   `provision_vectors.py`).
  *
  * Diff flags follow Python: a range scan is `--no-color --no-ext-diff
  * --unified=0` (`secret_scan`), a projection scan the hardened `--text

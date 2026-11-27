@@ -21,6 +21,10 @@ export type PyErrorKind =
   | 'UnicodeDecodeError'
   /** `FileNotFoundError`, an `OSError` subclass (`subprocess` with a missing executable). */
   | 'FileNotFoundError'
+  /** `FileExistsError`, an `OSError` subclass (`mkdir(exist_ok=True)` over a file). */
+  | 'FileExistsError'
+  /** `NotADirectoryError`, an `OSError` subclass (`mkdir` below a file). */
+  | 'NotADirectoryError'
   /** `subprocess.TimeoutExpired`, a `SubprocessError` (not an `OSError` or `RuntimeError`). */
   | 'TimeoutExpired'
   | 'RuntimeError'
