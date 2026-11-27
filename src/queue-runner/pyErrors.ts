@@ -21,6 +21,10 @@ export type PyErrorKind =
   | 'UnicodeDecodeError'
   /** `FileNotFoundError`, an `OSError` subclass (`subprocess` with a missing executable). */
   | 'FileNotFoundError'
+  /** `FileExistsError`, an `OSError` subclass (`mkdir(exist_ok=True)` over a file; raised by `osError()` in `adapters/crq/reviewEffects.ts` from EEXIST). */
+  | 'FileExistsError'
+  /** `NotADirectoryError`, an `OSError` subclass (`mkdir` below a file; raised by `osError()` in `adapters/crq/reviewEffects.ts` from ENOTDIR). */
+  | 'NotADirectoryError'
   /** `subprocess.TimeoutExpired`, a `SubprocessError` (not an `OSError` or `RuntimeError`). */
   | 'TimeoutExpired'
   | 'RuntimeError'
@@ -58,7 +62,11 @@ export function isPyError(e: unknown, ...kinds: readonly PyErrorKind[]): e is Py
           e.kind === 'UnicodeEncodeError' ||
           e.kind === 'JSONDecodeError' ||
           e.kind === 'UnicodeDecodeError')) ||
-      (kind === 'OSError' && (e.kind === 'FileNotFoundError' || e.kind === 'IsADirectoryError')),
+      (kind === 'OSError' &&
+        (e.kind === 'FileNotFoundError' ||
+          e.kind === 'IsADirectoryError' ||
+          e.kind === 'FileExistsError' ||
+          e.kind === 'NotADirectoryError')),
   );
 }
 
