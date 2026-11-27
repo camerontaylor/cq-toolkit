@@ -130,13 +130,22 @@ class JobsTest(unittest.TestCase):
         stamp = at.strftime("%Y-%m-%dT%H:%M:%SZ")
         moved = jobs.enqueue(q, partition(1, generation=1, target="c" * 40), stamp)
         self.assertEqual(moved["family_failures"], 5)
+        family_only = jobs.enqueue(q, partition(3, generation=1, target="c" * 40, path="y"), stamp)
         unquarantined = jobs.enqueue(q, {**partition(2, generation=1, target="c" * 40, path="z"), "family": "family2"}, stamp)
         jobs.terminal(q, retry, stamp, "error", vendor_terminal=True)
         at += dt.timedelta(hours=24)
         boundary = at.strftime("%Y-%m-%dT%H:%M:%SZ")
         self.assertEqual(retry["state"], "quarantined")
         self.assertFalse(jobs.eligible(q, moved, boundary))
+        # Same family, unseen path: only the family's quarantine can make it ineligible.
+        self.assertFalse(jobs.eligible(q, family_only, boundary))
+        # Different family and path: eligible at exactly 24h (age check is a strict `>`)...
         self.assertTrue(jobs.eligible(q, unquarantined, boundary))
+        # ...and expired one second later.
+        late = (ledger.timestamp(boundary) + dt.timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.assertFalse(jobs.eligible(q, unquarantined, late))
+        early = (ledger.timestamp(boundary) - dt.timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.assertFalse(jobs.eligible(q, family_only, early))
         jobs.release_quarantine(q, "family", boundary, "operator", "vendor recovered after investigation")
         self.assertTrue(q["backfill_operator_events"])
 
