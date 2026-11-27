@@ -26,6 +26,7 @@ import {
   toPlainJsonRetainingNumbers,
   type JsonValue,
 } from '../policy/crq/jsonValue.js';
+import { pyTypeName } from './repairProgressSelection.js';
 import { runRepairProcess, type RepairRungEffects } from './repairRungMachine.js';
 
 /** What the item loop's `process` effect needs besides the job and its worktree. */
@@ -78,7 +79,9 @@ export function bindRepairProcess(binding: RepairProcessBinding): RepairItemEffe
     );
     const converted = toJsonValue(result);
     if (!(converted instanceof JsonObject)) {
-      throw new RepairItemShapeError('AttributeError: result has no attribute get');
+      throw new RepairItemShapeError(
+        `AttributeError: '${pyTypeName(result)}' object has no attribute 'get'`,
+      );
     }
     return converted;
   };

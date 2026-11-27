@@ -138,6 +138,13 @@ describe('toJsonValue', () => {
     expect(list.slice(3)).toEqual([null, 'x', true]);
   });
 
+  test('maps bigint to an int and undefined to null', () => {
+    const big = toJsonValue(2n ** 70n) as JsonNumber;
+    expect(big.kind).toBe('int');
+    expect(big.integer).toBe(2n ** 70n);
+    expect(toJsonValue(undefined)).toBeNull();
+  });
+
   test('refuses a non-JSON value', () => {
     expect(() => toJsonValue(() => 1)).toThrow(TypeError);
   });
@@ -164,6 +171,17 @@ describe('bindRepairProcess', () => {
     );
     expect(result.get('verdict')).toBe('NOT-FIXED');
     expect(writes).toEqual([]);
+  });
+});
+
+describe('bindRepairProcess errors', () => {
+  test('a non-dict prior result escapes as the rung machine PyError, unchanged', async () => {
+    const { effects } = rig({ prior: 'oops' });
+    const run = bindRepairProcess({ config, root: ROOT, effects });
+    await expect(run(job('j-F1'), '/T/wt/w1')).rejects.toMatchObject({
+      kind: 'AttributeError',
+      message: "'str' object has no attribute 'get'",
+    });
   });
 });
 
