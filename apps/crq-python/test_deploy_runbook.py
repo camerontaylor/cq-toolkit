@@ -988,6 +988,36 @@ class DeployTests(DeployFixture, unittest.TestCase):
         self.assertTrue(run.hold.owns())
         self.assertTrue(self.record(run)["admission_held"])
 
+    def test_refusal_restore_with_foreign_hold_planted_keeps_it(self):
+        class BrokenSwitch:
+            def load_overlay(self, path):
+                return host.load_overlay(path)
+
+            def root_check(self, root, overlay):
+                return host.root_check(root, overlay)
+
+            def switch(self, *args, rollback_config=None):
+                raise ValueError("helper refused the switch")
+
+        real_sync = rb.Hold.sync_directory
+        planted = []
+
+        def sync(hold):
+            if not hold.path.exists() and not planted:
+                planted.append(1)
+                hold.path.write_bytes(b"operator\n")
+                raise OSError(5, "I/O error")
+            return real_sync(hold)
+
+        run = self.build(helper=BrokenSwitch())
+        with mock.patch.object(rb.Hold, "sync_directory", sync):
+            with self.assertRaises(rb.RecoveryRequired):
+                run.run()
+        self.assertEqual(self.marker().read_bytes(), b"operator\n")
+        self.assertFalse(run.hold.acquired)
+        self.assertFalse(self.record(run)["admission_held"])
+        self.assertIn("admission_reacquire_refusal", self.record(run))
+
     def test_health_failure_keeps_hold_when_rollback_is_disabled(self):
         real_switch = host.switch
 
@@ -1271,6 +1301,41 @@ class HoldPersistenceTest(unittest.TestCase):
         self.assertIn("admission may be open", str(caught.exception))
         self.assertFalse(self.hold.path.exists())
         self.assertFalse(self.hold.acquired)
+
+    def _sync_failing_after_planting(self, content):
+        real = rb.Hold.sync_directory
+        state = {"first": True}
+
+        def sync(hold):
+            if state["first"]:
+                state["first"] = False
+                hold.path.write_bytes(content)
+                raise OSError(5, "I/O error")
+            return real(hold)
+
+        return sync
+
+    def test_foreign_marker_planted_before_recreate_is_preserved(self):
+        self.hold.acquire()
+        with mock.patch.object(rb.Hold, "sync_directory",
+                               self._sync_failing_after_planting(b"operator\n")):
+            with self.assertRaises(rb.RecoveryRequired) as caught:
+                self.hold.release()
+        self.assertEqual(self.hold.path.read_bytes(), b"operator\n")
+        self.assertFalse(self.hold.acquired)
+        self.assertFalse(self.hold.owns())
+        self.assertIn("foreign hold", str(caught.exception))
+
+    def test_same_token_marker_already_present_is_tolerated(self):
+        self.hold.acquire()
+        with mock.patch.object(rb.Hold, "sync_directory",
+                               self._sync_failing_after_planting(
+                                   self.hold.token)):
+            with self.assertRaises(rb.RecoveryRequired) as caught:
+                self.hold.release()
+        self.assertNotIn("foreign", str(caught.exception))
+        self.assertTrue(self.hold.acquired)
+        self.assertTrue(self.hold.owns())
 
     def test_unsynced_recreated_hold_is_reported_as_present(self):
         self.hold.acquire()

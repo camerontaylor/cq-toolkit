@@ -531,6 +531,18 @@ class Hold:
             # on-disk state and ``acquired`` all agree.
             try:
                 self._write_marker()
+            except FileExistsError:
+                # Something took the path between the unlink and now. The
+                # bytes decide whose it is; a foreign hold is never touched.
+                if self.ownership() is not True:
+                    self.acquired = False
+                    raise RecoveryRequired(
+                        "the admission marker " + str(self.path)
+                        + " was removed but its removal could not be synced ("
+                        + repr(exc)[:200] + "); a foreign hold is now "
+                        "present at the path and was preserved untouched: "
+                        "admission stays disabled under that hold, which "
+                        "this run does not own") from exc
             except OSError as again:
                 # ``acquired`` mirrors a marker that carries this run's
                 # token: without one, fail-stop must re-acquire (or report
@@ -565,8 +577,8 @@ class Hold:
         self.acquired = False
 
     def _write_marker(self):
-        descriptor = os.open(self.path, os.O_CREAT | os.O_WRONLY
-                             | os.O_TRUNC, 0o600)
+        descriptor = os.open(self.path, os.O_CREAT | os.O_EXCL
+                             | os.O_WRONLY, 0o600)
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(self.token)
             handle.flush()
