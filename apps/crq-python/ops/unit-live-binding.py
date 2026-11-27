@@ -171,9 +171,12 @@ def _expand_instance(path, value):
     ``config_parse_socket_service``, ``config_parse_trigger_unit``) or its
     install-time counterpart ``install_name_printf``; neither specifier table
     defines ``%I`` (only ``unit_full_printf`` does, and none of these use it).
-    systemd therefore ignores such an assignment, so expanding it would invent
-    an edge. The leftover ``%`` is reported by the unpredictable-specifier
-    check instead.
+    systemd therefore rejects such a value, so expanding it would invent an
+    edge. The failure differs by route, and every route fails closed: the
+    runtime parsers (``Wants=``, ``Service=``, ``Unit=``) drop the
+    assignment, ``Also=`` fails the whole ``[Install]`` section, and
+    ``WantedBy=``/``RequiredBy=`` fail at install time. The leftover ``%`` is
+    reported by the unpredictable-specifier check instead.
     """
     name = path.name
     if path.parent.name.endswith(".d"):
