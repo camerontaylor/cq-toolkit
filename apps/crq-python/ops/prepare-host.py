@@ -824,7 +824,9 @@ def switch(root, overlay, raw, target, tag=None, rollback_config=None):
     rollback restores that SHA and those bytes verbatim, so it neither
     re-verifies the SHA as a deploy target (the prior revision was running
     live; it need not be merged to origin/main) nor re-renders a config.
-    A forward switch verifies the target and renders its config.
+    A forward switch verifies the target and renders its config. A failed
+    switch restores the original branch attachment when it still names the
+    saved commit; an originally detached checkout stays detached.
     """
     root_check(root, overlay)
     if rollback_config is None:
@@ -849,6 +851,14 @@ def switch(root, overlay, raw, target, tag=None, rollback_config=None):
         if any(line != ' M ' + CONFIG for line in changes):
             raise ValueError('checkout has changes other than rendered config')
         previous = git(root, 'rev-parse', 'HEAD')
+        # The original branch attachment is recorded so recovery can restore
+        # it: --symbolic-full-name prints a refs/heads/ name only while HEAD
+        # is attached (a detached HEAD prints HEAD or nothing). A successful
+        # forward switch keeps the target detached; only a failed switch
+        # recovers the original attachment.
+        previous_branch = git(root, 'rev-parse', '--symbolic-full-name', 'HEAD')
+        if not previous_branch.startswith('refs/heads/'):
+            previous_branch = None
         record(root, overlay, raw, current, 'switch-before', target=target, tag=tag)
         backup = Path(overlay['record_dir']) / ('config-before-switch-' + uuid.uuid4().hex)
         atomic_bytes(backup, current)
@@ -879,6 +889,19 @@ def switch(root, overlay, raw, target, tag=None, rollback_config=None):
                 # first; the previous rendering is reinstalled below.
                 git(root, 'restore', '--', CONFIG)
                 git(root, 'checkout', '--no-overwrite-ignore', '--detach', previous)
+                # Restore the original branch attachment only while the
+                # branch still names the saved commit: reattaching a moved
+                # branch would land HEAD on a different commit, and a deleted
+                # branch cannot be restored, so both keep the detached saved
+                # commit. An originally detached checkout stays detached.
+                if previous_branch is not None:
+                    try:
+                        saved = git(root, 'rev-parse', '--verify', previous_branch) == previous
+                    except subprocess.CalledProcessError:
+                        saved = False
+                    if saved:
+                        # Same commit, so this only reattaches HEAD.
+                        git(root, 'checkout', previous_branch)
             except BaseException as rollback:
                 # HEAD may still name the target commit, so reinstalling the
                 # previous rendering here would install config from a different
