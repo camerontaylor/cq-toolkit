@@ -575,6 +575,8 @@ describe('freezeSource and numberPage', () => {
       '2026-10-02T00:00:00.5Z',
       '2026-10-02T00:00:00+00:00',
       '2026-02-30T00:00:00Z',
+      '2026-10-02T00:00:60Z',
+      '2026-10-02T00:00:61Z',
       12345,
     ]) {
       await expect(run('main', bad)).rejects.toThrow(ReconcileRefused);

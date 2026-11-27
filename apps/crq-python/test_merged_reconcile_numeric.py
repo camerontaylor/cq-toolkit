@@ -69,7 +69,8 @@ class NumericSourceTests(unittest.TestCase):
                                   repo="owner/repo", base="merge-queue")
 
         for bad in ("2026-10-02T00:00:00.5Z", "2026-10-02T00:00:00+00:00",
-                    "2026-02-30T00:00:00Z", 12345):
+                    "2026-02-30T00:00:00Z", "2026-10-02T00:00:60Z",
+                    "2026-10-02T00:00:61Z", 12345):
             with self.subTest(merged_at=bad), self.assertRaises(mr.ReconcileRefused):
                 run("merge-queue", bad)
         self.assertEqual(len(run("merge-queue", "2026-10-02T00:00:00Z")["records"]), 1)
