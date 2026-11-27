@@ -10,7 +10,9 @@ import {
   realpath,
   mkdir,
   open,
+  link,
   readlink,
+  rename,
   writeFile,
   unlink,
   readdir,
@@ -1123,30 +1125,57 @@ export async function persistAddressTerminalReport(
       digestBytes(await boundedBytes(path, REPORT_CAP)) !== ordinary.digest)
   )
     throw new Error('ordinary report replaced before terminal finalization');
-  const fd = await open(
-    path,
-    constants.O_WRONLY |
-      constants.O_NOFOLLOW |
-      (ordinary ? 0 : constants.O_CREAT | constants.O_EXCL),
-    0o600,
-  );
+  // Stage the whole report in an exclusive sibling file and sync it before
+  // publication: an in-place write can leave the verified ordinary report torn
+  // (new prefix, old tail) when the filesystem accepts part of the new JSON and
+  // then fails, and the lifecycle cannot recover the original afterwards.
+  const staged = join(dirname(path), `.${basename(path)}.terminal-${randomUUID()}`);
   try {
-    const created = await fd.stat();
-    await validateEvidenceAuthority(token, true);
-    if (
-      !sameFile(created, await lstat(path)) ||
-      !sameFile(await lstat(dirname(path)), directoryIdentity)
-    )
-      throw new Error('terminal report path changed');
-    if (ordinary && !sameFile(created, ordinary))
-      throw new Error('ordinary report identity changed');
-    await fd.writeFile(bytes);
-    await fd.truncate(bytes.length);
-    await validateEvidenceAuthority(token, true);
-    await fd.sync();
-    if (!sameFile(created, await lstat(path))) throw new Error('terminal report replaced');
+    const stage = await open(
+      staged,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      0o600,
+    );
+    try {
+      await stage.writeFile(bytes);
+      await validateEvidenceAuthority(token, true);
+      await stage.sync();
+      const created = await stage.stat();
+      await validateEvidenceAuthority(token, true);
+      if (
+        !created.isFile() ||
+        created.nlink !== 1 ||
+        !sameFile(created, await lstat(staged)) ||
+        !sameFile(await lstat(dirname(path)), directoryIdentity) ||
+        (await realpath(dirname(path))) !== dirname(path)
+      )
+        throw new Error('terminal report stage changed');
+      if (
+        ordinary &&
+        (!sameFile(ordinary, await lstat(path)) ||
+          digestBytes(await boundedBytes(path, REPORT_CAP)) !== ordinary.digest)
+      )
+        throw new Error('ordinary report replaced before terminal finalization');
+      // Publish the synced stage atomically: the hard link keeps the
+      // exclusive-create rule for a new report, and renaming over the verified
+      // ordinary inode swaps fully written bytes into place, so a failed
+      // publication can never tear the original report.
+      if (ordinary) await rename(staged, path);
+      else await link(staged, path);
+      if (
+        !sameFile(created, await lstat(path)) ||
+        !sameFile(await lstat(dirname(path)), directoryIdentity)
+      )
+        throw new Error('terminal report replaced');
+    } finally {
+      await stage.close();
+    }
   } finally {
-    await fd.close();
+    try {
+      await unlink(staged);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
   }
   await validateEvidenceAuthority(token, true);
   const directory = await open(dirname(path), constants.O_RDONLY | constants.O_DIRECTORY);
