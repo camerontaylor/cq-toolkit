@@ -43,7 +43,10 @@
  * Failures Python lets escape `cleanup_harvested` (a non-string `worktree`, an
  * embedded NUL, a failed `git rev-parse`) propagate from here as `PyError`s so
  * the harvest's `except (OSError, ValueError, KeyError, TypeError,
- * RuntimeError)` records them as `repair cleanup <job>: ...` messages.
+ * RuntimeError, subprocess.TimeoutExpired)` records them as
+ * `repair cleanup <job>: ...` messages. A timed-out `git status` is Python's
+ * `TimeoutExpired` (1200 s) and this port's `PyError('OSError', 'git status did
+ * not complete: ...')` (330 s); both are recorded, with different message text.
  */
 import { posix } from 'node:path';
 

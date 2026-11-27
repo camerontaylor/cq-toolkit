@@ -12,9 +12,11 @@
  *
  * Deviations: Git runs through the hardened `runGitIn` (system config and ambient
  * `GIT_*` redirections are not read, a bounded timeout applies) where Python's
- * `command` inherits the environment with a 1200 s limit; a Git call that never
- * reports an exit status is an `OSError` (Python's `TimeoutExpired` is neither an
- * `OSError` nor a `RuntimeError`).
+ * `command` inherits the environment with a 1200 s limit (this side times out
+ * at 330 s). A Git call that never reports an exit status, such as a timed-out
+ * `git status`, surfaces as `PyError('OSError', 'git status did not complete: ...')`,
+ * which the harvest's `isCaught` accepts. Python raises `subprocess.TimeoutExpired`
+ * there and its harvest catches that explicitly; the recorded message text differs.
  */
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
