@@ -80,6 +80,11 @@ COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 # `systemctl stop` expands glob characters; accept only a plain name.
 RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+# The host load stamps cmd_run() records; saved timing evidence must keep them.
+REQUIRED_STAMPS = ("start", "after_mask", "after_manager_restart",
+                   "after_reboot", "finish")
+STAMP_FIELDS = ("at", "hostname", "kernel", "uptime_seconds", "load1",
+                "load5", "load15", "mem_available_kib", "kvm_writable")
 
 LIMITATIONS = [
     "Checksum verification proves download integrity against the published "
@@ -363,6 +368,23 @@ def provenance_problems(report: dict) -> list[str]:
     return problems
 
 
+def stamp_problems(report: dict) -> list[str]:
+    """The saved timing evidence must carry every expected host load stamp."""
+    stamps = report.get("host_stamps")
+    if not isinstance(stamps, dict):
+        return ["host_stamps missing"]
+    problems = []
+    for name in REQUIRED_STAMPS:
+        stamp = stamps.get(name)
+        if not isinstance(stamp, dict):
+            problems.append("host stamp missing: " + name)
+            continue
+        for field in STAMP_FIELDS:
+            if stamp.get(field) is None:
+                problems.append("host stamp %s lacks %s" % (name, field))
+    return problems
+
+
 def verify_report(report: dict, base_dir: pathlib.Path) -> list[str]:
     """Verify a saved report against its raw evidence and retained bytes."""
     problems = report_problems(report, require_evidence=True)
@@ -423,6 +445,7 @@ def report_problems(report: dict, *, require_evidence: bool = False) -> list[str
                 problems.append("stored checks do not match recomputed evidence")
             checks = computed
         problems.extend(provenance_problems(report))
+        problems.extend(stamp_problems(report))
     for name in ("boot_id_changed", "manager_restarted", "mask_persisted",
                  "direct_refused", "dependency_refused", "timer_active",
                  "path_active", "unmask_started", "metadata_equal",
