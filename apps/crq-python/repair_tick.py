@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 import queue_time
 import re
+import subprocess
 import tempfile
 import time
 from crq_repair import (DetectorUnavailable, atomic, findings, git as wt_git,
@@ -517,7 +518,11 @@ def harvest(c, q, item, dry=False):
                             for alternate in (False, True):
                                 cleanup_harvested(c.CLONE, c.WT_ROOT, c.STATE / 'repair' / job_id,
                                                   item['id'], job_id, result, alternate=alternate)
-                        except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+                        # A timed-out status check raises TimeoutExpired, which
+                        # derives from SubprocessError; record it like the
+                        # other cleanup failures and keep harvesting verdicts.
+                        except (OSError, ValueError, KeyError, TypeError, RuntimeError,
+                                subprocess.TimeoutExpired) as exc:
                             messages.append('repair cleanup ' + job_id + ': ' + str(exc)[:300])
             # Reconcile atomically persisted publication after a caller crash.
             if item['kind'] == review_receipt.KIND:
