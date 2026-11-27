@@ -310,7 +310,7 @@ def _section_assignments(text: str, section: str, keys: tuple[str, ...]) -> list
     return found
 
 
-def _duration_seconds(text: str) -> int | None:
+def _duration_seconds(text: str, zero_ok: bool = False) -> int | None:
     # systemd time spans join components with optional whitespace
     # ("5min 20s", "20min30s"); every component must parse.
     value = text.strip()
@@ -334,6 +334,10 @@ def _duration_seconds(text: str) -> int | None:
             # Too many digits for float() (OverflowError) or a non-numeric value.
             return None
     if microseconds <= 0:
+        if zero_ok and microseconds == 0:
+            # Callers that treat zero as a valid span (e.g. systemd's
+            # RandomizedDelaySec default) get the zero instead of a refusal.
+            return 0
         # A zero-microsecond total is systemd's "0" value, which disables the
         # start timeout; None makes preflight refuse it.
         return None
@@ -397,11 +401,24 @@ def _timer_schedule_seconds(text: str):
     # systemd defaults AccuracySec to 1min when a timer declares none, so a
     # timer without the key can fire up to 60 s after its interval.
     accuracy = max(accuracies, default=60)
+    randomized = []
+    for value in _section_values(text, "Timer", "RandomizedDelaySec"):
+        # RandomizedDelaySec=0 is systemd's default and valid here, unlike a
+        # start timeout, so a zero-valued span contributes no delay.
+        parsed = _duration_seconds(value, zero_ok=True)
+        if parsed is None:
+            return None, None
+        randomized.append(parsed)
+    # systemd elapses each timer after its interval plus a uniformly random
+    # delay in [0, RandomizedDelaySec) and the AccuracySec slack, so the
+    # maximum randomized delay extends both bounds; a timer without the key
+    # contributes zero.
+    randomized_delay = max(randomized, default=0)
     intervals = calendar + repeat
     if not intervals:
         return None, None
-    overall = max(intervals) + accuracy
-    repeat_bound = (max(repeat) + accuracy
+    overall = max(intervals) + accuracy + randomized_delay
+    repeat_bound = (max(repeat) + accuracy + randomized_delay
                     if repeat and not calendar else None)
     return overall, repeat_bound
 

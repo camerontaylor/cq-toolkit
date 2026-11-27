@@ -591,6 +591,57 @@ class HealthTests(ControllerFixture):
         with self.assertRaisesRegex(dc.Refused, "no completion heartbeat"):
             dc._tick_value(self.effects)
 
+    def test_fresh_host_first_publication_within_the_budget_is_healthy(self):
+        # No heartbeat exists yet: the baseline is None and the caller's first
+        # observation (which owns the first-tick budget) waits; the runner
+        # publishes mid-wait and that first publication counts as advancing.
+        remaining = iter(["2026-10-28T00:05:00Z", "2026-10-28T00:10:00Z"])
+
+        def observe(prior):
+            self.complete_tick(next(remaining))
+            return dc.health_observation(self.effects, prior)
+
+        result = dc.two_slot_health(self.effects, observe)
+        self.assertTrue(result["healthy"])
+        self.assertEqual([o["observed_tick"] for o in result["observations"]],
+                         ["2026-10-28T00:05:00Z", "2026-10-28T00:10:00Z"])
+
+    def test_fresh_host_first_publication_alone_is_not_two_slots(self):
+        # The first heartbeat seen through a None baseline is one slot; the
+        # second observation must still advance past it.
+        remaining = iter(["2026-10-28T00:05:00Z", "2026-10-28T00:05:00Z"])
+
+        def observe(prior):
+            self.complete_tick(next(remaining))
+            return dc.health_observation(self.effects, prior)
+
+        result = dc.two_slot_health(self.effects, observe)
+        self.assertFalse(result["healthy"])
+        self.assertIn("second observation", result["reason"])
+
+    def test_fresh_host_absent_heartbeat_after_the_budget_is_unhealthy(self):
+        # The first-tick budget expires with no heartbeat ever published:
+        # unticked and unhealthy, never a refusal.
+        result = dc.two_slot_health(self.effects, lambda prior:
+                                    dc.health_observation(self.effects, prior))
+        self.assertFalse(result["healthy"])
+        self.assertIn("first observation", result["reason"])
+        first = result["observations"][0]
+        self.assertIsNone(first["observed_tick"])
+        self.assertFalse(first["advanced"])
+
+    def test_fresh_host_still_rejects_unreadable_and_foreign_heartbeats(self):
+        # Waiting for the first publication never tolerates a present but
+        # unreadable or other-checkout heartbeat.
+        self.write_raw_heartbeat("{broken")
+        with self.assertRaises(dc.HeartbeatReadRefused):
+            dc.health_observation(self.effects, None)
+        (self.watchdog / "heartbeat.json").unlink()
+        self.complete_tick("2026-10-28T00:00:00Z",
+                           root=str(self.base / "other-deploy/apps/crq-python"))
+        with self.assertRaisesRegex(dc.Refused, "runner directory"):
+            dc.health_observation(self.effects, None)
+
     def test_observation_stage_corruption_refuses(self):
         self.complete_tick("2026-10-28T00:00:00Z")
 
