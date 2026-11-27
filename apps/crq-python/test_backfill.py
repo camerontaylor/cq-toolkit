@@ -288,15 +288,21 @@ class OperatorTest(unittest.TestCase):
 
     def test_wrong_queue_or_live_owner_never_releases(self):
         with tempfile.TemporaryDirectory() as td:
-            root = Path(td); queue = {"items": [{"id": "coverage-ab612ba1a041484d", "kind": "coverage", "state": "blocked", "run": {"run_id": "unknown"}}]}
-            c = SimpleNamespace(STATE=root, load_queue=lambda: queue, iso=lambda: AT, save_queue=lambda q: self.fail("must not write"))
+            root = Path(td)
+            unowned = {"items": [{"id": "coverage-ab612ba1a041484d", "kind": "coverage", "state": "blocked", "run": None}]}
+            owned = {"items": [{"id": "coverage-ab612ba1a041484d", "kind": "coverage", "state": "blocked", "run": {"run_id": "unknown"}}]}
+            c = SimpleNamespace(STATE=root, load_queue=lambda: unowned, iso=lambda: AT, save_queue=lambda q: self.fail("must not write"))
             file = root / "evidence.json"
-            args = SimpleNamespace(command="release", item=queue["items"][0]["id"], evidence=str(file), operator="operator", reason="verified")
-            for queue_digest in ("incorrect", ledger.digest(queue)):
-                file.write_bytes(ledger.canonical({"item": args.item, "queue_digest": queue_digest, "checked_at": AT,
-                                                   "vendor_state": "terminal", "exact_no_live_run": True}))
-                with self.assertRaises(ledger.IntegrityError):
-                    backfill.execute(c, args)
+            args = SimpleNamespace(command="release", item=unowned["items"][0]["id"], evidence=str(file), operator="operator", reason="verified")
+            file.write_bytes(ledger.canonical({"item": args.item, "queue_digest": "incorrect", "checked_at": AT,
+                                               "vendor_state": "terminal", "exact_no_live_run": True}))
+            with self.assertRaises(ledger.IntegrityError):
+                backfill.execute(c, args)
+            c.load_queue = lambda: owned
+            file.write_bytes(ledger.canonical({"item": args.item, "queue_digest": ledger.digest(owned), "checked_at": AT,
+                                               "vendor_state": "terminal", "exact_no_live_run": True}))
+            with self.assertRaises(ledger.IntegrityError):
+                backfill.execute(c, args)
 
     def test_history_catalog_serializes_across_state_directories(self):
         for initial in (None, b"previous catalog"):
