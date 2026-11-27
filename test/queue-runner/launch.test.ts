@@ -297,7 +297,7 @@ describe('launch: foreign repos and scan classes', () => {
     expect(h.metas[0]?.profile).toEqual({ flags: ['--plain', '--x'] });
   });
 
-  it('a normal review with a plan profile appends the profile flags after --base-commit', async () => {
+  it('a normal review with a plan profile runs the profile flags alone, as Python does', async () => {
     const h = harness();
     const it1 = item({});
     await launch(
