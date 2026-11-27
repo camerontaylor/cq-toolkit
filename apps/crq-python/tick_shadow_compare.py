@@ -70,13 +70,19 @@ def _oracle(python_root: Path, runner_root: Path, scratch: Path):
     """Import `crq` from a scratch copy whose config and state are the frozen root's."""
     shim = scratch / "py"
     shim.mkdir(parents=True)
-    for source in python_root.iterdir():
-        if source.suffix == ".py" and source.is_file():
-            shutil.copy2(source, shim / source.name)
-        elif source.is_dir() and (source / "__init__.py").is_file():
-            shutil.copytree(source, shim / source.name,
-                            ignore=shutil.ignore_patterns("__pycache__", "test_*"))
-    shutil.copy2(runner_root / "config.json", shim / "config.json")
+    try:
+        for source in python_root.iterdir():
+            if source.suffix == ".py" and source.is_file():
+                shutil.copy2(source, shim / source.name)
+            elif source.is_dir() and (source / "__init__.py").is_file():
+                shutil.copytree(source, shim / source.name,
+                                ignore=shutil.ignore_patterns("__pycache__", "test_*"))
+    except OSError as exc:
+        raise CompareError(f"cannot read the python root: {exc}") from exc
+    try:
+        shutil.copy2(runner_root / "config.json", shim / "config.json")
+    except OSError as exc:
+        raise CompareError(f"cannot read frozen config.json: {exc}") from exc
     (shim / "state").symlink_to((runner_root / "state").resolve(), target_is_directory=True)
     # A process that already imported crq (or any module the shim shadows) would
     # hand back that cached copy, bound to ITS root and state. Hide every shadowed
