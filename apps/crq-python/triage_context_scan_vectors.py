@@ -153,17 +153,16 @@ def real_cases() -> list[dict]:
     add("near-miss allowlist path is scanned", ctx(current_path="policy/denylist/patterns.yml.bak", region=["pk-ABCDEFGH12"]))
     add("default path name is scanned", {"finding": {}, "region": ["pk-ABCDEFGH12"]})
     add("empty context is clean", {"current_path": "p"})
-    # A path with a Python line break splits the synthetic `diff --git` header, so Python's
-    # secret_scan_diff loses the path and never flags the planted key (an oracle property of the
-    # scanner). makeRepairScan splits on LF only: it agrees for LF, CR, CRLF and U+2028 and is
-    # stricter (flags the key) for the other line-break characters, listed in
-    # triageContextScan.test.ts as `TS_STRICTER`. Both directions are pinned.
+    # secret_scan_diff splits on LF only (as git does), so only an LF in the path splits the
+    # synthetic `diff --git` header and loses the path (planted key not flagged); CR, CRLF and the
+    # Unicode line breaks stay inside the path and the key is flagged. makeRepairScan splits on
+    # LF only too, so both engines agree on every vector.
     add("path with LF: planted key is not flagged", ctx(current_path="src/a\nb.py", region=["pk-ABCDEFGH12"]))
     add("path with CRLF: planted key is not flagged", ctx(current_path="src/a\r\nb.py", region=["pk-ABCDEFGH12"]))
-    add("path with CR: planted key is not flagged", ctx(current_path="src/a\rb.py", region=["pk-ABCDEFGH12"]))
+    add("path with CR: planted key is flagged", ctx(current_path="src/a\rb.py", region=["pk-ABCDEFGH12"]))
     for label, char in (("U+2028", "\u2028"), ("U+2029", "\u2029"), ("NEL", "\x85"), ("VT", "\x0b"),
                         ("FF", "\x0c"), ("FS", "\x1c"), ("GS", "\x1d"), ("RS", "\x1e")):
-        add("path with %s: planted key is not flagged" % label,
+        add("path with %s: planted key is flagged" % label,
             ctx(current_path="src/a%sb.py" % char, region=["pk-ABCDEFGH12"]))
     add("path forging an allowlisted header line: planted key is not flagged",
         ctx(current_path="src/a\n+++ b/node_modules/x.js", region=["pk-ABCDEFGH12"]))

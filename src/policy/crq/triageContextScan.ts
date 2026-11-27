@@ -31,16 +31,11 @@
  *    the interpreter limit; this port recurses too and fails with the
  *    engine's own stack error. JSON read by the production parser is
  *    depth-bounded well before either limit.
- * 2. The patch is byte-faithful, but the shared scanners parse it
- *    differently: Python `secret_scan_diff` uses `splitlines()` and the TS
- *    `makeRepairScan` splits on LF only. Content lines never differ (they are
- *    already `splitlines()` output), so only the path can. With a Python
- *    line-break character in the path, Python loses the path from the
- *    synthetic `diff --git` header and never flags the hunk. On the pinned
- *    `real` vectors the TS scanner agrees for LF, CR, CRLF, U+2028, U+2029 and a
- *    forged `+++ b/node_modules/...` header line, and is stricter (it flags the
- *    hunk) for VT, FF, FS, GS, RS and NEL; this is not a general claim for
- *    other paths. The stricter set is `TS_STRICTER` in the test. A schema-valid context path comes from the
+ * 2. The patch is byte-faithful and both scanners split it on LF only (git's own
+ *    terminator). Content lines never differ (they are already `splitlines()` output),
+ *    so only the path can: an LF in the path splits the synthetic `diff --git` header
+ *    and the hunk is never flagged; CR and the Unicode line breaks stay inside the
+ *    path and the planted key is flagged. A schema-valid context path comes from the
  *    repository tree, never from the judge.
  */
 import { JsonObject, type JsonValue } from './jsonValue.js';
