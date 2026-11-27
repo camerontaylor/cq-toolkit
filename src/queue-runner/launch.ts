@@ -21,7 +21,7 @@ import {
 } from '../policy/crq/tickSchedule.js';
 import { acceptExemptionBase, exemptionBaseSpec } from './scanExemptions.js';
 import { ReviewSpawnError } from './reviewLaunch.js';
-import { ReviewCheckoutError } from './reviewPreparation.js';
+import { ReviewCheckoutError, assertProfileSetsNoReviewScope } from './reviewPreparation.js';
 
 export const PUSH_KIND = 'push-current';
 const AUTHOR_FAILED = 'author_failed';
@@ -164,6 +164,16 @@ function flagList(value: unknown): unknown[] {
   return Array.isArray(value) ? (value as unknown[]) : [];
 }
 
+/** The profile's own `--committed` is the ranged scope; any other scope or foreign base is refused. */
+function assertLaunchProfileRange(flags: unknown[], base: unknown): void {
+  assertProfileSetsNoReviewScope(flags.filter((flag) => flag !== '--committed'));
+  flags.forEach((flag, at) => {
+    const m = typeof flag === 'string' ? /^--base(?:-commit)?(?:=(.*))?$/.exec(flag) : null;
+    if (m && (m[1] ?? flags[at + 1]) !== base)
+      throw new Error('review profile must not set a base selector');
+  });
+}
+
 export async function launch(
   queue: StartRecord,
   item: StartRecord,
@@ -172,6 +182,17 @@ export async function launch(
 ): Promise<string> {
   const kind = String(item.kind);
   if (kind === AUTHOR_KIND) fx.checkAuthor(item, fx.nowIso());
+  // The profile carries its own range (--committed --base-commit <base>), as
+  // Python's launch does. Refuse, before any run directory or worktree exists, a
+  // profile that picks a different review scope or a base other than the plan's.
+  if (
+    pyTruthy(plan.profile) &&
+    (kind === AUTHOR_KIND ||
+      kind === RECEIPT_KIND ||
+      kind === PUSH_KIND ||
+      pyTruthy(plan.range_policy))
+  )
+    assertLaunchProfileRange(flagList(record(plan.profile).flags), plan.base);
   const runId = `${String(item.id)}-${fx.runStamp()}`;
   const rdir = await fx.allocateRun(runId);
   const base = requireString(plan.base, 'base');
