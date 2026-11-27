@@ -1,6 +1,6 @@
 // Shared backend contracts and process-launch safeguards.
 import { spawn } from 'node:child_process';
-import { accessSync, constants, realpathSync } from 'node:fs';
+import { accessSync, constants, realpathSync, statSync } from 'node:fs';
 import { delimiter, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { buildSandboxLauncherEnv } from './index.js';
@@ -281,6 +281,12 @@ export function resolveLauncher(
     const candidate = resolve(join(dir, name));
     try {
       accessSync(candidate, constants.X_OK);
+      // X_OK also succeeds for a searchable DIRECTORY, which cannot be
+      // executed: skip it and keep searching so a directory shadowing a
+      // usable launcher later in PATH does not make the backend report
+      // unavailable.  statSync follows symlinks, so a link to a regular
+      // file still passes and is realpath'd below.
+      if (!statSync(candidate).isFile()) continue;
     } catch {
       continue;
     }
