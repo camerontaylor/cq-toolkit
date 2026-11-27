@@ -449,10 +449,15 @@ async function statusOrResult(
     const receiptId = result.get('receipt_id') as string;
     const data = await effects.readReceipt(receiptId);
     const indexValue = request.get('index');
-    const index =
-      indexValue instanceof JsonNumber && indexValue.kind === 'int' && indexValue.integer !== null
-        ? Number(indexValue.integer)
-        : 0;
+    let index = 0;
+    if (indexValue !== undefined) {
+      // The wire schema admits integer-valued float lexemes (`1.0`, `1e0`); an
+      // explicit index must select the chunk it names, never fall back to 0.
+      index = Number(
+        indexValue instanceof JsonNumber ? (indexValue.integer ?? indexValue.float) : Number.NaN,
+      );
+      if (!Number.isInteger(index) || index < 0) throw new ValueError('invalid result index');
+    }
     return reviewResultChunk(receiptId, data, index);
   }
   if (request.get('op') === 'status') {
