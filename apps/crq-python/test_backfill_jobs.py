@@ -121,14 +121,23 @@ class JobsTest(unittest.TestCase):
         retry = jobs.enqueue(q, partition(generation=1), AT)
         self.assertEqual(retry["family_failures"], 3)
         self.assertNotEqual(retry["job_id"], item["job_id"])
-        moved = jobs.enqueue(q, partition(1, generation=1, target="c" * 40), AT)
-        self.assertEqual(moved["family_failures"], 3)
-        for i in range(3):
+        for i in range(2):
             jobs.terminal(q, retry, at.strftime("%Y-%m-%dT%H:%M:%SZ"), "error", vendor_terminal=True)
             at += dt.timedelta(hours=24)
+        # Enqueue the siblings just before the sixth failure, then probe at the exact
+        # 24-hour age bound once the sixth-failure cooldown has lapsed: only shared
+        # quarantine history can then keep the quarantined family's sibling ineligible.
+        stamp = at.strftime("%Y-%m-%dT%H:%M:%SZ")
+        moved = jobs.enqueue(q, partition(1, generation=1, target="c" * 40), stamp)
+        self.assertEqual(moved["family_failures"], 5)
+        unquarantined = jobs.enqueue(q, {**partition(2, generation=1, target="c" * 40, path="z"), "family": "family2"}, stamp)
+        jobs.terminal(q, retry, stamp, "error", vendor_terminal=True)
+        at += dt.timedelta(hours=24)
+        boundary = at.strftime("%Y-%m-%dT%H:%M:%SZ")
         self.assertEqual(retry["state"], "quarantined")
-        self.assertFalse(jobs.eligible(q, moved, "2026-11-10T00:00:00Z"))
-        jobs.release_quarantine(q, "family", "2026-11-10T00:00:00Z", "operator", "vendor recovered after investigation")
+        self.assertFalse(jobs.eligible(q, moved, boundary))
+        self.assertTrue(jobs.eligible(q, unquarantined, boundary))
+        jobs.release_quarantine(q, "family", boundary, "operator", "vendor recovered after investigation")
         self.assertTrue(q["backfill_operator_events"])
 
     def test_unknown_launch_retains_ownership_and_release_refuses(self):
