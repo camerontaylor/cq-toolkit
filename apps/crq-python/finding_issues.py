@@ -26,6 +26,11 @@ MAX_BODY = 65536
 TRUNCATED = ("\n\n_… findings truncated to fit GitHub's issue body limit; see the receipt "
              "for the full list._")
 ISSUE_URL = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/issues/(\d+)")
+# In-title matches fetched per lookup. The search is not an exact-title filter,
+# so a full page of near matches may be hiding the wanted issue beyond the cap:
+# an exact match in the page still wins, but a full page without one is an
+# incomplete lookup — delivery is left pending rather than creating a duplicate.
+SEARCH_LIMIT = 20
 
 # gh(argv, *, input_text=None) -> object with returncode/stdout/stderr.
 Gh = Callable[..., Any]
@@ -87,8 +92,14 @@ def _invoke(gh: Gh, argv: List[str], *, input_text: Optional[str] = None) -> Any
 
 
 def _existing(gh: Gh, repo: str, wanted: str) -> Optional[Dict[str, Any]]:
-    """Exact-title (case-sensitive) match among the repo's issues; None means create."""
-    argv = ["gh", "issue", "list", "--repo", repo, "--state", "all", "--limit", "20",
+    """Exact-title (case-sensitive) match among the repo's issues; None means create.
+
+    The in:title search also returns near matches, so ``--limit`` alone does not
+    make the lookup exhaustive: a full ``SEARCH_LIMIT`` page without the exact
+    title means the wanted issue may sit beyond the cap, and that raises (the
+    caller leaves delivery pending) instead of creating a duplicate.
+    """
+    argv = ["gh", "issue", "list", "--repo", repo, "--state", "all", "--limit", str(SEARCH_LIMIT),
             "--json", "number,title,url", "--search", f'in:title "{wanted}"']
     out = _invoke(gh, argv)
     try:
@@ -101,6 +112,10 @@ def _existing(gh: Gh, repo: str, wanted: str) -> Optional[Dict[str, Any]]:
         if (isinstance(row, dict) and row.get("title") == wanted
                 and isinstance(row.get("number"), int) and row.get("url")):
             return {"number": row["number"], "url": row["url"]}
+    if len(rows) >= SEARCH_LIMIT:
+        raise RuntimeError(f"gh issue list filled its --limit {SEARCH_LIMIT} page without an "
+                           "exact-title match; the lookup is incomplete, so delivery is left "
+                           "pending instead of risking a duplicate")
     return None
 
 
