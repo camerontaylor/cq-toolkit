@@ -15,6 +15,7 @@ import {
   type Result,
   type RunState,
 } from '../../../../src/ops/crq/deploy/rollbackRecover.js';
+import { ValueError } from '../../../../src/ops/crq/deploy/errors.js';
 
 const PRIOR = 'a'.repeat(40);
 const TARGET = 'b'.repeat(40);
@@ -783,6 +784,24 @@ describe('recover', () => {
     f.fail.switch = new Error('x');
     const err = await caught(rec(f).recover(new Refused('half')));
     expect(err.message).toContain('automatic rollback failed');
+  });
+  test('an unrecoverable switch rollback stops the run: recovery required, timers not started, marker kept', async () => {
+    // switchCheckout could not undo its own checkout (HEAD still names the target), and the
+    // runbook's own rollback switch fails too: nothing may restart under a half-switched tree.
+    const f = fixture({ switchAttempted: true });
+    f.head.v = TARGET;
+    f.fail.switch = new ValueError(
+      `rollback to ${PRIOR} failed; live config left unrecovered (CalledProcessError: x): CalledProcessError: y`,
+    );
+    const err = await caught(rec(f).recover(f.fail.switch));
+    expect(err).toBeInstanceOf(RecoveryRequired);
+    expect(err.message).toContain('automatic rollback failed');
+    expect(f.log.some((l) => l.startsWith('start:'))).toBe(false);
+    expect(f.log).not.toContain('hold.release');
+    expect(f.hold.acquired).toBe(true);
+    expect(
+      f.writes.some((w) => w.name === 'deploy.json' && w.value['outcome'] === 'recovery_required'),
+    ).toBe(true);
   });
   test('a switch that landed elsewhere fail-stops', async () => {
     const f = fixture({ switchAttempted: true });

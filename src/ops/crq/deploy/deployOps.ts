@@ -323,6 +323,12 @@ export async function switchCheckout(
     if (changes.some((line) => line !== ` M ${CONFIG}`))
       throw new ValueError('checkout has changes other than rendered config');
     const previous = await gitText(effects, ['rev-parse', 'HEAD']);
+    // The original branch attachment is recorded so recovery can restore it:
+    // --symbolic-full-name prints a refs/heads/ name only while HEAD is attached (a
+    // detached HEAD prints HEAD or nothing). A successful forward switch keeps the target
+    // detached; only a failed switch recovers the original attachment.
+    const headName = await gitText(effects, ['rev-parse', '--symbolic-full-name', 'HEAD']);
+    const previousBranch = headName.startsWith('refs/heads/') ? headName : null;
     // The Python helper also persists a private exact-byte crash-recovery copy.
     // This port records the digest and retains the original bytes in memory for rollback.
     await effects.record(current, 'switch-before', [
@@ -330,36 +336,71 @@ export async function switchCheckout(
       ['tag', tag],
     ]);
     signal?.throwIfAborted();
-    await gitText(effects, ['restore', '--', CONFIG]);
     try {
+      // The first mutation of the live config runs inside the recovery block: if this
+      // restore replaces the file and is then interrupted, the rollback still reinstalls
+      // `current`.
+      await gitText(effects, ['restore', '--', CONFIG]);
       if (await gitText(effects, STATUS))
         throw new ValueError('checkout not clean after config restore');
-      await gitText(effects, ['checkout', '--detach', target]);
-    } catch (error) {
-      await effects.writeConfig(current);
-      throw error;
-    }
-    // The same tick lock spans checkout, install, and audit.
-    try {
+      // --no-overwrite-ignore aborts the checkout instead of silently replacing an ignored
+      // host-local file at a tracked path.
+      await gitText(effects, ['checkout', '--no-overwrite-ignore', '--detach', target]);
+      // The same tick lock spans checkout, install, and audit.
       signal?.throwIfAborted();
       await effects.record(destination, 'switch-render', [
         ['previous_sha', previous],
         ['tag', tag],
       ]);
       await effects.writeConfig(destination);
-    } catch (error) {
-      // A failed destination record or config write leaves the lock holding the
-      // target checkout with the previous config: restore both before it goes.
-      await gitText(effects, ['restore', '--', CONFIG]);
-      await gitText(effects, ['checkout', '--detach', previous]);
+      const status = await gitText(effects, STATUS);
+      if (status !== '' && status !== ` M ${CONFIG}`)
+        throw new ValueError('post-switch status must contain only rendered config');
+    } catch (failure) {
+      try {
+        // The rendered destination config may already be installed; git refuses to check
+        // out over that local modification, so restore the committed bytes first. This
+        // always runs, even when HEAD still names `previous`: a failed checkout writes the
+        // index and worktree before it moves HEAD, so an unchanged HEAD does not prove the
+        // tree is untouched.
+        await gitText(effects, ['restore', '--', CONFIG]);
+        await gitText(effects, ['checkout', '--no-overwrite-ignore', '--detach', previous]);
+        // Reattach only while the branch still names the saved commit: a moved branch
+        // would land HEAD elsewhere and a deleted one cannot be restored, so both keep the
+        // detached saved commit. symbolic-ref repoints HEAD without touching the index or
+        // worktree (a full refs/heads/ name given to `checkout` would stay detached).
+        if (previousBranch !== null) {
+          let saved: boolean;
+          try {
+            saved =
+              (await gitText(effects, ['rev-parse', '--verify', previousBranch])) === previous;
+          } catch (error) {
+            if (!(error instanceof CalledProcessError)) throw error;
+            saved = false;
+          }
+          if (saved) await gitText(effects, ['symbolic-ref', 'HEAD', previousBranch]);
+        }
+      } catch (rollback) {
+        // HEAD may still name the target commit, so reinstalling the previous rendering
+        // would install config from a different commit: report both failures and leave the
+        // bytes untouched for owner recovery.
+        throw new ValueError(
+          `rollback to ${previous} failed; live config left unrecovered (${errLabel(failure)}): ${errLabel(rollback)}`,
+          { cause: failure },
+        );
+      }
       await effects.writeConfig(current);
-      throw error;
+      throw failure;
     }
-    const status = await gitText(effects, STATUS);
-    if (status !== '' && status !== ` M ${CONFIG}`)
-      throw new ValueError('post-switch status must contain only rendered config');
   });
   return target;
+}
+
+/** Python `type(e).__name__: str(e)[:400]`. */
+function errLabel(error: unknown): string {
+  const name = error instanceof Error ? error.name : typeof error;
+  const message = error instanceof Error ? error.message : String(error);
+  return `${name}: ${message.slice(0, 400)}`;
 }
 
 // ---- legacy_check -------------------------------------------------------
