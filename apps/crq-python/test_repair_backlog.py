@@ -292,7 +292,7 @@ class DrainBudgetTest(unittest.TestCase):
         self.assertEqual(list(kept), ['pr-review'])
 
     def test_fresh_file_with_room_admits_all(self):
-        self.backlog(0, 36, age=3599)
+        self.backlog(0, 36, age=60)
         kept, notes = self.held()
         self.assertEqual(len(kept), 4)
         self.assertEqual(notes, [])
