@@ -169,24 +169,10 @@ const unavailableGitleaks: GitleaksEffects = {
   runCommand: () => Promise.reject(new Error('gitleaks must not run')),
 };
 
-/**
- * Paths whose Python line-break character `makeRepairScan` does not split on (it splits on
- * LF only, deliberately: see `patchLines`). Python loses the path from the synthetic header and
- * reports the planted key clean; the TS scanner keeps the path and flags it. This is a fail-closed
- * divergence, pinned so that neither side can change silently.
- */
-const TS_STRICTER = new Set(
-  ['NEL', 'VT', 'FF', 'FS', 'GS', 'RS'].map(
-    (label) => `path with ${label}: planted key is not flagged`,
-  ),
-);
-
 describe('triageContextScan against the production TS scanner', () => {
   for (const item of fixture.real) {
-    const stricter = TS_STRICTER.has(item.name);
-    const want = stricter ? { clean: false, denylist_hits: 1 } : item.result;
+    const want = item.result;
     test(item.name, async () => {
-      if (stricter) expect(item.result.clean).toBe(true);
       const scan = makeRepairScan({
         rules: fixture.rules.map((rule) => ({ ...rule, description: 'oracle rule' })),
         gitleaksEffects: unavailableGitleaks,
