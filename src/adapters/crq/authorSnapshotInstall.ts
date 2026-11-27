@@ -15,10 +15,9 @@
  * `git worktree add` would require.
  */
 import { execFile, spawn } from 'node:child_process';
-import { constants } from 'node:fs';
-import { access, mkdtemp, mkdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { delimiter, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { currentEntryEnv } from '../../config/run-env.js';
 import type { JsonObject } from '../../policy/crq/jsonValue.js';
@@ -30,6 +29,7 @@ import {
 import { AuthorRefused } from '../../policy/crq/authorWire.js';
 import { decodeSnapshot, type SnapshotObject } from '../../policy/crq/authorSnapshot.js';
 import { diffGitHeaderPath, patchHeaderOperandPath } from '../../ops/dev/denylist.js';
+import { findGitleaksOnPath } from './gitleaksDiscovery.js';
 import { GitPool, gitCall, gitOk, killProcessTree } from './gitExec.js';
 
 const SNAPSHOT_REF_PREFIX = 'refs/crq/author-snapshots/v1/';
@@ -520,7 +520,7 @@ function longestComponent(path: Uint8Array): number {
  */
 async function gitleaksScan(parts: readonly string[], pool: GitPool): Promise<void> {
   const env = { ...currentEntryEnv() };
-  const executable = await findGitleaks(env.PATH);
+  const executable = findGitleaks(env.PATH);
   if (executable === null) return;
   await probeGitleaks(executable, pool, env);
   const scanner = makeGitleaksDefaultsScanner({
@@ -580,23 +580,8 @@ async function gitleaksScan(parts: readonly string[], pool: GitPool): Promise<vo
 
 /** Match executable discovery separately from execution: ENOENT on spawn can
  * also mean that an existing executable's interpreter or loader is absent. */
-async function findGitleaks(path: string | undefined): Promise<string | null> {
-  for (const entry of (path ?? '/usr/bin:/bin').split(delimiter)) {
-    const candidate = resolve(entry || '.', 'gitleaks');
-    try {
-      await access(candidate, constants.X_OK);
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === 'ENOENT' || code === 'ENOTDIR' || code === 'EACCES') continue;
-      throw new AuthorRefused('snapshot secret scanner discovery failed');
-    }
-    try {
-      if ((await stat(candidate)).isFile()) return candidate;
-    } catch {
-      throw new AuthorRefused('snapshot secret scanner discovery failed');
-    }
-  }
-  return null;
+function findGitleaks(path: string | undefined): string | null {
+  return findGitleaksOnPath(path);
 }
 
 function probeGitleaks(executable: string, pool: GitPool, env: NodeJS.ProcessEnv): Promise<void> {
