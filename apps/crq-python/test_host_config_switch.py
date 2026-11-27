@@ -71,6 +71,81 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
         self.assertEqual(self.command('rev-parse', 'HEAD').strip(), self.before)
         self.assertEqual((self.runner / 'config.json').read_bytes(), current)
 
+    def _failed_switch(self):
+        real = host.atomic_bytes
+
+        def failing(path, data):
+            if Path(path) == self.root / host.CONFIG and data != self.current_bytes:
+                real(path, data + b' ')
+                raise OSError('directory fsync failed after replace')
+            real(path, data)
+
+        with mock.patch.object(host, 'run', side_effect=self.stopped), \
+                mock.patch.object(host, 'atomic_bytes', failing):
+            with self.assertRaisesRegex(OSError, 'directory fsync'):
+                host.switch(self.root, self.overlay, self.raw, self.target, self.tag)
+
+    def _symbolic_head(self):
+        return subprocess.run(['git', '-C', str(self.root), 'symbolic-ref', '-q', 'HEAD'],
+                              capture_output=True, text=True).stdout.strip()
+
+    def test_failed_switch_from_attached_checkout_reattaches_branch(self):
+        self.current_bytes = self.rendered()
+        self.command('checkout', '-q', '-B', 'attached', self.before)
+        self._failed_switch()
+        self.assertEqual(self.command('rev-parse', 'HEAD').strip(), self.before)
+        self.assertEqual(self._symbolic_head(), 'refs/heads/attached')
+        self.assertEqual((self.runner / 'config.json').read_bytes(), self.current_bytes)
+
+    def test_failed_switch_from_detached_checkout_stays_detached(self):
+        self.current_bytes = self.rendered()
+        self.assertEqual(self._symbolic_head(), '')
+        self._failed_switch()
+        self.assertEqual(self.command('rev-parse', 'HEAD').strip(), self.before)
+        self.assertEqual(self._symbolic_head(), '')
+
+    def test_failed_switch_does_not_reattach_a_moved_branch(self):
+        self.current_bytes = self.rendered()
+        self.command('checkout', '-q', '-B', 'attached', self.before)
+        real = host.atomic_bytes
+        moved = []
+
+        def failing(path, data):
+            if Path(path) == self.root / host.CONFIG and not moved:
+                moved.append(True)
+                self.command('update-ref', 'refs/heads/attached', self.target)
+                real(path, data + b' ')
+                raise OSError('directory fsync failed after replace')
+            real(path, data)
+
+        with mock.patch.object(host, 'run', side_effect=self.stopped), \
+                mock.patch.object(host, 'atomic_bytes', failing):
+            with self.assertRaisesRegex(OSError, 'directory fsync'):
+                host.switch(self.root, self.overlay, self.raw, self.target, self.tag)
+        self.assertEqual(self.command('rev-parse', 'HEAD').strip(), self.before)
+        self.assertEqual(self._symbolic_head(), '')
+
+    def test_failed_switch_does_not_reattach_a_deleted_branch(self):
+        self.current_bytes = self.rendered()
+        self.command('checkout', '-q', '-B', 'attached', self.before)
+        real = host.atomic_bytes
+        deleted = []
+
+        def failing(path, data):
+            if Path(path) == self.root / host.CONFIG and not deleted:
+                deleted.append(True)
+                self.command('update-ref', '-d', 'refs/heads/attached')
+                real(path, data + b' ')
+                raise OSError('directory fsync failed after replace')
+            real(path, data)
+
+        with mock.patch.object(host, 'run', side_effect=self.stopped), \
+                mock.patch.object(host, 'atomic_bytes', failing):
+            with self.assertRaisesRegex(OSError, 'directory fsync'):
+                host.switch(self.root, self.overlay, self.raw, self.target, self.tag)
+        self.assertEqual(self.command('rev-parse', 'HEAD').strip(), self.before)
+        self.assertEqual(self._symbolic_head(), '')
+
     def test_switch_backs_up_host_edited_config_before_installing_target(self):
         self.rendered()
         config = json.loads((self.runner / 'config.json').read_text())
