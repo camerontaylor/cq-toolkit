@@ -62,6 +62,7 @@ interface Harness {
     busy: boolean;
     events: JsonObject[];
   };
+  callRaw(frameText: string): Promise<JsonObject>;
   call(body: unknown, overrides?: { policy?: unknown; principal?: string }): Promise<JsonObject>;
   gitCalls: string[][];
 }
@@ -156,6 +157,13 @@ function harness(options: { queue?: JsonObject; receipt?: Uint8Array } = {}): Ha
     effects,
     state,
     gitCalls,
+    callRaw: async (frameText) => {
+      const response = await runReviewCapability(
+        { raw: Buffer.from(`${frameText}\n`, 'utf8'), principal: PRINCIPAL, policy: policy() },
+        effects,
+      );
+      return object(JSON.parse(Buffer.from(response).toString('utf8')));
+    },
     call: rawCall,
   };
 }
@@ -329,6 +337,48 @@ describe('review-v1 pure handler', () => {
       ),
     );
     expect((mapped.get('error') as JsonObject).get('code')).toBe('invalid-input');
+  });
+
+  test('result index follows the integer-typed wire schema on raw lexemes', async () => {
+    const receipt = Buffer.alloc(3 * 1024 * 1024 + 1, 7);
+    const h = harness({ receipt });
+    h.state.queue = withObjectKeys(h.state.queue, [
+      [
+        'items',
+        [
+          object({
+            id: 'i1',
+            state: 'done',
+            outcome: 'clean',
+            receipt_id: sha256Hex(receipt),
+          }),
+        ],
+      ],
+      [
+        'review_requests',
+        object({
+          'req-1': { principal: PRINCIPAL, item: 'i1', admission_action: 'created' },
+        }),
+      ],
+    ]);
+    const probe = (lexeme: string | undefined) =>
+      h.callRaw(
+        `{"v":1,"op":"result","request_id":"req-1"${lexeme === undefined ? '' : `,"index":${lexeme}`}}`,
+      );
+    for (const [lexeme, want] of [
+      [undefined, 0],
+      ['0', 0],
+      ['-0', 0],
+      ['1', 1],
+    ] as const) {
+      const chunk = await probe(lexeme);
+      expect((chunk.get('index') as { integer: bigint }).integer).toBe(BigInt(want));
+    }
+    for (const lexeme of ['1.0', '1e0', '1E0', '1.5', '-1', '"1"', 'null', 'true', '1e400']) {
+      const refused = (await probe(lexeme)).get('error') as JsonObject;
+      expect([lexeme, refused.get('code')]).toEqual([lexeme, 'invalid-input']);
+      expect(refused.get('message')).toBe('invalid review request');
+    }
   });
 
   test('cancel withdraws the observer and cancels an unobserved pending item', async () => {

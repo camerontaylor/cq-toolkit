@@ -70,7 +70,7 @@ export function normalizeTimestamp(name: string, value: unknown): string {
     !validDate(year, month, day) ||
     hour > 23 ||
     minute > 59 ||
-    second > 61 // Python's %S accepts a leap second
+    second > 59 // strptime %S is 0..59; :60 and :61 are refused
   ) {
     throw new ReconcileRefused(`${name} is not a valid UTC timestamp`);
   }

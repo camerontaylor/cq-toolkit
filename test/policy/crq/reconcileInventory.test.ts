@@ -559,6 +559,33 @@ describe('freezeSource and numberPage', () => {
     expect(number(asObject(result.get('summary')).get('outside_window'))).toBe(46);
   });
 
+  test('a non-whole-second mergedAt on the target base refuses; other cases pass through', async () => {
+    const frozen = await source(1);
+    const run = (base: string, mergedAt: unknown): Promise<JsonObject> =>
+      numberPage(
+        () =>
+          Promise.resolve(
+            response({ n1: { __typename: 'PullRequest', baseRefName: base, number: 1, mergedAt } }),
+          ),
+        frozen,
+        null,
+        { repo: REPO, base: BASE },
+      );
+    for (const bad of [
+      '2026-10-02T00:00:00.5Z',
+      '2026-10-02T00:00:00+00:00',
+      '2026-02-30T00:00:00Z',
+      '2026-10-02T00:00:60Z',
+      '2026-10-02T00:00:61Z',
+      12345,
+    ]) {
+      await expect(run('main', bad)).rejects.toThrow(ReconcileRefused);
+    }
+    expect((await run('main', '2026-10-02T00:00:00Z')).get('records')).toHaveLength(1);
+    expect((await run('other', '2026-10-02T00:00:00.5Z')).get('records')).toEqual([]);
+    expect((await run('main', null)).get('records')).toEqual([]);
+  });
+
   test('a missing slot, repository drift and a tampered cursor refuse', async () => {
     const frozen = await source(1);
     for (const bad of [

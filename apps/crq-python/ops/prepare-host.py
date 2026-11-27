@@ -862,8 +862,12 @@ def switch(root, overlay, raw, target, tag=None, rollback_config=None):
         record(root, overlay, raw, current, 'switch-before', target=target, tag=tag)
         backup = Path(overlay['record_dir']) / ('config-before-switch-' + uuid.uuid4().hex)
         atomic_bytes(backup, current)
-        git(root, 'restore', '--', CONFIG)
         try:
+            # The first mutation of the live config runs inside the recovery
+            # block: if this restore replaces the file and is then
+            # interrupted before it returns, the rollback below still
+            # reinstalls ``current``.
+            git(root, 'restore', '--', CONFIG)
             if git(root, 'status', '--porcelain', '--untracked-files=all'):
                 raise ValueError('checkout not clean after config restore')
             # --no-overwrite-ignore aborts the checkout instead of silently
@@ -875,18 +879,22 @@ def switch(root, overlay, raw, target, tag=None, rollback_config=None):
             if git(root, 'status', '--porcelain', '--untracked-files=all') not in ('', ' M ' + CONFIG):
                 raise ValueError('post-switch status must contain only rendered config')
         except BaseException as failure:
-            # Recovery spans the whole post-checkout window: the audit and
-            # config writes above run after HEAD moved, so a failure there
-            # (e.g. a full audit volume) must roll the checkout back too, or
-            # the host is left on the target with its committed config and no
-            # host overrides and a retry fails drift_check. The original error
-            # still propagates; a failed rollback is reported instead.
+            # Recovery spans the whole switch window inside the lock: the
+            # restore, checkout, audit and config writes all run inside it,
+            # so a failure or interrupt there (e.g. a full audit volume, or a
+            # signal during the first restore) must roll the checkout back
+            # and reinstall the saved bytes. The original error still
+            # propagates; a failed rollback is reported instead.
             try:
                 # The rendered destination config may already be installed
                 # (e.g. a failing directory fsync after the replace). When the
                 # two commits differ in CONFIG, git refuses to check out over
                 # that local modification, so restore the committed bytes
-                # first; the previous rendering is reinstalled below.
+                # first; the previous rendering is reinstalled below. This
+                # always runs, even when HEAD still names ``previous``: a
+                # failed checkout writes the index and worktree before it
+                # moves HEAD, so an unchanged HEAD does not prove the tree
+                # is untouched.
                 git(root, 'restore', '--', CONFIG)
                 git(root, 'checkout', '--no-overwrite-ignore', '--detach', previous)
                 # Restore the original branch attachment only while the

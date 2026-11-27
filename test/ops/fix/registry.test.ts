@@ -134,6 +134,35 @@ describe('fix-run report accounting', () => {
     });
   });
 
+  test('a rescue-attempted fixed row counts as a rescue fix only when it has a commit', () => {
+    const attempts: FixTaskReport['attempts'] = [
+      {
+        tier: 'rescue',
+        attempt: 1,
+        invocation: 'edit',
+        model,
+        wallMs: 1,
+        reason: 'rescue retry',
+      },
+    ];
+    const commitless = plannedTaskRowOf(task({ outcome: 'fixed', commits: [], attempts }));
+    expect(fixRunCounters([commitless])).toMatchObject({
+      attempted: 1,
+      fixed: 0,
+      skipped: 0,
+      unresolved: 1,
+      rescueFixes: 0,
+    });
+    const committed = plannedTaskRowOf(
+      task({ outcome: 'fixed', commits: ['a'.repeat(40)], attempts }),
+    );
+    expect(fixRunCounters([committed])).toMatchObject({
+      fixed: 1,
+      unresolved: 0,
+      rescueFixes: 1,
+    });
+  });
+
   test('a retained failed artifact stays branch-bearing while no-artifact failures stay branchless', () => {
     const withBranch = plannedTaskRowOf(
       task({
