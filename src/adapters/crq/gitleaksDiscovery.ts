@@ -23,7 +23,11 @@ import { delimiter, resolve } from 'node:path';
 export const DEFAULT_SEARCH_PATH = '/bin:/usr/bin';
 
 export interface GitleaksDiscoveryOptions {
-  /** Directory a relative (or, unless skipped, empty) entry is resolved against. */
+  /**
+   * Directory a relative (or, unless skipped, empty) entry is resolved against. A test seam only:
+   * no production caller passes it (they all use the process cwd); it lets the differential run
+   * without `chdir`. Not a supported production input.
+   */
   readonly cwd?: string;
   /** `'cwd'` (Python): an empty entry means the current directory. `'skip'`: ignore it. */
   readonly emptyEntries?: 'cwd' | 'skip';
