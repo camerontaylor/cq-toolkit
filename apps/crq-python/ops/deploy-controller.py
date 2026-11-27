@@ -63,7 +63,9 @@ def _load_helper(path: Path, expected_sha256: str | None = None):
     The helper's bytes are read ONCE and hashed before anything executes;
     exactly those bytes are compiled, so the recorded digest is the code
     that ran (#549). An owner-pinned ``expected_sha256`` that disagrees
-    refuses before any import, lock or preflight. Returns (module, digest).
+    refuses before any import, lock or preflight. A helper whose bytes do
+    not compile refuses here too, so the machine boundary emits the JSON
+    error instead of a traceback. Returns (module, digest).
     """
     try:
         data = path.read_bytes()
@@ -79,7 +81,13 @@ def _load_helper(path: Path, expected_sha256: str | None = None):
                           + expected_sha256 + "; nothing imported or run")
     spec = importlib.util.spec_from_file_location("crq_prepare_host", path)
     module = importlib.util.module_from_spec(spec)
-    exec(compile(data, str(path), "exec"), module.__dict__)  # noqa: S102 - bound bytes
+    try:
+        exec(compile(data, str(path), "exec"), module.__dict__)  # noqa: S102 - bound bytes
+    except SyntaxError as exc:
+        # The hashed bytes are not runnable Python: refuse (exit 2, JSON
+        # error artifact) before any lock or preflight instead of escaping
+        # the CLI's refusal boundary as a traceback (#549 seam contract).
+        raise Refused("helper does not compile: " + str(exc)[:200]) from exc
     return module, digest
 
 
