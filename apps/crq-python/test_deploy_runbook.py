@@ -1083,6 +1083,40 @@ class DeployTests(DeployFixture, unittest.TestCase):
         self.assertTrue(run.hold.owns())
         self.assertTrue(self.record(run)["admission_held"])
 
+    def test_forward_release_sync_failure_is_recorded_and_exits_3(self):
+        real_sync = rb.Hold.sync_directory
+        state = {"failed": False}
+
+        def sync(hold):
+            if not hold.path.exists() and not state["failed"]:
+                state["failed"] = True
+                raise OSError(5, "I/O error")
+            return real_sync(hold)
+
+        runs = []
+
+        def factory(args):
+            runs.append(self.build())
+            return runs[0]
+
+        with mock.patch.object(rb.Hold, "sync_directory", sync), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            code = rb.main(
+                ["deploy", "--root", str(self.root),
+                 "--overlay", str(self.overlay_path),
+                 "--record-dir", str(self.record_dir),
+                 "--target-sha", self.target, "--no-fetch"],
+                run_factory=factory)
+        self.assertEqual(code, 3)
+        error = json.loads(output.getvalue())["error"]
+        run = runs[0]
+        self.assertEqual(error["kind"], "recovery_required")
+        self.assertEqual(error["run_dir"], str(run.run_dir))
+        self.assertEqual(error["outcome"], "recovery_required")
+        self.assertEqual(self.record(run)["outcome"], "recovery_required")
+        self.assertEqual(self.marker().read_bytes(), run.hold.token)
+        self.assertTrue(run.hold.acquired)
+
     def test_health_failure_keeps_hold_when_rollback_is_disabled(self):
         real_switch = host.switch
 

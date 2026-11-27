@@ -1193,11 +1193,23 @@ class Run:
                                 + json.dumps(stopped, sort_keys=True))
         return result
 
+    def release_hold(self):
+        """Release the marker; a recovery-required failure from the hold
+        carries no run record, so fail-stop records it (run_dir, outcome,
+        trigger map) and keeps the hold instead of letting recover() re-raise
+        a bare exception that main() cannot describe."""
+        try:
+            self.hold.release()
+        except RecoveryRequired as exc:
+            if exc.record:
+                raise
+            self.fail_stop(str(exc))
+
     # -- terminal states ----------------------------------------------
     def release_admission(self):
         require(self.hold is not None and self.hold.owns(),
                 "cannot release admission: the marker is not this run's")
-        self.hold.release()
+        self.release_hold()
         self.released = True
         self.phase("admission_released")
 
@@ -1315,7 +1327,7 @@ class Run:
                          "reason": reason[:400], "cq_bin": self.cq_bin,
                          "restored_config_sha256": sha256_bytes(live_config)}
         if self.hold.acquired:
-            self.hold.release()
+            self.release_hold()
             self.released = True
         self.write_record("rolled_back", released=True, reason=reason[:400])
         self.phase("rolled_back", triggers=self.final_triggers)
