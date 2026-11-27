@@ -167,9 +167,10 @@ export const STAGED_GAPS: readonly TickGap[] = [
   },
   {
     id: 'shadow-d2',
-    phases: ['tick', 'slot'],
+    phases: ['slot'],
     python: 'whole-tick shadow comparison',
-    missing: 'the D2 shadow compares the plan only; the composed phases are not shadowed',
+    missing:
+      'the composed tick is shadowed offline (runComposedShadow, composedShadow.test.ts) but not the slot, the XDG summary.json, the paseo schedule probe, merged discovery, gh-backed enrollment or start_one (stubbed alike on both sides), and one divergence is explained rather than fixed (the superseded-open retirement is not persisted)',
   },
 ];
 
