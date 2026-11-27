@@ -260,8 +260,9 @@ export function compareArtefacts(a: Artefacts, b: Artefacts, pinnedAt: string): 
 }
 
 /**
- * `compareArtefacts` plus the composed-run artefacts. `status.json` is compared by value like the
- * queue; `status.md` and `next-review-at` by bytes, so a drifting timestamp or word shows.
+ * `compareArtefacts` plus the composed-run artefacts. `status.json`, `status.md` and `next-review-at`
+ * are all compared by bytes, so a drifting timestamp, key order or word shows. `queue.json` (by
+ * value) and `events.jsonl` (per record) are compared by `compareArtefacts`.
  */
 export function compareComposedArtefacts(
   a: Artefacts,
@@ -442,6 +443,7 @@ export async function runComposedShadow(
   for (const dir of [frozen.a, frozen.b])
     for (const name of COMPOSED_HARMLESS_ENTRIES)
       rmSync(join(dir, name), { recursive: true, force: true });
+  // `slotDecision` is '' on both sides: no slot runs in a composed shadow, so it is always 'same'.
   const python = await options.python(frozen.a);
   const ts = await options.ts(frozen.b);
   const diff = compareComposedArtefacts(
