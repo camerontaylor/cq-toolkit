@@ -1273,7 +1273,6 @@ class Run:
                     "cannot reacquire admission for rollback: " + str(exc)
                     + "; the failed target is still installed and its triggers "
                     "may be running (after: " + reason[:200] + ")")
-            self.hold = hold
         require(self.hold.owns(), "hold lost before rollback")
         record = getattr(self, "post_compatibility", None)
         if record is None:
