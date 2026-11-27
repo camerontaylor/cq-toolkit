@@ -119,9 +119,11 @@ export interface RepairDrainEffects extends PassGateEffects {
 }
 
 export interface RepairDrainResult {
-  status: 'drained' | 'error';
+  status: 'drained' | 'error' | 'refused' | 'paused' | 'deferred';
   triage?: JsonValue;
   error?: string;
+  /** Why a narrated early exit did no inbox work (Python `drain`'s structured result). */
+  reason?: string;
 }
 
 const pyText = (error: unknown): string => (error instanceof Error ? error.message : String(error));
@@ -496,30 +498,32 @@ function criticalOrMajor(job: JsonObject): boolean {
 
 /**
  * `drain`: the automatic inbox drain, minor-only items after critical/major
- * ones. Returns the pass's JSON result, or `null` for a narrated early exit
- * (the CLI reports that as `{status: 'drained'}`).
+ * ones. Returns the pass's JSON result; a narrated early exit reports a
+ * `refused`, `paused` or `deferred` status with its reason, never `null`.
  */
-export async function runRepairDrain(
-  effects: RepairDrainEffects,
-): Promise<RepairDrainResult | null> {
+export async function runRepairDrain(effects: RepairDrainEffects): Promise<RepairDrainResult> {
   // Admission before any fetch, triage or write: a handed-over host must cost
   // nothing and leave the queue and inbox exactly as they are.
-  if (!(await admit({ stage: 'pass-start' }, effects))) return null;
+  if (!(await admit({ stage: 'pass-start' }, effects))) {
+    return { status: 'refused', reason: 'runner-disabled' };
+  }
   const limit = workerLimit(await effects.maxConcurrentItems()); // before triage or any provider spend
   const until = await effects.dispatchPaused();
   if (until) {
     effects.narrate(`repair drain paused: provider rate limit until ${until}`);
-    return null;
+    return { status: 'paused', reason: `provider rate limit until ${until}` };
   }
   // Stale checks read origin refs; refresh them first. A failed fetch skips this pass.
   const error = await effects.fetchClone();
   if (error !== null) {
     effects.narrate(`repair drain skipped: ${error.slice(0, 200)}`);
-    return null;
+    return { status: 'deferred', reason: error.slice(0, 200) };
   }
   // A marker written while the fetch ran must stop the pass before triage
   // spends: the guard at the top was sampled before the network work.
-  if (!(await admit({ stage: 'before-triage' }, effects))) return null;
+  if (!(await admit({ stage: 'before-triage' }, effects))) {
+    return { status: 'deferred', reason: 'runner-disabled' };
+  }
   let triage: JsonValue | null = null;
   try {
     triage = await effects.triage();
@@ -605,10 +609,9 @@ export async function runRepairDrain(
 }
 
 /** `run`'s tail: the one JSON artifact and the exit code for a drain result. */
-export function drainOutcome(result: RepairDrainResult | null): {
+export function drainOutcome(result: RepairDrainResult): {
   readonly exitCode: 0 | 1;
   readonly artifact: RepairDrainResult;
 } {
-  const artifact = result ?? { status: 'drained' as const };
-  return { exitCode: artifact.status === 'error' ? 1 : 0, artifact };
+  return { exitCode: result.status === 'error' ? 1 : 0, artifact: result };
 }

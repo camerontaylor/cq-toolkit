@@ -97,7 +97,7 @@ export function runTriageDryRun(
   });
 }
 
-/** The end of `run()` (crq_repair.py:1679-1680): `drain` always returns a result; `error` exits 1. */
+/** The end of `run()` (crq_repair.py:1690-1691): `drain` always returns a result; `error` exits 1. */
 export function finishDrain(result: Dict): RepairRunOutcome {
   return { exitCode: result['status'] === 'error' ? 1 : 0, result };
 }
