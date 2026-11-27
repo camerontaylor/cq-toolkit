@@ -907,7 +907,8 @@ class DiscoveryTests(PortFixture):
 
     def test_cotenant_symlink_naming_the_expected_unit_is_unsupported(self):
         declared = self.declare()
-        for directive in ("Wants", "Requires", "PartOf"):
+        for directive in ("Wants", "Requires", "PartOf", "PropagatesStopTo",
+                          "StopPropagatedFrom"):
             with self.subTest(directive=directive):
                 outside = self.base / ("repos/%s.service"
                                        % directive.lower())
