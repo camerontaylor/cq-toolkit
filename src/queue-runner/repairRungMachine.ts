@@ -261,6 +261,12 @@ const rungValue = (rung: bigint): JsonNumber => JsonNumber.int(rung);
 
 /** `ROOT / 'state/repair' / job_id` (an absolute `job_id` replaces the prefix, as in pathlib). */
 function jobDirectory(root: string, jobId: unknown): string {
+  if (typeof jobId !== 'string') {
+    throw new PyError(
+      'TypeError',
+      `unsupported operand type(s) for /: 'PosixPath' and '${pyTypeName(jobId)}'`,
+    );
+  }
   const name = pathArg(jobId);
   if (name.startsWith('/')) return normalizePosixPath(name);
   return normalizePosixPath(`${root}/state/repair/${name}`);

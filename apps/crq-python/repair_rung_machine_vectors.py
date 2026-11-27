@@ -48,7 +48,7 @@ SCHEMA = "cq.crq-rung-machine-vector/v1"
 NOW = "2026-11-26T12:00:00Z"
 BASE = "a" * 40
 JOB_ID = "crq-R-F1"
-MESSAGE_KINDS = ["ValueError", "KeyError", "RuntimeError", "OSError", "DetectorUnavailable"]
+MESSAGE_KINDS = ["TypeError", "ValueError", "KeyError", "RuntimeError", "OSError", "DetectorUnavailable"]
 
 
 def _service():
