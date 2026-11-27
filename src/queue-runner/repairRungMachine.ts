@@ -261,6 +261,12 @@ const rungValue = (rung: bigint): JsonNumber => JsonNumber.int(rung);
 
 /** `ROOT / 'state/repair' / job_id` (an absolute `job_id` replaces the prefix, as in pathlib). */
 function jobDirectory(root: string, jobId: unknown): string {
+  if (typeof jobId !== 'string') {
+    throw new PyError(
+      'TypeError',
+      `unsupported operand type(s) for /: 'PosixPath' and '${pyTypeName(jobId)}'`,
+    );
+  }
   const name = pathArg(jobId);
   if (name.startsWith('/')) return normalizePosixPath(name);
   return normalizePosixPath(`${root}/state/repair/${name}`);
@@ -341,30 +347,18 @@ async function verifyCitation(
  * The owner argument triple of `resume_worktree`, read in Python's order and
  * only when a resume state is set. Outside one the owner is never consulted, so
  * an unreadable config or job must not raise.
- *
- * Deviation: Python raises a non-string `worktree_root` / `item` as a lazy
- * `TypeError` after the recorded-tree checks; here it raises at the read.
+ * Their types are checked lazily where Python uses them (`resume_worktree`).
  */
 function resumeOwner(result: Dict, config: unknown, job: unknown): RepairResumeOwner {
   const resuming =
     pyTruthy(pyGet(result, 'dispatch_pending')) ||
     pyTruthy(pyGet(result, 'pending_judge')) ||
     pyTruthy(pyGet(result, 'pending_mechanical'));
-  if (!resuming) return { worktreeRoot: '', itemId: '', jobId: '' };
-  const fields = [
-    pySubscript(config, 'worktree_root'),
-    pySubscript(job, 'item'),
-    pySubscript(job, 'job'),
-  ];
-  for (const value of fields) {
-    if (typeof value !== 'string') {
-      throw new PyError('TypeError', `expected str, not '${pyTypeName(value)}'`);
-    }
-  }
+  if (!resuming) return { worktreeRoot: undefined, itemId: undefined, jobId: undefined };
   return {
-    worktreeRoot: fields[0] as string,
-    itemId: fields[1] as string,
-    jobId: fields[2] as string,
+    worktreeRoot: pySubscript(config, 'worktree_root'),
+    itemId: pySubscript(job, 'item'),
+    jobId: pySubscript(job, 'job'),
   };
 }
 

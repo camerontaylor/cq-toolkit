@@ -184,7 +184,7 @@ const isNaNFloat = (value: unknown): boolean =>
  * compare members with an identity shortcut, and every decoded `NaN` is the same
  * object, so `[NaN] == [NaN]` is true. `pyEq` alone would say false.
  */
-function pyEqual(a: unknown, b: unknown): boolean {
+export function pyEqual(a: unknown, b: unknown): boolean {
   const member = (x: unknown, y: unknown): boolean =>
     (isNaNFloat(x) && isNaNFloat(y)) || pyEqual(x, y);
   if (Array.isArray(a) && Array.isArray(b)) {

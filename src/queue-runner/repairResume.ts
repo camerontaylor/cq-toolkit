@@ -48,9 +48,9 @@ type Rec = Record<string, unknown>;
 
 /** The job a resumed tree must belong to (Python's `config['worktree_root']`, `job['item']`, `job['job']`). */
 export interface RepairResumeOwner {
-  readonly worktreeRoot: string;
-  readonly itemId: string;
-  readonly jobId: string;
+  readonly worktreeRoot: unknown;
+  readonly itemId: unknown;
+  readonly jobId: unknown;
 }
 
 /** Read-only questions about the filesystem, answered by a caller. */
@@ -93,6 +93,12 @@ function pyTypeName(value: unknown): string {
   return 'dict';
 }
 
+/** `'crq-repair-' + part`: a non-string owner part is a `TypeError` where Python concatenates it. */
+function ownerPart(value: unknown): string {
+  if (typeof value === 'string') return value;
+  throw new PyError('TypeError', `can only concatenate str (not "${pyTypeName(value)}") to str`);
+}
+
 /** `Path(value)`: a truthy non-string recorded value is a `TypeError`. */
 export function pathArg(value: unknown): string {
   if (typeof value === 'string') return normalizePosixPath(value);
@@ -125,8 +131,7 @@ export async function selectResumeWorktree(
  * `recorded.parent == wt_root and recorded.name in (owned, owned + '-A2')` over
  * two resolved paths: the rule `recover` and `cleanup_harvested` apply.
  */
-function isOwnedTree(recorded: string, root: string, owner: RepairResumeOwner): boolean {
-  const owned = `crq-repair-${owner.itemId}-${owner.jobId}`;
+function isOwnedTree(recorded: string, root: string, owned: string): boolean {
   const name = posix.basename(recorded);
   return posix.dirname(recorded) === root && (name === owned || name === `${owned}-A2`);
 }
@@ -142,9 +147,10 @@ async function adopt(
   if (!pyTruthy(raw)) return undefined;
   const recorded = await probes.resolve(pathArg(raw));
   if (recorded === (await probes.resolve(normalizePosixPath(worktree)))) return undefined;
-  if (!isOwnedTree(recorded, await probes.resolve(normalizePosixPath(owner.worktreeRoot)), owner)) {
-    return undefined;
-  }
+  // Python's order: `owned` (item, then job id) before `Path(wt_root).resolve()`.
+  const owned = `crq-repair-${ownerPart(owner.itemId)}-${ownerPart(owner.jobId)}`;
+  const root = await probes.resolve(pathArg(owner.worktreeRoot));
+  if (!isOwnedTree(recorded, root, owned)) return undefined;
   if (!(await probes.isDirectory(recorded))) return undefined;
   if (!(await probes.exists(`${recorded === '/' ? '' : recorded}/.git`))) return undefined;
   return recorded;
