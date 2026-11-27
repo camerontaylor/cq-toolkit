@@ -308,14 +308,25 @@ journal schema, store, lock or new capability mechanism is introduced.
    state. Persist the complete intent and snapshot with atomic replacement and
    file and directory fsync before changing the host. The adapter must validate
    the snapshot's shape and paths before it acts. `validate_snapshot` enforces
-   that: the schema version and exact top-level key set, exact naming of the
-   owned unit paths, each entry's metadata (type, permission bits without
-   special or group/world-write modes, adapter-identity uid and gid, no
-   extended attributes, file size and SHA-256 matching the saved bytes,
-   symlink targets confined to the unit directory) and the timer, path and
-   service activation states against restorable values. The seam calls that
-   validation before fencing or restoration; that is code-level checking, and
-   the validator's host behavior still needs live proof.
+   that: the exact top-level key set (`schema_version`, `unit`, `runtime`,
+   `paths`, `activators`), the integer schema version, the unit name and the
+   runtime format, and a `paths` map keyed by exactly the owned unit paths.
+   Each entry is `missing` (type only) or a `file` or `symlink` with an exact
+   key set, an integer mode, the adapter identity's uid and gid, and no
+   extended attributes. File entries must have no special bits and no group
+   or world write bit, and carry base64 bytes whose length and SHA-256 match
+   the recorded size and digest within the size bound. Symlink entries must
+   have mode 0o777 (the platform symlink mode, which does include group and
+   world write) and a non-empty target that resolves inside the unit
+   directory; a service symlink to `/dev/null` (the durable mask) is refused
+   as prior state. The service, timer and path unit entries must be regular
+   files, and the timer and path enablement entries must be a symlink or
+   missing. The `activators` map must hold exactly the expected keys; the
+   timer, path and service active states must be `active` or `inactive`, and
+   the timer and path unit-file states must be known systemd values. The
+   seam calls that validation before fencing or restoration; that is
+   code-level checking only, and the validator's host behavior still needs
+   live proof.
 3. Stop the unit's timer and path activators, install the durable service mask,
    reload the stable manager, and explicitly stop or cancel the target's queued
    and running work. Verify the manager has no pending service job and no
