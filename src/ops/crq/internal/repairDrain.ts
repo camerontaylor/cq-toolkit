@@ -516,8 +516,10 @@ export async function runRepairDrain(effects: RepairDrainEffects): Promise<Repai
   // Stale checks read origin refs; refresh them first. A failed fetch skips this pass.
   const error = await effects.fetchClone();
   if (error !== null) {
-    effects.narrate(`repair drain skipped: ${error.slice(0, 200)}`);
-    return { status: 'deferred', reason: error.slice(0, 200) };
+    // Python's `error[:200]` counts code points, not UTF-16 units.
+    const reason = Array.from(error).slice(0, 200).join('');
+    effects.narrate(`repair drain skipped: ${reason}`);
+    return { status: 'deferred', reason };
   }
   // A marker written while the fetch ran must stop the pass before triage
   // spends: the guard at the top was sampled before the network work.

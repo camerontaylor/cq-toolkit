@@ -390,6 +390,20 @@ describe('runRepairDrain admission', () => {
     expect(r.calls).toEqual(['fetch']);
     expect(r.said).toEqual([`repair drain skipped: ${'f'.repeat(200)}`]);
   });
+  test('a failed fetch clips its error by code point like Python error[:200]', async () => {
+    const emoji = rig({ fetchError: '😀'.repeat(300) });
+    expect(await runRepairDrain(emoji.effects)).toEqual({
+      status: 'deferred',
+      reason: '😀'.repeat(200),
+    });
+    expect(emoji.said).toEqual([`repair drain skipped: ${'😀'.repeat(200)}`]);
+    const edge = rig({ fetchError: `${'a'.repeat(199)}😀tail` });
+    expect(await runRepairDrain(edge.effects)).toEqual({
+      status: 'deferred',
+      reason: `${'a'.repeat(199)}😀`,
+    });
+    expect(edge.said).toEqual([`repair drain skipped: ${'a'.repeat(199)}😀`]);
+  });
   test('a marker written during the fetch stops the pass before triage', async () => {
     const r = rig({ disabled: [false, true] });
     expect(await runRepairDrain(r.effects)).toEqual({
