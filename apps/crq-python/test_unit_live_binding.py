@@ -684,19 +684,15 @@ class DiscoveryTests(PortFixture):
         self.assertIn("Service names crq-tick.service",
                       " ".join(evidence["foreign"]))
 
-    def test_unescaped_instance_socket_service_target_is_unsupported(self):
+    def test_percent_i_upper_service_is_not_expanded(self):
         declared = self.declare()
-        # ``%I`` receives the unescaped instance (systemd v257 systemd.unit):
-        # ``Service=%I.service`` on ``ingress@crq\x2dtick.socket`` activates
-        # crq-tick.service, so the instance must be unescaped before the scan
-        # compares the name; ``%i`` keeps the escaped text.
+        # systemd v257 parses ``Service=`` with ``unit_name_printf``, whose
+        # table has no ``%I``: the assignment is ignored, so no ``crq-tick``
+        # edge may be invented from the unescaped instance.
         self.write("ingress@crq\\x2dtick.socket",
                    "[Socket]\nListenStream=1\nService=%I.service\n")
         evidence = self.discover(declared)
-        self.assertEqual(evidence["complete"], True)
-        self.assertEqual(evidence["supported"], False)
-        self.assertIn("Service names crq-tick.service",
-                      " ".join(evidence["foreign"]))
+        self.assertNotIn("crq-tick.service", " ".join(evidence["foreign"]))
 
     def test_uninstantiated_socket_expands_an_empty_instance(self):
         declared = self.declare()
