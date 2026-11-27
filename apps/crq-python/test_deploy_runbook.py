@@ -1042,7 +1042,8 @@ class DeployTests(DeployFixture, unittest.TestCase):
             return real_sync(hold)
 
         def ownership(hold):
-            if unreadable and state["gone"] and not state.get("hid"):
+            if unreadable and state["gone"] and (
+                    unreadable == "always" or not state.get("hid")):
                 state["hid"] = True
                 return None
             return real_ownership(hold)
@@ -1065,6 +1066,16 @@ class DeployTests(DeployFixture, unittest.TestCase):
         self.assertEqual(self.marker().read_bytes(), b"operator\n")
         self.assertIn("admission_reacquire_refusal", self.record(run))
         self.assertFalse(self.record(run)["admission_held"])
+
+    def test_marker_absent_with_reads_failing_is_restored_by_fail_stop(self):
+        # Every read after the fault returns unknown, so ownership can never
+        # be confirmed; fail_stop must treat unknown as not owned and put
+        # this run's token back rather than leave no marker on disk.
+        run = self._refusal_run_with_lost_hold(plant=False,
+                                               unreadable="always")
+        self.assertTrue(self.marker().exists())
+        self.assertEqual(self.marker().read_bytes(), run.hold.token)
+        self.assertTrue(run.hold.acquired)
 
     def test_unreadable_missing_marker_is_reacquired_by_fail_stop(self):
         run = self._refusal_run_with_lost_hold(plant=False, unreadable=True)
