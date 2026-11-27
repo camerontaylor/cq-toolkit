@@ -167,12 +167,22 @@ def run_context(spec: dict) -> dict:
     row = json.loads(json.dumps(spec["row"]))
     if spec["escalate"]:
         row["_escalate"] = True
+    # int() string conversion is capped (4300 digits by default) and the
+    # environment can move that cap, so pin it for the production call: the
+    # 4300-digit citation must convert and the 4301-digit one must raise.
+    pin_limit = hasattr(sys, "set_int_max_str_digits")
+    if pin_limit:
+        previous_limit = sys.get_int_max_str_digits()
+        sys.set_int_max_str_digits(4300)
     try:
         packed = triage.context(repo, row, spec["tip"])
     except CAUGHT as exc:
         return {"error": {"type": type(exc).__name__}, "calls": calls}
     except (AttributeError, IndexError, RuntimeError) as exc:
         return {"raises": type(exc).__name__, "calls": calls}
+    finally:
+        if pin_limit:
+            sys.set_int_max_str_digits(previous_limit)
     return {"result": json.loads(json.dumps(packed)), "calls": calls}
 
 
