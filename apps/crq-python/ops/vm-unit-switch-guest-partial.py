@@ -868,9 +868,28 @@ def expected_tick_unit_bytes(runtime):
         proof_root=PROOF_BIN, guest_only=True).render_unit(runtime)
 
 
+def usage_error(phase, detail):
+    # argparse writes its own diagnostics only to stderr; keep the
+    # JSON-on-stdout failure contract callers parse, with the argparse
+    # usage exit code.
+    print(json.dumps({"phase": phase, "error": "UsageError",
+                      "detail": str(detail)[:1000]}, sort_keys=True))
+    return 2
+
+
+class _Parser(argparse.ArgumentParser):
+    """Usage errors keep argparse's exit 2 but print the JSON error artifact."""
+
+    phase = None
+
+    def error(self, message):
+        self.exit(usage_error(self.phase, message),
+                  "%s: error: %s\n" % (self.prog, message))
+
+
 def main(argv=None):
     phases = phase_names() + ("host-identity",)
-    parser = argparse.ArgumentParser()
+    parser = _Parser()
     parser.add_argument("phase", choices=phases)
     parser.add_argument("--case", choices=PARTIAL_ORDER)
     parser.add_argument("--label")
@@ -885,19 +904,18 @@ def main(argv=None):
     # is an arg error (exit 2), not a thrown error inside the phase (exit 1).
     if args.phase not in ("prepare", "partial-install", "partial-inspect") \
             and not args.case:
-        # parser.error writes only to stderr; keep the JSON-on-stdout failure
-        # contract callers parse, with the argparse usage exit code.
-        print(json.dumps({"phase": args.phase, "error": "UsageError",
-                          "detail": "phase " + args.phase + " requires --case"},
-                         sort_keys=True))
-        return 2
+        return usage_error(args.phase,
+                           "phase " + args.phase + " requires --case")
     try:
         # Every partial phase (prepare deletes ~/checkout) refuses off the
         # disposable guest before any host effect, as base.main() does.
         require(os.uname().nodename == "crq-probe",
                 "proof driver only runs on the disposable crq-probe guest")
         if args.case and args.case != phase_case(args.phase):
-            raise RuntimeError("--case " + args.case + " does not match phase "
+            # A known --case from another phase is an arg error (exit 2),
+            # not a thrown error inside the phase (exit 1).
+            return usage_error(args.phase,
+                               "--case " + args.case + " does not match phase "
                                + args.phase)
         if args.phase == "prepare":
             payload = partial_prepare(args)
