@@ -69,7 +69,8 @@ def parse_entry(entry: Any) -> Dict[str, Any]:
     clone = clone.strip()
     branch = entry.get("default_branch", "main")
     if (not isinstance(branch, str) or not BRANCH.fullmatch(branch) or ".." in branch
-            or "//" in branch or branch.endswith(".lock")):
+            or "//" in branch
+            or any(part.startswith(".") or part.endswith(".lock") for part in branch.split("/"))):
         _refuse(entry, "invalid default_branch")
     discovery = entry.get("discovery", {})
     if not isinstance(discovery, dict) or set(discovery) - {"push", "pr"}:
