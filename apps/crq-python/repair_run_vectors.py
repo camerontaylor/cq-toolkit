@@ -86,7 +86,7 @@ def drain_scn(name, **spec):
 
 def build_scenarios() -> None:
     # --- drain admission ------------------------------------------------------------------
-    drain_scn("drain: runner disabled at the start narrates and returns None",
+    drain_scn("drain: runner disabled at the start narrates and returns a refused status",
               answers=answers(runner_disabled=[True]))
     drain_scn("drain: missing repair key is a KeyError", config={}, answers=answers(runner_disabled=[False]))
     drain_scn("drain: repair null is enough for the key read", config={"repair": None},
@@ -94,7 +94,7 @@ def build_scenarios() -> None:
                               triage_phase=[None], drain_order=[[]]))
     drain_scn("drain: worker_limit failure propagates before dispatch_paused",
               answers=answers(runner_disabled=[False], worker_limit=[raising("ValueError", "bad worker limit")]))
-    drain_scn("drain: rate limit pause returns None",
+    drain_scn("drain: rate limit pause returns a paused status",
               answers=answers(runner_disabled=[False], dispatch_paused=["2030-01-01T00:00:00Z"]))
     drain_scn("drain: empty pause text is falsy",
               answers=answers(runner_disabled=[False, False], dispatch_paused=["", None],
@@ -255,7 +255,8 @@ def build_scenarios() -> None:
     scenario("dry-run: the lock is released after the report", "run", argv=dry, relock=True,
              answers=answers(triage_phase=[{"ok": 1}]))
     # --- run(): the drain tail ----------------------------------------------------------------
-    scenario("tail: drain None is the drained result", "run", answers=answers(drain=[None]))
+    scenario("tail: a deferred drain result is exit 0", "run",
+             answers=answers(drain=[{"status": "deferred", "reason": "runner-disabled"}]))
     scenario("tail: an empty drain result stays empty", "run", answers=answers(drain=[{}]))
     scenario("tail: drained result is exit 0", "run",
              answers=answers(drain=[{"status": "drained", "triage": {"t": 1}}]))

@@ -196,7 +196,7 @@ async function replay(scenario: Scenario, expected: Dict): Promise<Dict> {
           })
         : await lockedResult(lock, () => {
             trace.push(['drain']);
-            return Promise.resolve(finishDrain(answer('drain') as Dict | null));
+            return Promise.resolve(finishDrain(answer('drain') as Dict));
           });
       return {
         trace,
