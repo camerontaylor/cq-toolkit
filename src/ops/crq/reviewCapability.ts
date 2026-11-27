@@ -246,6 +246,13 @@ export function decodeReviewRequest(raw: Uint8Array): JsonObject {
   if (!validated.success) throw new ValueError('invalid review request');
   const request = fromPlainJson(parsed);
   if (!(request instanceof JsonObject)) throw new ValueError('invalid review request');
+  // The wire schema types `index` as an integer, so Python refuses float
+  // lexemes (`1.0`, `1e0`) at decode. The Zod mirror sees plain numbers and
+  // cannot tell them apart; check the lexeme kind here.
+  const index = request.get('index');
+  if (index instanceof JsonNumber && index.kind !== 'int') {
+    throw new ValueError('invalid review request');
+  }
   const snapshot = request.get('snapshot');
   if (
     snapshot instanceof JsonObject &&
@@ -449,15 +456,12 @@ async function statusOrResult(
     const receiptId = result.get('receipt_id') as string;
     const data = await effects.readReceipt(receiptId);
     const indexValue = request.get('index');
-    let index = 0;
-    if (indexValue !== undefined) {
-      // The wire schema admits integer-valued float lexemes (`1.0`, `1e0`); an
-      // explicit index must select the chunk it names, never fall back to 0.
-      index = Number(
-        indexValue instanceof JsonNumber ? (indexValue.integer ?? indexValue.float) : Number.NaN,
-      );
-      if (!Number.isInteger(index) || index < 0) throw new ValueError('invalid result index');
-    }
+    // decodeReviewRequest has already refused every non-integer lexeme, so an
+    // explicit index here is an exact JSON integer.
+    const index =
+      indexValue instanceof JsonNumber && indexValue.integer !== null
+        ? Number(indexValue.integer)
+        : 0;
     return reviewResultChunk(receiptId, data, index);
   }
   if (request.get('op') === 'status') {
