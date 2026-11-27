@@ -19,7 +19,7 @@
  * returned document carries the version marker that tells a later reader which
  * shape the rows have.
  */
-import { JsonNumber, JsonObject, toPlainJsonDeep } from './jsonValue.js';
+import { JsonNumber, JsonObject, toPlainJsonDeep, type JsonValue } from './jsonValue.js';
 import {
   fromPlainJson,
   recordEntries,
@@ -130,12 +130,8 @@ export function appendAdmission(queue: JsonObject, decision: unknown): Admission
   if (!Array.isArray(existing)) fail('backfill_admissions must be an array');
   const summary = fromPlainJson(summarizeAdmission(decision));
   if (!(summary instanceof JsonObject)) fail('admission summary must be an object');
-  const combined: unknown[] = [...(existing as unknown[]), summary];
-  const rows: JsonObject[] = [];
-  for (const row of combined.slice(-ADMISSION_HISTORY_LIMIT)) {
-    if (!(row instanceof JsonObject)) fail('admission row must be an object');
-    rows.push(row);
-  }
+  // Python appends to whatever list is there and slices it: rows are not validated.
+  const rows = [...(existing as JsonValue[]), summary].slice(-ADMISSION_HISTORY_LIMIT);
   return {
     queue: withObjectKeys(queue, [
       [ADMISSION_ROWS, rows],

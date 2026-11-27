@@ -24,6 +24,9 @@ import {
 } from '../../policy/crq/ledger.js';
 import { pythonJsonText, sha256Hex } from '../../policy/crq/pythonJson.js';
 import { GitUnavailable, type GitFn } from '../../policy/crq/reviewHistory.js';
+import { casefold } from '../../policy/crq/triagePlan.js';
+import { pythonStrip } from '../../policy/crq/repairBinding.js';
+import { PyError } from '../../queue-runner/pyErrors.js';
 import { ValueError } from '../../policy/crq/reviewAdmission.js';
 import { MAX_EVENT_BYTES, PythonRetainedError } from '../../policy/crq/reviewRecord.js';
 import { MAX_RECEIPT_BYTES } from '../../policy/crq/queueReceipt.js';
@@ -141,11 +144,38 @@ export function manualClonePath(stateRoot: string, repo: string): string | null 
   return join(stateRoot, 'review-repos', owner, name);
 }
 
-/** `review_transport.clone_url`: the primary origin with the repository swapped in. */
+/**
+ * `review_transport.clone_url` after the origin lookup: the primary origin with
+ * the repository swapped in. Python finds the slug in the CASEFOLDED origin and
+ * slices the ORIGINAL by that code-point index, so a character whose fold
+ * changes the length (a sharp s) before the slug shifts the cut; this mirrors
+ * that, over code points, rather than correcting it.
+ */
 export function manualCloneUrl(primaryOrigin: string, primaryRepo: string, repo: string): string {
-  const at = primaryOrigin.toLowerCase().lastIndexOf(primaryRepo.toLowerCase());
+  const folded = Array.from(casefold(primaryOrigin));
+  const needle = Array.from(casefold(primaryRepo));
+  let at = -1;
+  for (let i = folded.length - needle.length; i >= 0; i -= 1) {
+    if (needle.every((character, offset) => folded[i + offset] === character)) {
+      at = i;
+      break;
+    }
+  }
   if (at < 0) return `https://github.com/${repo}.git`;
-  return primaryOrigin.slice(0, at) + repo + primaryOrigin.slice(at + primaryRepo.length);
+  const original = Array.from(primaryOrigin);
+  return (
+    original.slice(0, at).join('') +
+    repo +
+    original.slice(at + Array.from(primaryRepo).length).join('')
+  );
+}
+
+/** The `OSError` subclass Python raises for a failed `mkdir`; other codes stay as thrown. */
+function osError(error: unknown): unknown {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  if (code === 'EEXIST') return new PyError('FileExistsError', String(error));
+  if (code === 'ENOTDIR') return new PyError('NotADirectoryError', String(error));
+  return error;
 }
 
 async function isDirectory(path: string): Promise<boolean> {
@@ -242,22 +272,29 @@ export function createReviewEffects(options: ReviewEffectsOptions): ReviewEffect
       const path = manualClonePath(state, repo);
       if (path === null) return false;
       if (await isDirectory(join(path, '.git'))) return true;
-      const primary = cloneFor(options.repo);
-      const origin = await gitCall(pool, primary, ['remote', 'get-url', 'origin']);
-      if (origin.code !== 0) return false;
-      const url = manualCloneUrl(
-        new TextDecoder().decode(origin.stdout).trim(),
-        options.repo,
-        repo,
-      );
       // A unique scratch directory under `.tmp`, outside the owner/name
       // namespace (a slug never starts with a dot), so a failed clone can
-      // never collide with or delete another repository's clone.
+      // never collide with or delete another repository's clone. Python makes
+      // it before reading the origin URL, so a failed lookup leaves `.tmp`.
       const scratchRoot = join(state, 'review-repos', '.tmp');
-      await mkdir(scratchRoot, { recursive: true });
+      try {
+        await mkdir(scratchRoot, { recursive: true });
+      } catch (error) {
+        throw osError(error);
+      }
       const scratch = await mkdtemp(join(scratchRoot, 'clone-'));
       const partial = join(scratch, 'clone');
       try {
+        const origin = await gitCall(pool, cloneFor(options.repo), ['remote', 'get-url', 'origin']);
+        if (origin.code !== 0) return false;
+        let originUrl: string;
+        try {
+          originUrl = new TextDecoder('utf-8', { fatal: true }).decode(origin.stdout);
+        } catch {
+          // `.decode()` of non-UTF-8 bytes escapes `provision` (not an OSError).
+          throw new PyError('UnicodeDecodeError', 'invalid utf-8 in the origin url');
+        }
+        const url = manualCloneUrl(pythonStrip(originUrl), options.repo, repo);
         const result = await gitCall(
           pool,
           scratch,
@@ -267,7 +304,8 @@ export function createReviewEffects(options: ReviewEffectsOptions): ReviewEffect
         if (result.code !== 0) return false;
         await mkdir(join(path, '..'), { recursive: true });
         await rename(partial, path);
-      } catch {
+      } catch (error) {
+        if (error instanceof PyError) throw error;
         return false;
       } finally {
         await rm(scratch, { recursive: true, force: true });

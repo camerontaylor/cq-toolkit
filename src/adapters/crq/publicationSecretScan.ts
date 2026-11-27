@@ -65,8 +65,8 @@
  *   --no-renames` and pinned prefixes). A binary file or a pure rename is
  *   therefore scanned by content where Python's plain diff prints only a
  *   marker; an ambient `diff.external` or `diff.textconv` cannot reshape it.
- * - Quoted paths (`core.quotePath`) are decoded and an undecodable one refuses
- *   the scan, where Python matches the quoted text literally.
+ * - Quoted paths (`core.quotePath`) are not decoded: like Python, the quoted
+ *   text (quotes included) is matched literally, via `scanReviewDiff`.
  * - The strict constrained-format patterns parser refuses a file Python's
  *   lax line parser would accept.
  * - The job id must match the repair job grammar, as in `publicationFiles`.

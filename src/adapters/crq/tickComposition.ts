@@ -35,7 +35,11 @@ import {
   FixPrBacklog,
   refreshFixPrBacklog,
 } from '../../queue-runner/fixPrBacklog.js';
-import { repairArchiveLegacy, repairBackfill } from '../../queue-runner/repairBackfill.js';
+import {
+  repairArchiveLegacy,
+  repairBackfill,
+  repairEnqueue,
+} from '../../queue-runner/repairBackfill.js';
 import type { Item, Queue } from '../../queue-runner/repairBackfill.js';
 import type { HarvestReviewEffects } from '../../queue-runner/harvestReview.js';
 import { runReconcilePhase } from '../../queue-runner/tickDiscoveryPhase.js';
@@ -133,8 +137,9 @@ export const STAGED_GAPS: readonly TickGap[] = [
     python: 'harvest_review (crq.py:2619)',
     missing:
       'fileHarvestReviewEffects binds findings.md for non-local kinds, removeWorktree, writeReceipt and ' +
-      'requestPrReview; repairEnqueue, backfillHarvest and the coverage seam stay injected: ' +
-      'repairEnqueue needs injected git and a TS port of crq_repair.findings (the pure repair port exists in repairBackfill.ts); backfillHarvest has no TS port of backfill_runtime.harvest; the coverage seam has no harvest-side implementation (start-one CoverageEffects)',
+      'requestPrReview; the coverage seam stays injected, repairEnqueue is bound ' +
+      'only when the repairBackfill input (git, config) is supplied, and backfillHarvest is bound by backfillHarvestEffect (src/adapters/crq/backfillHarvestEffect.ts, differentially pinned, not routed) over the injected git, outbox, inbox, store, state_event, queue save and cleanup, but not the Python unverified-terminal retain strings or the quota-cause/no-cooldown outcomes, which throw; ' +
+      'the coverage seam has no harvest-side implementation (start-one CoverageEffects)',
   },
   {
     id: 'repair-harvest-effects',
@@ -144,16 +149,21 @@ export const STAGED_GAPS: readonly TickGap[] = [
       'file-backed: markFindingOutcome and recordUnpublishedFixedSibling (fileRepairOutcomeEffects) ' +
       'and cleanupHarvested (fileRepairCleanup), none composed into the tick; the job/result reads ' +
       'are bound in repairHarvestReads.ts; ' +
-      'still unbound: makeWorktree/removeWorktree, verify, mechanical, requireCanonicalDelivery, saveQueue, ' +
-      'publish (push, PR create, hack detector) and replayBudget, which need TS ports of the repair ' +
-      'worktree, verify and detector runners and the publish path',
+      'bound offline, none composed into the tick or routed: makeWorktree/removeWorktree, verify and ' +
+      'mechanical (repairHarvestRunners.ts), requireCanonicalDelivery, saveQueue and replayBudget ' +
+      '(repairHarvestState.ts), publish (repairHarvestPublish.ts); ' +
+      'bound offline, differentially pinned, not composed or routed (repairHarvestForge.ts): the gh pr create ' +
+      'write, newItem with its clock and the save_queue admission-history compaction log (its loader half, ' +
+      'pendingCompactionLoader, is bound offline and pinned too, but the production loadQueueDocument ' +
+      'still refuses a queue needing compaction, so no runtime caller records one); the forge reads and the gitleaks invocation are pinned ' +
+      'against fakes but need a live gh, token and gitleaks at runtime',
   },
   {
     id: 'start-one-effects',
     phases: ['admit.startOne'],
     python: 'start_one, launch (crq.py:3198/:2004)',
     missing:
-      'fileLaunchEffects binds the launch effects, but its scans, receipt, author lease, on-demand clone and queue save are injected, and CoverageEffects select, buildSynthetic, rank4Gate and the tick clocks and queue helpers are still injected (makeCoverageEffects binds the merged half: mergeQueueSha, diffNameOnly, measureMerged, coverageCandidate, legacyOrigins, legacyRetryAllowed)',
+      'fileLaunchEffects binds the launch effects and fileLaunchBindings (differentially pinned) binds its scans, blocked receipt, author lease, on-demand clone and queue save, but the caller must still compose them (gitleaks discovery semantics are pinned (`gitleaksDiscovery.ts`, `findGitleaksOnPath`, differentially pinned by `gitleaks_discovery_vectors.py` against Python 3.14 `shutil.which`, one helper behind `fileReviewGitleaks`, `repairPreparation` and `authorSnapshotInstall`), but the production binding stays unbound: which PATH and scratch root a caller passes is caller-owned and held; `provision` is not part of launch: it belongs to the review-v1 submit path and is bound by createReviewEffects, differentially pinned; the admission-history compaction log is bound offline (fileRepairSaveQueue and pendingCompactionLoader, differentially pinned) but the fileLaunchBindings queue save does not use it), and CoverageEffects select is bound by makeCoverageEffects only when its select input is supplied (coverageSelect.ts, differentially pinned by coverage_select_vectors.py; the live collaborators it takes stay unbound: c.launch (the reviewer process spawn), services/GitLedger.fetch (the real ArtifactStore, Outbox, Spool and publisher), the file-backed coverage.load/coverage.request and the publication-failure file probe; the gate collaborators and dispatch switch are listed below) (makeCoverageEffects also binds buildSynthetic only when its synthetic git deps are supplied, the clocks, liveItems, compareItems and depsMet only when its tick input is supplied, backfillDispatchConfigured only when its dispatch input is supplied (coverageTickSeams.ts, differentially pinned), plus mergeQueueSha, diffNameOnly, measureMerged, coverageCandidate, legacyOrigins, legacyRetryAllowed, rank4Gate, bindRun and cancelBeforeVendor; the clock, ordinary eligibility, usage refresh, outbox and queue writer arrive as Rank4Collaborators)',
   },
   {
     id: 'shadow-d2',
@@ -370,6 +380,13 @@ export function composeFullTick(input: TickCompositionInput): TickComposition {
             worktreePrefix: input.harvest.worktree.worktreePrefix,
             primaryClone: input.clone,
           }),
+          // `repair_tick.enqueue` over the repair-backfill effects (git and config stay injected).
+          ...(repairEffects
+            ? {
+                repairEnqueue: (q: Queue, item: Item, meta: Item, runId: string) =>
+                  repairEnqueue(q, item, meta, repairEffects, runId),
+              }
+            : {}),
           ...input.harvest.review,
         } as HarvestReviewEffects,
         repairHarvest: input.harvest.repairHarvest,

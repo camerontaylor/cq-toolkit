@@ -519,11 +519,23 @@ export function bindRun(
   const items = queue.get('items');
   if (!Array.isArray(items)) throw new LedgerTypeError('items must be an array');
   const item = object(items[itemIndex], 'item');
-  const attemptId = text(required(item, 'attempt_id'), 'attempt_id');
+  const attemptValue = required(item, 'attempt_id');
+  // Python evaluates `queue["backfill_reservations"]` before hashing the key, so a
+  // missing table is a KeyError even for an unhashable id; then a list or object id
+  // is a TypeError and any other non-string key is simply absent: a KeyError.
   const holds = object(required(queue, 'backfill_reservations'), 'backfill_reservations');
+  if (Array.isArray(attemptValue) || attemptValue instanceof JsonObject)
+    throw new LedgerTypeError('attempt_id is unhashable');
+  if (typeof attemptValue !== 'string')
+    throw new LedgerKeyError(
+      attemptValue instanceof JsonNumber
+        ? String(attemptValue.integer ?? attemptValue.float)
+        : String(attemptValue),
+    );
+  const attemptId = attemptValue;
   const hold = object(required(holds, attemptId), 'reservation');
   const existing = required(hold, 'vendor_run_id');
-  if (pyTruthy(existing) && existing !== vendorRunId)
+  if (pyTruthy(existing) && !pythonValueEqual(existing, vendorRunId))
     throw new LedgerIntegrityError('vendor identity conflict');
   const updatedItem = withObjectKeys(item, [
     ['vendor_state', 'live'],
@@ -555,6 +567,9 @@ export function cancelBeforeVendor(queue: JsonObject, itemIndex: number): Backfi
     'backfill_reservations',
   );
   const attemptId = item.get('attempt_id');
+  // Python `dict.get(attempt_id)`: an unhashable id is a TypeError.
+  if (Array.isArray(attemptId) || attemptId instanceof JsonObject)
+    throw new LedgerTypeError('attempt_id is unhashable');
   const holdValue = typeof attemptId === 'string' ? holds.get(attemptId) : undefined;
   let nextQueue = queue;
   if (pyTruthy(holdValue) && typeof attemptId === 'string') {
