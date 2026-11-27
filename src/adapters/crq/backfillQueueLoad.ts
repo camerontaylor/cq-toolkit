@@ -132,7 +132,8 @@ function summarize(value: JsonValue): JsonObject {
   ]);
 }
 
-function retire(queue: JsonObject): JsonObject {
+/** The retirement pass of `crq.load_queue` (boost pop, superseded second-cycle debt). */
+export function retire(queue: JsonObject): JsonObject {
   const items = queue.get('items');
   if (!Array.isArray(items)) throw new Error('queue items must be an array');
   return withObjectKeys(queue, [
@@ -166,6 +167,17 @@ function retire(queue: JsonObject): JsonObject {
 
 /** `crq.load_queue()` preview: read-only, incremental compaction plus retirement. */
 export async function loadInventoryQueue(path: string): Promise<JsonObject> {
+  return retire((await readCompactedQueue(path)).queue);
+}
+
+/**
+ * `admission_history.load(path)`: the queue with its history summarized and bounded, and
+ * whether the document needed that rewrite (`"backfill_admissions" in queue and version != 1`,
+ * the marker then raised to 1). Read-only; the retirement pass of `load_queue` is `retire`'s.
+ */
+export async function readCompactedQueue(
+  path: string,
+): Promise<{ readonly queue: JsonObject; readonly compacted: boolean }> {
   const reader = new QueueReader(path);
   try {
     const entries: Array<readonly [string, JsonValue]> = [];
@@ -218,9 +230,9 @@ export async function loadInventoryQueue(path: string): Promise<JsonObject> {
     ) {
       throw new Error('unsupported admission history version');
     }
-    if (queue.has('backfill_admissions') && version.integer !== 1n)
-      queue = withObjectKeys(queue, [[ADMISSION_HISTORY_MARKER, JsonNumber.int(1)]]);
-    return retire(queue);
+    const compacted = queue.has('backfill_admissions') && version.integer !== 1n;
+    if (compacted) queue = withObjectKeys(queue, [[ADMISSION_HISTORY_MARKER, JsonNumber.int(1)]]);
+    return { queue, compacted };
   } finally {
     await reader.close();
   }

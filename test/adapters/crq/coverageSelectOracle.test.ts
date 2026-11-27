@@ -75,9 +75,7 @@ function encode(value: unknown): unknown {
   if (value instanceof JsonNumber) {
     if (value.kind === 'int') return encode(value.integer);
     const num = value.float as number;
-    return !Number.isFinite(num) || (Number.isInteger(num) && !Number.isSafeInteger(num))
-      ? { $float: value.raw }
-      : num;
+    return !Number.isFinite(num) || Number.isInteger(num) ? { $float: pythonNumberText(num) } : num;
   }
   if (typeof value === 'number')
     return !Number.isFinite(value) || (Number.isInteger(value) && !Number.isSafeInteger(value))
@@ -198,6 +196,17 @@ function dropEligibleInit(side: { raises?: string; trace: unknown[] }, queue: un
   return copy;
 }
 
+/**
+ * Documented deviation, pinned both ways: the job and terminal policy ports keep
+ * `attempt` and the family/scope/item `failures` counters as integers, so a float
+ * counter raises TypeError where Python carries on with float arithmetic.
+ */
+const FLOAT_COUNTER_DEVIATIONS = new Set([
+  'a float attempt launches',
+  'a float job failures count survives a refused launch',
+  'a float family failures count survives a refused launch',
+]);
+
 describe('coverage select against the Python oracle', () => {
   it('reads the fixture it was written for', () => {
     expect(fixture.schema).toBe('crq-coverage-select-oracle/1');
@@ -209,6 +218,11 @@ describe('coverage select against the Python oracle', () => {
       const spec = decode(structuredClone(c.spec)) as Spec;
       const got = await replay(spec);
       const want = c.result;
+      if (FLOAT_COUNTER_DEVIATIONS.has(c.name)) {
+        expect(want.raises).toBeUndefined();
+        expect(got.raises).toBe('TypeError');
+        return;
+      }
       if (want.raises !== undefined) {
         const expected =
           want.raises === 'FileNotFoundError' || want.raises === 'PermissionError'

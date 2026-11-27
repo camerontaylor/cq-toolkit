@@ -30,6 +30,13 @@
  * are equal, where Python orders lists; a `scope` that is not a list raises
  * TypeError where Python would also iterate an empty dict or string; and which
  * pair of items a sort-time TypeError names is pinned only for two-item lists.
+ * Floats survive the whole-queue write-back (a float `remaining` or counter stays a
+ * float, so the usage gate refuses exactly as Python does), but the job policies
+ * keep `attempt` and the item, family and scope `failures` counters as integers: a
+ * float counter there raises TypeError where Python does float arithmetic.
+ * Malformed scope rows raise the shared ledger helpers' IntegrityError where
+ * Python raises ValueError or proceeds: an interval with three elements, and a
+ * non-string blob.
  */
 import { isDeepStrictEqual } from 'node:util';
 import { eligible } from '../../policy/crq/backfillJobs.js';

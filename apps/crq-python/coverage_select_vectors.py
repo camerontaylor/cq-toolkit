@@ -19,7 +19,7 @@ The result records the return value, the queue and log left behind, the ordered
 collaborator trace, or the exception class (the queue state is recorded too).
 Nothing touches a real queue, clock, network, repository or host service.
 
-Numbers beyond JSON's safe range are tagged ``{"$int": "..."}`` and
+Numbers beyond JSON's safe range, and every integral float, are tagged ``{"$int": "..."}`` and
 ``{"$float": "..."}`` in the fixture so a JavaScript reader can rebuild them.
 
 The TypeScript test (``test/adapters/crq/coverageSelectOracle.test.ts``) replays
@@ -69,7 +69,8 @@ def enc(value: Any) -> Any:
     if isinstance(value, int):
         return {"$int": str(value)} if abs(value) > SAFE else value
     if isinstance(value, float):
-        if not math.isfinite(value) or (value == int(value) and abs(value) > SAFE):
+        # Every integral float is tagged: JSON text `5.0` reads back as the int 5 in JavaScript.
+        if not math.isfinite(value) or value == int(value):
             return {"$float": repr(value)}
         return value
     if isinstance(value, (list, tuple)):
@@ -622,8 +623,32 @@ def run_spec(spec: dict) -> dict:
     return run_select(copy.deepcopy(spec))
 
 
+def float_cases() -> List[dict]:
+    """Integral and fractional float counters: Python keeps a float a float, the port must too."""
+    two = [job("job-a"), job("job-b")]
+    fam = {"fam-job-a": {"failures": 5.0, "quarantined": False, "next_eligible_at": None}}
+    return [
+        sel("a float usage remaining does not launch", queue(backfill_usage=usage(remaining=5.0)),
+            coverage={"t1": PART}, launch=reviewing()),
+        sel("a float usage remaining of one dry run", queue(backfill_usage=usage(remaining=1.0)),
+            coverage={"t1": PART}, dry=True),
+        sel("a fractional usage remaining", queue(backfill_usage=usage(remaining=2.5)),
+            coverage={"t1": PART}, launch=reviewing()),
+        sel("a float score keeps its ordering", queue([job("job-a", score=1.0), job("job-b", score=9.0)]),
+            coverage={"t1": PART}, launch=reviewing()),
+        sel("a float attempt launches", queue([job(attempt=0.0)]), coverage={"t1": PART}, launch=reviewing()),
+        sel("a float job failures count survives a refused launch", queue([job(failures=2.0)]),
+            coverage={"t1": PART}, launch=refused()),
+        sel("a float family failures count survives a refused launch", queue([job(failures=2)], backfill_families=fam),
+            coverage={"t1": PART}, launch=refused()),
+        sel("a float reservation count in the queue is kept", queue(two, backfill_starts_total=3.0),
+            coverage={"t1": PART}, launch=reviewing()),
+    ]
+
+
 def all_cases() -> List[dict]:
-    return early_cases() + preflush_cases() + sort_cases() + gate_cases() + coverage_cases() + launch_cases()
+    return (early_cases() + preflush_cases() + sort_cases() + gate_cases() + coverage_cases() + launch_cases()
+            + float_cases())
 
 
 def build() -> dict:

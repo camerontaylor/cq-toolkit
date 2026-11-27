@@ -19,7 +19,7 @@
 import { rank4Gate } from '../../ops/crq/internal/backfillGate.js';
 import { bindRun, cancelBeforeVendor } from '../../policy/crq/backfillJobs.js';
 import { LedgerTypeError } from '../../policy/crq/ledger.js';
-import { JsonObject, toPlainJson } from '../../policy/crq/jsonValue.js';
+import { JsonNumber, JsonObject, toPlainJson, type JsonValue } from '../../policy/crq/jsonValue.js';
 import { fromPlainJson } from '../../policy/crq/queueDoc.js';
 import type { CoverageEffects, Item, Queue } from '../../queue-runner/coverageUsage.js';
 import { keepUnsafeFloats } from '../../queue-runner/startOneEffects.js';
@@ -40,7 +40,11 @@ export interface Rank4Collaborators {
 
 type Plain = Record<string, unknown>;
 const isPlain = (v: unknown): v is Plain =>
-  typeof v === 'object' && v !== null && !Array.isArray(v) && !(v instanceof JsonObject);
+  typeof v === 'object' &&
+  v !== null &&
+  !Array.isArray(v) &&
+  !(v instanceof JsonObject) &&
+  !(v instanceof JsonNumber);
 
 /** Make `target` hold exactly `source`, reusing nested objects and arrays by position/key. */
 export function syncInto(target: unknown, source: unknown): unknown {
@@ -65,8 +69,37 @@ export function syncInto(target: unknown, source: unknown): unknown {
 
 export const toJson = (queue: Queue): JsonObject =>
   fromPlainJson(keepUnsafeFloats(queue)) as JsonObject;
+/**
+ * `toPlainJson` with bigints, except that a float whose plain number would read
+ * as an int (an integral value, or NaN/±Infinity) stays a `JsonNumber` float,
+ * the same representation {@link toJson} reads back. A non-integral float is
+ * unambiguous as a plain number.
+ */
+function toPlainKeepingFloats(value: JsonValue): unknown {
+  if (value instanceof JsonNumber) {
+    if (value.kind === 'float') {
+      const number = value.float as number;
+      return Number.isFinite(number) && !Number.isInteger(number) ? number : value;
+    }
+    return toPlainJson(value, { bigints: true });
+  }
+  if (value instanceof JsonObject) {
+    const object: Record<string, unknown> = {};
+    for (const [key, entry] of value.entries)
+      Object.defineProperty(object, key, {
+        value: toPlainKeepingFloats(entry),
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
+    return object;
+  }
+  if (Array.isArray(value)) return value.map(toPlainKeepingFloats);
+  return value;
+}
+
 export const pull = (queue: Queue, json: JsonObject): void => {
-  syncInto(queue, toPlainJson(json, { bigints: true }));
+  syncInto(queue, toPlainKeepingFloats(json));
 };
 
 function indexOfItem(queue: Queue, item: Item): number {
