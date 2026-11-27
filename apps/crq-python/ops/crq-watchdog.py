@@ -25,6 +25,18 @@ def sh(cmd, timeout=60):
         return subprocess.CompletedProcess(cmd, 99, "", str(exc))
 
 
+def write_state(payload):
+    tmp = ST.with_name(f"{ST.name}.{os.getpid()}.tmp")
+    try:
+        with open(tmp, "w") as out:
+            out.write(json.dumps(payload) + "\n")
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(tmp, ST)  # atomic: readers never see partial JSON
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def main():
     hb = json.loads(HB.read_text())
     st = json.loads(ST.read_text()) if ST.exists() else {}
@@ -32,8 +44,8 @@ def main():
     gap = (utcnow() - parse(last)).total_seconds() / 60
     if gap <= limit:
         if st.get("alerted_for"):
-            ST.write_text(json.dumps({"recovered_seen_at": utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-                                      "last_outage": st["alerted_for"]}) + "\n")
+            write_state({"recovered_seen_at": utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                         "last_outage": st["alerted_for"]})
         print(f"{utcnow():%FT%TZ} ok: last tick {last} ({gap:.0f}m ago)")
         return
     if st.get("alerted_for") == last:
@@ -46,9 +58,9 @@ def main():
     sent = sh(["paseo", "send", "--no-wait", *(["--host", host] if host else []), hb["alert_agent_id"], text], timeout=90)
     # Only a delivered alert closes this outage; a failed send retries on the next timer run.
     key = "alerted_for" if sent.returncode == 0 else "failed_attempt_for"
-    ST.write_text(json.dumps({key: last, "attempted_at": utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-                              "gap_min": round(gap), "paseo_send": sent.returncode,
-                              "paseo_err": sent.stderr.strip()[:200]}) + "\n")
+    write_state({key: last, "attempted_at": utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                 "gap_min": round(gap), "paseo_send": sent.returncode,
+                 "paseo_err": sent.stderr.strip()[:200]})
     print(f"{utcnow():%FT%TZ} {'ALERTED' if sent.returncode == 0 else 'ALERT FAILED'} stale {gap:.0f}m "
           f"(paseo send exit {sent.returncode})")
 
