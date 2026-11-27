@@ -105,8 +105,8 @@ export interface PlannedTaskRow {
  * skipped` counts every row still needing work (a sibling-resolved row needs
  * none). Rescue counting is separate, never a ratio: `rescueAttempts` counts
  * rescue-tier rounds recorded by tasks with
- * round evidence, `rescueFixes` counts fixed rows whose attempts include a
- * rescue tier. No cross-run state participates.
+ * round evidence, `rescueFixes` counts verified fixed rows (with a commit)
+ * whose attempts include a rescue tier. No cross-run state participates.
  */
 export interface FixRunCounters {
   planned: number;
@@ -276,7 +276,10 @@ export function fixRunCounters(rows: readonly PlannedTaskRow[]): FixRunCounters 
       .flatMap((row) => row.rounds ?? [])
       .filter((round) => round.tier === 'rescue').length,
     rescueFixes: rows.filter(
-      (row) => row.outcome === 'fixed' && row.attempts.some((attempt) => attempt.tier === 'rescue'),
+      (row) =>
+        row.outcome === 'fixed' &&
+        row.commits.length > 0 &&
+        row.attempts.some((attempt) => attempt.tier === 'rescue'),
     ).length,
   };
 }
