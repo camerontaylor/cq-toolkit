@@ -3,7 +3,9 @@
 The cross-implementation differential (TypeScript plan vs this oracle on seeded
 roots) lives in test/queue-runner/tickShadowDifferential.test.ts.
 """
+import contextlib
 import datetime as dt
+import io
 import json
 import sys
 import tempfile
@@ -115,6 +117,31 @@ class TickShadowCompareTest(unittest.TestCase):
     def test_main_refuses_comparing_against_the_live_python_root(self):
         self.assertEqual(compare.main(["--python-root", str(HERE), "--runner-root", str(HERE),
                                        "--ts-plan", str(self.tmp / "absent.json")]), 2)
+
+    def test_oracle_maps_an_unreadable_python_root_to_compare_error(self):
+        root = runner_root(self.tmp, {"items": []})
+        with self.assertRaisesRegex(compare.CompareError, "^cannot read the python root: "):
+            with compare._oracle(self.tmp / "absent-root", root, self.tmp / "scratch"):
+                self.fail("the oracle must not yield")
+
+    def test_oracle_maps_a_missing_frozen_config_to_compare_error(self):
+        root = runner_root(self.tmp, {"items": []})
+        (root / "config.json").unlink()
+        with self.assertRaisesRegex(compare.CompareError, "^cannot read frozen config.json: "):
+            with compare._oracle(HERE, root, self.tmp / "scratch"):
+                self.fail("the oracle must not yield")
+
+    def test_main_exits_2_with_a_json_error_for_a_missing_frozen_config(self):
+        root = runner_root(self.tmp, {"items": []})
+        (root / "config.json").unlink()
+        plan = plan_file(self.tmp, {"complete": False, "reason": compare.INCOMPLETE_PREFIX + "a"}, [
+            {"target": "queue.json#/last_tick", "value": NOW}])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = compare.main(["--python-root", str(HERE), "--runner-root", str(root),
+                                 "--ts-plan", str(plan)])
+        self.assertEqual(code, 2)
+        self.assertIn("cannot read frozen config.json", json.loads(out.getvalue())["error"])
 
 
 if __name__ == "__main__":
