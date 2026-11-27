@@ -401,7 +401,7 @@ class Hold:
         # as durable.
         created_dirs = []
         probe = self.path.parent
-        while not probe.exists() and probe != probe.parent:
+        while not os.path.lexists(probe) and probe != probe.parent:
             created_dirs.append(probe)
             probe = probe.parent
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -527,18 +527,35 @@ class Hold:
         except OSError as exc:
             # The unlink took effect but is not durable, and the caller is
             # about to terminate in recovery: admission must not be left
-            # open. Put this run's hold back (acquired stays true) so the
-            # recovery outcome and the on-disk state agree.
+            # open. Put this run's hold back so the recovery outcome, the
+            # on-disk state and ``acquired`` all agree.
             try:
-                self._recreate()
+                self._write_marker()
             except OSError as again:
+                # ``acquired`` mirrors a marker that carries this run's
+                # token: without one, fail-stop must re-acquire (or report
+                # the refusal) rather than skip it and record a hold that
+                # is not there.
+                self.acquired = self.owns()
                 raise RecoveryRequired(
                     "the admission marker " + str(self.path)
                     + " was removed but its removal could not be synced ("
                     + repr(exc)[:200] + ") and the hold could not be "
-                    "durably re-established (" + repr(again)[:200] + "); "
-                    "admission may be open: re-create the marker with this run's "
+                    "re-created (" + repr(again)[:200] + "); admission may "
+                    "be open: re-create the marker with this run's "
                     "token " + self.token.decode().strip()) from exc
+            try:
+                self.sync_directory()
+            except OSError as again:
+                raise RecoveryRequired(
+                    "the admission marker " + str(self.path)
+                    + " was removed but its removal could not be synced ("
+                    + repr(exc)[:200] + "); the hold was re-created with "
+                    "this run's token " + self.token.decode().strip()
+                    + " and is present, but its directory entry could not "
+                    "be synced (" + repr(again)[:200] + "), so it may not "
+                    "survive a power loss; admission stays disabled "
+                    "until then") from exc
             raise RecoveryRequired(
                 "the admission marker " + str(self.path)
                 + " was removed but its removal could not be synced ("
@@ -547,14 +564,13 @@ class Hold:
                 + " and admission stays disabled") from exc
         self.acquired = False
 
-    def _recreate(self):
+    def _write_marker(self):
         descriptor = os.open(self.path, os.O_CREAT | os.O_WRONLY
                              | os.O_TRUNC, 0o600)
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(self.token)
             handle.flush()
             os.fsync(handle.fileno())
-        self.sync_directory()
 
 
 class DeployLock:

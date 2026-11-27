@@ -958,6 +958,36 @@ class DeployTests(DeployFixture, unittest.TestCase):
                           for unit in TRIGGERS}, self.original)
         self.assertEqual(self.record(run)["outcome"], "refused")
 
+    def test_refusal_restore_with_lost_hold_recreate_reacquires_admission(self):
+        class BrokenSwitch:
+            def load_overlay(self, path):
+                return host.load_overlay(path)
+
+            def root_check(self, root, overlay):
+                return host.root_check(root, overlay)
+
+            def switch(self, *args, rollback_config=None):
+                raise ValueError("helper refused the switch")
+
+        real_sync = rb.Hold.sync_directory
+
+        def sync_fails_once_marker_is_gone(hold):
+            if not hold.path.exists():
+                raise OSError(5, "I/O error")
+            return real_sync(hold)
+
+        run = self.build(helper=BrokenSwitch())
+        with mock.patch.object(rb.Hold, "sync_directory",
+                               sync_fails_once_marker_is_gone), \
+                mock.patch.object(rb.Hold, "_write_marker",
+                                  side_effect=OSError(28, "full")):
+            with self.assertRaises(rb.RecoveryRequired):
+                run.run()
+        # fail-stop must have re-acquired the hold and reported it truthfully
+        self.assertTrue(self.marker().exists())
+        self.assertTrue(run.hold.owns())
+        self.assertTrue(self.record(run)["admission_held"])
+
     def test_health_failure_keeps_hold_when_rollback_is_disabled(self):
         real_switch = host.switch
 
@@ -1221,8 +1251,9 @@ class HoldPersistenceTest(unittest.TestCase):
         # The unlink succeeds but the directory fsync fails: admission must
         # not be left open, so the hold is re-established and stays acquired.
         self.hold.acquire()
+        outcomes = [OSError(5, "I/O error"), None]
         with mock.patch.object(rb.Hold, "sync_directory",
-                               side_effect=OSError(5, "I/O error")):
+                               side_effect=outcomes):
             with self.assertRaises(rb.RecoveryRequired) as caught:
                 self.hold.release()
         self.assertIn("re-established", str(caught.exception))
@@ -1233,12 +1264,25 @@ class HoldPersistenceTest(unittest.TestCase):
         self.hold.acquire()
         with mock.patch.object(rb.Hold, "sync_directory",
                                side_effect=OSError(5, "I/O error")), \
-                mock.patch.object(rb.Hold, "_recreate",
+                mock.patch.object(rb.Hold, "_write_marker",
                                   side_effect=OSError(28, "full")):
             with self.assertRaises(rb.RecoveryRequired) as caught:
                 self.hold.release()
         self.assertIn("admission may be open", str(caught.exception))
+        self.assertFalse(self.hold.path.exists())
+        self.assertFalse(self.hold.acquired)
+
+    def test_unsynced_recreated_hold_is_reported_as_present(self):
+        self.hold.acquire()
+        with mock.patch.object(rb.Hold, "sync_directory",
+                               side_effect=OSError(5, "I/O error")):
+            with self.assertRaises(rb.RecoveryRequired) as caught:
+                self.hold.release()
+        message = str(caught.exception)
+        self.assertNotIn("admission may be open", message)
+        self.assertIn("is present", message)
         self.assertTrue(self.hold.acquired)
+        self.assertTrue(self.hold.owns())
 
     def test_recreated_hold_syncs_its_directory(self):
         self.hold.acquire()
