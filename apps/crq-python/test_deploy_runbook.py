@@ -1534,6 +1534,25 @@ class HoldPersistenceTest(unittest.TestCase):
         self.assertIn("this run's token", str(ours.exception))
         self.assertNotIn("another deploy", str(ours.exception))
 
+    def test_acquire_collision_with_vanished_marker_is_not_called_foreign(self):
+        real_open = os.open
+
+        def vanishing_open(path, *args, **kwargs):
+            if str(path) == str(self.hold.path):
+                self.hold.path.unlink()
+                raise FileExistsError(17, "File exists", str(path))
+            return real_open(path, *args, **kwargs)
+
+        self.hold.path.parent.mkdir(parents=True)
+        self.hold.path.write_bytes(b"operator\n")
+        with mock.patch.object(rb.os, "open", vanishing_open):
+            with self.assertRaises(rb.Refused) as raised:
+                self.hold.acquire()
+        self.assertIn("no longer present", str(raised.exception))
+        self.assertIn("retry is fine", str(raised.exception))
+        self.assertNotIn("another deploy", str(raised.exception))
+        self.assertFalse(self.hold.path.exists())
+
     def test_unsynced_recreated_hold_is_reported_as_present(self):
         self.hold.acquire()
         with mock.patch.object(rb.Hold, "sync_directory",

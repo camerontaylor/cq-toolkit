@@ -421,6 +421,11 @@ class Hold:
                     "admission is already held by " + str(self.path)
                     + " with this run's token; it was left untouched"
                 ) from exc
+            if not os.path.lexists(self.path):
+                raise Refused(
+                    "the admission marker " + str(self.path)
+                    + " was no longer present when it was read back; this "
+                    "run wrote nothing, and a retry is fine") from exc
             raise Refused(
                 "admission is already held by " + str(self.path)
                 + "; another deploy or a manual hold owns it") from exc
