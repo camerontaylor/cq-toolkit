@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import {
   appendFileSync,
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -161,6 +162,31 @@ describe('composed tick shadow: Python crq.tick vs the TS composed tick', () => 
       });
       expect(result.report.class).toBe('identical');
     });
+
+  // The tick-gap sample alerts agent `a`, so it reaches notifyOwner. composeFullTick binds the real
+  // `paseo send`; the helper must replace it, recording the call as Python's stub does. A fake
+  // `paseo` first on PATH leaves a marker if anything ever spawns it.
+  it('never spawns paseo on the tick-gap sample and records notify_owner on both sides', async () => {
+    const bin = tmp();
+    const marker = join(bin, 'spawned');
+    writeFileSync(join(bin, 'paseo'), `#!/bin/sh\necho spawned > '${marker}'\n`);
+    chmodSync(join(bin, 'paseo'), 0o755);
+    const saved = { PATH: process.env.PATH, PASEO_HOST: process.env.PASEO_HOST };
+    process.env.PATH = `${bin}:${saved.PATH}`;
+    process.env.PASEO_HOST = 'real-daemon.invalid';
+    try {
+      const s = spec();
+      const ts = await runComposedTs(REPO, live(SEEDS[0]![1]), s);
+      expect(ts.phaseCalls).toContain('notify_owner');
+      const { result } = await shadow(SEEDS[0]![1]);
+      expect(result.report.diff?.phaseCalls).toBe('same');
+    } finally {
+      process.env.PATH = saved.PATH;
+      if (saved.PASEO_HOST === undefined) delete process.env.PASEO_HOST;
+      else process.env.PASEO_HOST = saved.PASEO_HOST;
+    }
+    expect(existsSync(marker)).toBe(false);
+  });
 
   // Default-deny: every entry the freeze does not copy is refused, so a phase that would read it
   // cannot run switched off on both sides and still read `identical`. One test per name.

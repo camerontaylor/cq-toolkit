@@ -177,7 +177,15 @@ export async function runComposedTs(
     staleAlarmMin: Number(mergedConfig(repoRoot, spec).stale_alarm_min ?? 36),
     statusPath: join(root, 'status.md'),
   };
-  const log = await runTick(tick, composed.phases);
+  // `composeFullTick` binds `notifyOwnerFrom(config)`, i.e. the real `paseo send`. The Python oracle
+  // stubs `notify_owner`; the TS side records the same phase call and never spawns anything.
+  const phases = {
+    ...composed.phases,
+    notifyOwner: async () => {
+      phaseCalls.push('notify_owner');
+    },
+  };
+  const log = await runTick(tick, phases);
   const gaps: ComposedGaps = {
     complete: composed.complete,
     unbound: composed.unbound.map((gap) => gap.id),

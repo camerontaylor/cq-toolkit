@@ -16,7 +16,7 @@ The same stubs, by name, sit in composedTickShadowTs.ts:
 * `fetch` and `enroll` are no-ops; the TS forge returns empty listings, so its
   open-PR enrollment finds nothing to enroll either.
 * `usage_slots.read_usage` reports one slot remaining; the TS vendor probes do too.
-* `notify_owner` is recorded, never sent.
+* `notify_owner` is recorded as a phase call, never sent.
 * the clock is `spec.now`.
 
 Everything else runs for real: backfill, archive_legacy, reconcile,
@@ -72,7 +72,7 @@ def main() -> None:
                 (False, False),
             )[1],
         ),
-        mock.patch.object(crq, "notify_owner", lambda *a, **k: None),
+        mock.patch.object(crq, "notify_owner", lambda *a, **k: calls.append("notify_owner")),
     ]
     for patch in patches:
         patch.start()
