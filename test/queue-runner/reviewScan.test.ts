@@ -112,7 +112,7 @@ describe('review scan evidence', () => {
     await expect(scanReviewDiff(input, f.effects)).rejects.toThrow('matcher unavailable');
     expect(f.report()).toBe('');
   });
-  it('counts the empty logical line a trailing U+2028 leaves before its physical LF', async () => {
+  it('keeps a trailing U+2028 inside its physical line', async () => {
     const f = fixture();
     const text = [
       'diff --git a/x b/x',
@@ -123,12 +123,12 @@ describe('review scan evidence', () => {
       '+MARK0 x',
     ].join('\n');
     await scanReviewDiff({ ...input, diff: text }, f.effects);
-    // Python splitlines: 4 header lines, '+one', the empty line, then MARK0 on line 7.
+    // Split on LF only: 4 header lines, '+one<U+2028>', then MARK0 on line 6.
     expect(JSON.parse(f.report())).toMatchObject({
-      denylist_hits: [{ file: 'x', diff_line: 7 }],
+      denylist_hits: [{ file: 'x', diff_line: 6 }],
     });
   });
-  it('uses Python splitlines and the injected Unicode matcher', async () => {
+  it('splits on LF only, keeps CR, and uses the injected Unicode matcher', async () => {
     const f = fixture();
     f.effects.match = async ({ rules, lines }) => {
       const hits: [number, number][] = [];
@@ -142,7 +142,7 @@ describe('review scan evidence', () => {
         }
       return hits;
     };
-    const text = 'diff --git a/x b/x\r--- a/x\r+++ b/x\r@@ -1 +1 @@\r+λMARK0\u2028+ MARK0\r';
+    const text = 'diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n+λMARK0\u2028 x\n+ MARK0\r\n';
     const result = await scanReviewDiff({ ...input, diff: text }, f.effects);
     expect(result.denylistHits).toBe(1);
     expect(JSON.parse(f.report())).toMatchObject({

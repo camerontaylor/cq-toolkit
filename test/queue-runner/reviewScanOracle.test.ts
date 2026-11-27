@@ -61,20 +61,19 @@ describe('review scan header parsing against the Python oracle', () => {
     });
   }
 
-  // The pre-#2385 TS guarded this (a logical fragment of hunk content is not a header);
-  // Python does not, so the fixture records a CLEAN result: Python's fail-open weakness,
-  // copied for parity and tracked in #2389. Fix both engines before any routing.
-  it('copies the Python U+2028/U+0085 fake-header fail-open the old TS guard blocked (#2389)', async () => {
-    const cases = fixture.cases.filter((x) =>
-      x.name.includes('fake header and hides the next added line'),
-    );
+  // A U+2028/U+0085 inside a hunk line is ordinary content (git ends lines at LF only),
+  // so the line stays one line and the next added line is scanned and reported (#2389).
+  it('treats U+2028/U+0085 inside a hunk line as content and still scans the next line', async () => {
+    const cases = fixture.cases.filter((x) => x.name.includes('inside a hunk line is content'));
     expect(cases.map((x) => x.name).length).toBe(2);
     for (const c of cases) {
       expect(c.diff).toMatch(/\u2028|\u0085/u);
-      const { decision } = await scan(c);
-      // The secret on the line after the fragment is NOT reported: Python's weakness, kept for parity.
-      expect(decision.clean).toBe(true);
-      expect(c.expected.ok).toBe(true);
+      const { decision, report } = await scan(c);
+      expect(decision.clean).toBe(false);
+      expect(c.expected.ok).toBe(false);
+      expect((JSON.parse(report) as { denylist_hits: unknown }).denylist_hits).toMatchObject([
+        { file: 'x', diff_line: 6 },
+      ]);
     }
   });
 });

@@ -457,7 +457,8 @@ export function diffGitHeaderPath(line: string, source: string): string | undefi
   if (quoted !== null) {
     return decodeGitQuotedPath(quoted[1] as string, source).replace(/^b\//, '');
   }
-  const plain = /^"?a\/.*? b\/(.*)$/.exec(rest);
+  // `[^]`, not `.`: Python's `.` matches CR/U+2028/U+2029, JS's does not.
+  const plain = /^"?a\/[^]*? b\/([^]*)$/.exec(rest);
   return plain === null ? undefined : (plain[1] as string);
 }
 

@@ -1,6 +1,5 @@
 /** Inactive general review scan orchestration. No production matcher or gitleaks binding. */
 import { parseDenylistPatterns } from '../ops/dev/denylist.js';
-import { pythonSplitlines } from '../policy/crq/repairGates.js';
 import { atomicJsonText } from '../policy/crq/pythonJson.js';
 import { type ReviewScanDecision } from './reviewPreparation.js';
 import { EXEMPTIBLE_RULES, exemptReason, type ScanExemption } from './scanExemptions.js';
@@ -19,6 +18,13 @@ const allow = [
   /(^|\/)\.DS_Store$/,
   /^policy\/denylist\/patterns\.yml$/,
 ];
+/** Split on `\n` only, dropping the empty tail a final newline leaves (`crq._diff_lines`). */
+function diffLines(diff: string): string[] {
+  const lines = diff.split('\n');
+  if (lines.at(-1) === '') lines.pop();
+  return lines;
+}
+
 export interface ReviewScannerEffects {
   /** Compile all rules, then return strictly ordered [line, rule] matches, or throw. */
   match(input: {
@@ -72,17 +78,15 @@ export async function scanReviewDiff(
   const candidates: { path: string; text: string; diffLine: number }[] = [];
   let path: string | null = null;
   let header = false;
-  // Mirrors `crq.secret_scan_diff` (crq.py:604-632) line for line: Python's own
-  // `splitlines` numbering, a `diff --git a/(.*) b/(.*)$` b-side, and the label
+  // Mirrors `crq.secret_scan_diff` (crq.py:605-646) line for line: the diff is split
+  // on `\n` only (what git emits; a trailing `\r` stays in the line, and U+2028/U+0085
+  // are ordinary content), a `diff --git a/(.*) b/(.*)$` b-side, and the label
   // after `+++ `/`--- ` taken byte for byte. Git's trailing tab for a spaced name
   // and its C-quoting of an odd name (quotes included) stay in the path, so the
   // path rules, the allowlist and the exemption globs see exactly what Python's do.
-  // Two Python weaknesses are copied on purpose (parity; tracked in #2389, to be
-  // fixed in both engines before any routing): (1) a quoted name is never decoded,
-  // so path-scoped rules and exemptions never match it; (2) `splitlines` also cuts
-  // at U+2028/U+0085/etc., so a hunk line such as `+one<U+2028>diff --git a/x b/y` (or U+0085)
-  // opens a fake header and the next added line is skipped unscanned (fail-open).
-  for (const [index, line] of pythonSplitlines(input.diff).entries()) {
+  // One Python weakness is copied on purpose: a quoted
+  // name is never decoded, so path-scoped rules and exemptions never match it.
+  for (const [index, line] of diffLines(input.diff).entries()) {
     const diffLine = index + 1;
     if (line.startsWith('diff --git')) {
       path = /^diff --git a\/([^]*) b\/([^]*)$/.exec(line)?.[2] ?? null;
