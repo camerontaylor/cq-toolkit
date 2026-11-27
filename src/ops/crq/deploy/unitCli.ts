@@ -114,6 +114,17 @@ export function parseUnitArgs(argv: readonly string[]): Parsed {
   if (unit !== undefined && !UNIT_RUNTIMES.has(unit)) {
     return usage(`argument --unit: invalid choice: '${unit}'`);
   }
+  // Python validates the mode before the helper loads (`parser.error`, a usage
+  // artifact naming `switch`). Presence selects a mode, not truthiness.
+  const sha = values.get('--sha');
+  const tag = values.get('--tag');
+  if (values.has('--unit') || values.has('--runtime')) {
+    if (!unit || !values.get('--runtime') || sha !== undefined || tag !== undefined) {
+      return usage('unit switch requires --unit and --runtime only');
+    }
+  } else if (!sha || !tag) {
+    return usage('checkout switch requires --sha and --tag');
+  }
   return {
     kind: 'switch',
     json,
@@ -150,7 +161,6 @@ export async function runUnitCli(argv: readonly string[], deps: UnitCliDeps): Pr
       const { unit, runtime, sha, tag } = parsed;
       if (!unit && !runtime) {
         // Python routes a switch with neither to the checkout path.
-        if (!sha || !tag) throw new RecordRefused('checkout switch requires --sha and --tag');
         throw new RecordRefused('checkout switch is not ported');
       }
       if (!unit || !runtime || sha || tag) {
