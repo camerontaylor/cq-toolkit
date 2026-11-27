@@ -169,22 +169,10 @@ const unavailableGitleaks: GitleaksEffects = {
   runCommand: () => Promise.reject(new Error('gitleaks must not run')),
 };
 
-/**
- * Paths where the TS `makeRepairScan` header parser still loses the path (CR and the Unicode
- * line separators, cause not investigated) and reports the
- * planted key clean, while Python's LF-only `secret_scan_diff` now keeps the path and flags it.
- * This is a divergence in the unrouted repair scanner, pinned so neither side moves silently.
- */
-const TS_LAXER = new Set(
-  ['CR', 'U+2028', 'U+2029'].map((label) => `path with ${label}: planted key is flagged`),
-);
-
 describe('triageContextScan against the production TS scanner', () => {
   for (const item of fixture.real) {
-    const laxer = TS_LAXER.has(item.name);
-    const want = laxer ? { clean: true, denylist_hits: 0 } : item.result;
+    const want = item.result;
     test(item.name, async () => {
-      if (laxer) expect(item.result.clean).toBe(false);
       const scan = makeRepairScan({
         rules: fixture.rules.map((rule) => ({ ...rule, description: 'oracle rule' })),
         gitleaksEffects: unavailableGitleaks,

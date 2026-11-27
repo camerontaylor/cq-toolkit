@@ -78,7 +78,7 @@ export async function scanReviewDiff(
   const candidates: { path: string; text: string; diffLine: number }[] = [];
   let path: string | null = null;
   let header = false;
-  // Mirrors `crq.secret_scan_diff` (crq.py:604-632) line for line: the diff is split
+  // Mirrors `crq.secret_scan_diff` (crq.py:605-646) line for line: the diff is split
   // on `\n` only (what git emits; a trailing `\r` stays in the line, and U+2028/U+0085
   // are ordinary content), a `diff --git a/(.*) b/(.*)$` b-side, and the label
   // after `+++ `/`--- ` taken byte for byte. Git's trailing tab for a spaced name

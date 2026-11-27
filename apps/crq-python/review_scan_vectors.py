@@ -133,7 +133,7 @@ def build_cases() -> None:
     add("CRLF line endings", ["diff --git a/x b/x\r", "--- /dev/null\r", "+++ b/x\r", "@@ -0,0 +1 @@\r", "+" + SECRET + "\r"])
     add("CRLF with a spaced tabbed label", ["diff --git a/a b b/a b\r", "--- /dev/null\r", "+++ b/a b\t\r",
                                            "@@ -0,0 +1 @@\r", "+" + SECRET + "\r"])
-    add("a trailing U+2028 leaves an empty logical line", ["diff --git a/x b/x", "--- a/x", "+++ b/x", "@@ -1 +1 @@",
+    add("a trailing U+2028 stays inside its line", ["diff --git a/x b/x", "--- a/x", "+++ b/x", "@@ -1 +1 @@",
                                                            "+one ", "+" + SECRET])
     add("a U+2028 inside a hunk line is content, one line", ["diff --git a/x b/x", "--- a/x", "+++ b/x", "@@ -1 +1 @@",
                                                          "+one\u2028two", "+" + SECRET])
@@ -143,7 +143,7 @@ def build_cases() -> None:
                                                        "+one @@ -1 +1 @@", "+" + SECRET])
     add("a hunk line with a label-like tail", ["diff --git a/x b/x", "--- a/x", "+++ b/x", "@@ -1 +1 @@",
                                                      "-x +++ b/evil", "+" + SECRET])
-    add("U+0085 and FS inside hunk content shift the numbering", ["diff --git a/x b/x", "--- a/x", "+++ b/x",
+    add("U+0085 and FS inside hunk content stay on one line", ["diff --git a/x b/x", "--- a/x", "+++ b/x",
                                                                   "@@ -1 +1 @@", "+a\u0085b\x1cc", "+" + SECRET])
     add("a U+2028 mid-label stays inside the header line", ["diff --git a/x b/x", "--- a/x +++ b/evil", "+++ b/x",
                                                            "@@ -1 +1 @@", "+" + SECRET])
