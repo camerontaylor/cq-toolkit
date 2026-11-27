@@ -8,9 +8,9 @@
  * Deliberate differences, both stricter and never looser: Python's `\d` also
  * matches non-ASCII decimal digits in a `floor` timestamp (this port accepts ASCII
  * digits only), and Python accepts an arbitrary-precision `quiet_minutes` integer
- * where this port refuses one beyond +/-2^53 (it could not be a usable window). A
- * third: a `default_branch` that `branchPathFault` refuses (a dot-leading or
- * `.lock` path segment) fails at parse time, as push and PR discovery would later.
+ * where this port refuses one beyond +/-2^53 (it could not be a usable window).
+ * The `default_branch` path-segment rule (no dot-leading or `.lock` segment, via
+ * `branchPathFault`) is shared: Python refuses the same segments at parse time.
  */
 import { branchPathFault } from '../../shared/refname.js';
 import { JsonObject, type JsonValue } from './jsonValue.js';

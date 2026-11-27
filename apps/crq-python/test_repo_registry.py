@@ -87,6 +87,8 @@ class ParseTests(unittest.TestCase):
             {"repos": [entry(default_branch="a..b")]},
             {"repos": [entry(default_branch="a//b")]},
             {"repos": [entry(default_branch="refs.lock")]},
+            {"repos": [entry(default_branch="release.lock/main")]},  # bad branch segment
+            {"repos": [entry(default_branch="release/.hidden/main")]},
             {"repos": [entry(discovery={"pushes": True})]},          # unknown mode key
             {"repos": [entry(discovery={"push": "yes"})]},           # non-bool
             {"repos": [entry(floor="2026-11-10")]},                  # not an ISO Z timestamp
@@ -102,6 +104,11 @@ class ParseTests(unittest.TestCase):
         ):
             with self.assertRaises(ValueError, msg=repr(bad)):
                 repo_registry.parse({**base, **bad})
+
+    def test_multi_segment_default_branch_stays_valid(self):
+        (cfg,) = repo_registry.parse({"repo": PRIMARY, "repos": [
+            entry(default_branch="release/main")]})
+        self.assertEqual(cfg["default_ref"], "origin/release/main")
 
 
 class RankTests(unittest.TestCase):
