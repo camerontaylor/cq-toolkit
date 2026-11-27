@@ -169,6 +169,10 @@ def build_scenarios() -> None:
     scenario("prior: a still-deferred result (retry_after in the future) is returned and stops the item",
              [ijob(1), ijob(2)],
              files={"crq-R-F1": {"result": prior(retry_after="2026-11-26T13:00:00Z")}})
+    for label, falsy in [("zero", 0), ("null", None), ("false", False), ("empty list", [])]:
+        scenario(f"prior: a terminal FIXED result with a falsy non-string retry_after ({label}) is passed through",
+                 [ijob(1), ijob(2)], files={"crq-R-F1": {"result": {**done, "retry_after": falsy}}},
+                 dispatch=[ok(commits=(tip("2"),))], mechanical=passed)
     # ---- resume ----------------------------------------------------------
     scenario("resume: an elapsed retry_after re-runs the job and the FIXED tip chains",
              [ijob(1), ijob(2)],
