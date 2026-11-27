@@ -640,7 +640,12 @@ export async function numberPage(
         throw new ReconcileRefused('PR state metadata incomplete');
       }
       const mergedAt = recordGet(node, 'mergedAt');
-      if (mergedAt !== null && branches.includes(baseRefName)) records.push(node as JsonValue);
+      if (mergedAt !== null && branches.includes(baseRefName)) {
+        // Only whole-second UTC instants are representable; refuse completeness
+        // rather than strand an in-window merge as unsupported (Python parity).
+        normalizeTimestamp('mergedAt', mergedAt);
+        records.push(node as JsonValue);
+      }
     }
   }
   const following = stop < ceiling ? stop + 1n : null;

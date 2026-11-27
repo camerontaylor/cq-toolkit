@@ -60,6 +60,23 @@ class NumericSourceTests(unittest.TestCase):
             mr.number_page(lambda query: self.fail("must not fetch"), source, wrong,
                            repo="owner/repo", base="merge-queue")
 
+    def test_non_whole_second_merged_at_on_target_base_refuses(self):
+        source = self.source(1)
+
+        def run(base, merged_at):
+            node = {"__typename": "PullRequest", "baseRefName": base, "number": 1, "mergedAt": merged_at}
+            return mr.number_page(lambda query: self.response(n1=node), source, None,
+                                  repo="owner/repo", base="merge-queue")
+
+        for bad in ("2026-10-02T00:00:00.5Z", "2026-10-02T00:00:00+00:00",
+                    "2026-02-30T00:00:00Z", "2026-10-02T00:00:60Z",
+                    "2026-10-02T00:00:61Z", 12345):
+            with self.subTest(merged_at=bad), self.assertRaises(mr.ReconcileRefused):
+                run("merge-queue", bad)
+        self.assertEqual(len(run("merge-queue", "2026-10-02T00:00:00Z")["records"]), 1)
+        self.assertEqual(run("other", "2026-10-02T00:00:00.5Z")["records"], [])
+        self.assertEqual(run("merge-queue", None)["records"], [])
+
     def test_ceiling_requires_all_state_counts_and_inventory_growth_is_capped(self):
         for fields in (
             {"issues": {"nodes": []}, "pullRequests": {"nodes": [{"number": 1}]}},
