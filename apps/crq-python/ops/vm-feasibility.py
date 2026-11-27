@@ -1113,7 +1113,11 @@ def build_checks(phases: dict, manager: dict, reboot: dict) -> dict:
             and bool(((manager.get("after") or {}).get("manager") or {})
                      .get("invocation_id"))
             and (manager.get("before") or {}).get("manager", {}).get("invocation_id")
-            != (manager.get("after") or {}).get("manager", {}).get("invocation_id")),
+            != (manager.get("after") or {}).get("manager", {}).get("invocation_id")
+            and bool((manager.get("before") or {}).get("boot_id"))
+            and bool((manager.get("after") or {}).get("boot_id"))
+            and (manager.get("before") or {}).get("boot_id")
+            == (manager.get("after") or {}).get("boot_id")),
         "boot_id_changed": (
             reboot.get("boot_id_before")
             == (reboot.get("before") or {}).get("boot_id")
