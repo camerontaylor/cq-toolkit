@@ -2159,7 +2159,13 @@ def cli_paused(extra, callback, timeout=180):
                 "stdout": out[-60000:], "stderr": err[-60000:],
                 "timeout": False, "pause_reached": False, "during": None,
                 "json": None}
-    during = callback()
+    try:
+        during = callback()
+    except BaseException:
+        terminate_process(proc)
+        proc.communicate()
+        REPAIR_PAUSE_MARKER.unlink(missing_ok=True)
+        raise
     # Release the fence only after the observation callback returned: the
     # adapter resumes once the marker is gone and refuses at its bound when
     # the callback never completes, so the switch cannot continue while
