@@ -461,8 +461,12 @@ class Hold:
         # the run reports recovery instead of proceeding.
         try:
             self.sync_directory()
-            for created in created_dirs:
-                self._sync_path(created.parent)
+            # The marker directory may have been created by another step
+            # (the deploy lock), so its own parent is always synced too.
+            parents = {created.parent for created in created_dirs}
+            parents.add(self.path.parent.parent)
+            for parent in sorted(parents):
+                self._sync_path(parent)
         except OSError as exc:
             raise RecoveryRequired(
                 "the admission marker " + str(self.path)

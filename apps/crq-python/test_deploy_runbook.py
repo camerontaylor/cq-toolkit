@@ -1273,6 +1273,20 @@ class HoldPersistenceTest(unittest.TestCase):
         self.assertIn(state.parent, synced)
         self.assertTrue(state.parent.is_relative_to(root))
 
+    def test_acquire_syncs_marker_dir_parent_when_dir_pre_exists(self):
+        self.hold.path.parent.mkdir(parents=True)
+        synced = []
+        real = rb.Hold._sync_path
+
+        def record(path):
+            synced.append(Path(path))
+            return real(path)
+
+        with mock.patch.object(rb.Hold, "_sync_path",
+                               side_effect=record):
+            self.hold.acquire()
+        self.assertIn(self.hold.path.parent.parent, synced)
+
     def test_acquire_recovery_when_new_directory_parent_sync_fails(self):
         real = rb.Hold._sync_path
         marker_dir = self.hold.path.parent
