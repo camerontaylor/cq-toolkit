@@ -307,9 +307,15 @@ journal schema, store, lock or new capability mechanism is introduced.
    metadata and pointer, plus each relevant timer/path and service activation
    state. Persist the complete intent and snapshot with atomic replacement and
    file and directory fsync before changing the host. The adapter must validate
-   the snapshot's shape and paths before it acts. The seam calls the adapter's
-   validation before fencing or restoration, but has no production snapshot
-   schema or path validator yet.
+   the snapshot's shape and paths before it acts. `validate_snapshot` enforces
+   that: the schema version and exact top-level key set, exact naming of the
+   owned unit paths, each entry's metadata (type, permission bits without
+   special or group/world-write modes, adapter-identity uid and gid, no
+   extended attributes, file size and SHA-256 matching the saved bytes,
+   symlink targets confined to the unit directory) and the timer, path and
+   service activation states against restorable values. The seam calls that
+   validation before fencing or restoration; that is code-level checking, and
+   the validator's host behavior still needs live proof.
 3. Stop the unit's timer and path activators, install the durable service mask,
    reload the stable manager, and explicitly stop or cancel the target's queued
    and running work. Verify the manager has no pending service job and no
