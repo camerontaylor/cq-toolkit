@@ -118,7 +118,7 @@ def build_cases() -> None:
     add("the exempt wildcard covers a literal U+2028 name",
         ["diff --git a/a b.txt b/a b.txt", "--- /dev/null", "+++ b/a b.txt", "@@ -0,0 +1 @@",
          "+" + SECRET], exemptions=exempt("a*"))
-    add("a literal U+2028 splits the diff --git line", ["diff --git a/a b.txt b/a b.txt", "--- /dev/null",
+    add("a literal U+2028 in the diff --git line is name content", ["diff --git a/a b.txt b/a b.txt", "--- /dev/null",
                                                         "+++ b/a b.txt", "@@ -0,0 +1 @@", "+" + SECRET])
     add("a literal U+2028 in a rename header", ["diff --git a/o.txt b/a b.txt", "similarity index 90%",
                                                 "@@ -1 +1 @@", "+" + SECRET])
@@ -128,24 +128,24 @@ def build_cases() -> None:
                                        "+++ b/a b.txt", "@@ -0,0 +1 @@", "+" + SECRET])
     add("a literal form feed, vertical tab and FS in names",
         ["diff --git a/a\x0cb a/b\x0bc", "--- /dev/null", "+++ b/a\x1cb.txt", "@@ -0,0 +1 @@", "+" + SECRET])
-    add("a bare CR splits a header", ["diff --git a/x\rb b/x\rb", "--- /dev/null", "+++ b/x\rb", "@@ -0,0 +1 @@",
+    add("a bare CR stays inside a header line", ["diff --git a/x\rb b/x\rb", "--- /dev/null", "+++ b/x\rb", "@@ -0,0 +1 @@",
                                       "+" + SECRET])
     add("CRLF line endings", ["diff --git a/x b/x\r", "--- /dev/null\r", "+++ b/x\r", "@@ -0,0 +1 @@\r", "+" + SECRET + "\r"])
     add("CRLF with a spaced tabbed label", ["diff --git a/a b b/a b\r", "--- /dev/null\r", "+++ b/a b\t\r",
                                            "@@ -0,0 +1 @@\r", "+" + SECRET + "\r"])
     add("a trailing U+2028 leaves an empty logical line", ["diff --git a/x b/x", "--- a/x", "+++ b/x", "@@ -1 +1 @@",
                                                            "+one ", "+" + SECRET])
-    add("a U+2028 in a hunk line opens a fake header and hides the next added line (Python weakness copied, #2389)", ["diff --git a/x b/x", "--- a/x", "+++ b/x", "@@ -1 +1 @@",
-                                                         "+one diff --git a/evil b/evil", "+" + SECRET])
-    add("a U+0085 in a hunk line opens a fake header and hides the next added line (Python weakness copied, #2389)",
-        ["diff --git a/x b/x", "--- a/x", "+++ b/x", "@@ -1 +1 @@", "+one\u0085diff --git a/evil b/evil", "+" + SECRET])
+    add("a U+2028 inside a hunk line is content, one line", ["diff --git a/x b/x", "--- a/x", "+++ b/x", "@@ -1 +1 @@",
+                                                         "+one\u2028two", "+" + SECRET])
+    add("a U+0085 inside a hunk line is content, one line",
+        ["diff --git a/x b/x", "--- a/x", "+++ b/x", "@@ -1 +1 @@", "+one\u0085two", "+" + SECRET])
     add("a U+2028 in a hunk line cannot open a hunk", ["diff --git a/x b/x", "--- a/x", "+++ b/x", "@@ -1 +1 @@",
                                                        "+one @@ -1 +1 @@", "+" + SECRET])
-    add("a hunk line break then a label-like line", ["diff --git a/x b/x", "--- a/x", "+++ b/x", "@@ -1 +1 @@",
+    add("a hunk line with a label-like tail", ["diff --git a/x b/x", "--- a/x", "+++ b/x", "@@ -1 +1 @@",
                                                      "-x +++ b/evil", "+" + SECRET])
     add("U+0085 and FS inside hunk content shift the numbering", ["diff --git a/x b/x", "--- a/x", "+++ b/x",
                                                                   "@@ -1 +1 @@", "+a\u0085b\x1cc", "+" + SECRET])
-    add("a header split mid-label by U+2028 then a hunk", ["diff --git a/x b/x", "--- a/x +++ b/evil", "+++ b/x",
+    add("a U+2028 mid-label stays inside the header line", ["diff --git a/x b/x", "--- a/x +++ b/evil", "+++ b/x",
                                                            "@@ -1 +1 @@", "+" + SECRET])
     add("a NUL byte in the name", ["diff --git a/a\x00b b/a\x00b", "--- /dev/null", "+++ b/a\x00b", "@@ -0,0 +1 @@",
                                    "+" + SECRET])

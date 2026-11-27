@@ -145,7 +145,7 @@ def build_scenarios() -> None:
     add("scan: a binary file", "scan", base={}, head={"b.bin": "00ff00fe" + hexs(SECRET)})
     add("scan: non-UTF-8 content", "scan", base={}, head={"c.txt": hexs("x") + "ff" + hexs(" " + SECRET + "\n")})
     add("scan: a CR in content", "scan", base={}, head={"cr.txt": hexs("a\r" + SECRET + "\n")})
-    add("scan: splitlines separators in content", "scan", base={}, head={"u.txt": hexs("a\x0b" + SECRET + "\x0cb\x1c\x85 \n")})
+    add("scan: Unicode line separators in content stay on one line", "scan", base={}, head={"u.txt": hexs("a\x0b" + SECRET + "\x0cb\x1c\x85 \n")})
     add("scan: a classes set filters the denylist", "scan", base={}, head=secret, classes=UNIVERSAL)
     add("scan: an unknown class is a RuntimeError", "scan", base={}, head=secret, classes=["class:nope", "class:aaa"])
     add("scan: duplicate and universal classes", "scan", base={}, head=secret, classes=UNIVERSAL + UNIVERSAL)
