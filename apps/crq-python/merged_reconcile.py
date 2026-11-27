@@ -479,6 +479,11 @@ def number_page(forge, source, cursor, *, repo, base):
             if not isinstance(node.get("baseRefName"), str) or "mergedAt" not in node:
                 raise ReconcileRefused("PR state metadata incomplete")
             if node["mergedAt"] is not None and node["baseRefName"] in (DISCOVERY_BRANCHES if base == DISCOVERY_SELECTOR else (base,)):
+                # ISO-8601 permits fractional seconds, but inventories can only
+                # represent whole-second instants. Admitting any other spelling
+                # would strand an in-window merge as unsupported while the
+                # watermark advanced past it, so refuse completeness instead.
+                _timestamp("mergedAt", node["mergedAt"])
                 records.append(node)
     following = stop + 1 if stop < source["ceiling"] else None
     return {"records": records, "has_next_page": following is not None,
