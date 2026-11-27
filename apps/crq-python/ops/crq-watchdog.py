@@ -25,18 +25,13 @@ def sh(cmd, timeout=60):
         return subprocess.CompletedProcess(cmd, 99, "", str(exc))
 
 
-def read_state():
-    try:
-        st = json.loads(ST.read_text())
-    except (OSError, ValueError):  # missing, unreadable or malformed state
-        return {}
-    return st if isinstance(st, dict) else {}
-
-
 def write_state(payload):
     tmp = ST.with_name(f"{ST.name}.{os.getpid()}.tmp")
     try:
-        tmp.write_text(json.dumps(payload) + "\n")
+        with open(tmp, "w") as out:
+            out.write(json.dumps(payload) + "\n")
+            out.flush()
+            os.fsync(out.fileno())
         os.replace(tmp, ST)  # atomic: readers never see partial JSON
     finally:
         tmp.unlink(missing_ok=True)
@@ -44,7 +39,7 @@ def write_state(payload):
 
 def main():
     hb = json.loads(HB.read_text())
-    st = read_state()
+    st = json.loads(ST.read_text()) if ST.exists() else {}
     last, limit = hb["last_tick"], hb.get("stale_alarm_min", 36)
     gap = (utcnow() - parse(last)).total_seconds() / 60
     if gap <= limit:
