@@ -37,6 +37,7 @@ const FIXTURE = fileURLToPath(
   new URL('../../apps/crq-python/fixtures/crq-rung-machine/cases.json', import.meta.url),
 );
 const MESSAGE_KINDS = new Set([
+  'TypeError',
   'ValueError',
   'KeyError',
   'RuntimeError',
