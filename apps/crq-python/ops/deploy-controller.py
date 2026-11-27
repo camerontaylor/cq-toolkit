@@ -2021,6 +2021,26 @@ def refuse_unfinished_transactions(effects, exclude=None):
         raise Refused("unfinished controller transaction: " + path.name)
 
 
+def _unfinished_switch_record_visible(path, identity) -> bool:
+    """True only when ``path`` provably holds this transaction's durable,
+    unfinished record: the pre-completion ``pending`` ``activation_pending``
+    intent. A read failure, malformed content or any other record returns
+    False: ``journal_replace`` replaces the record before it syncs the
+    directory, so after a failed completion write the journal may already
+    show the ``completed`` record, and rollback may start only against a
+    durably unfinished one."""
+    try:
+        observed = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return False
+    return (isinstance(observed, dict)
+            and observed.get("transaction_id") == identity["transaction_id"]
+            and observed.get("outcome") == "pending"
+            and observed.get("phase") == "activation_pending"
+            and observed.get("unit") == identity["unit"]
+            and observed.get("runtime") == identity["runtime"])
+
+
 def switch_unit(effects, adapter, unit, runtime):
     """Execute one unit transaction using a trusted, injected host adapter.
 
@@ -2036,7 +2056,10 @@ def switch_unit(effects, adapter, unit, runtime):
     Snapshot/restore retain exact installed unit bytes and activation
     state. validate_snapshot rejects invalid types
     and paths before any mutation. Completion sequences are monotonic for
-    each unit.
+    each unit. A completion write that fails after its replacement became
+    visible leaves the activated unit intact and reports the uncertain
+    journal durability instead of rolling back: rollback starts only while
+    the record provably still is the durable, unfinished intent.
     """
     if unit not in UNIT_RUNTIMES or not _unit_runtime(runtime):
         raise Refused("invalid unit or runtime")
@@ -2118,7 +2141,25 @@ def switch_unit(effects, adapter, unit, runtime):
                 first = _completion(adapter, unit, runtime, baseline)
                 second = _completion(adapter, unit, runtime, first["sequence"])
                 record = {**identity, "outcome": "completed", "completions": [first, second]}
-                effects.journal_replace(path, record)
+                try:
+                    effects.journal_replace(path, record)
+                except (Exception, KeyboardInterrupt) as write_error:
+                    # journal_replace replaces the record before it syncs the
+                    # directory: a failed completion write can leave the new
+                    # `completed` record already visible while its durability
+                    # is uncertain. Rollback must not start in that state — it
+                    # would stop or restore the unit and, if the process exits
+                    # before the rollback-phase write, the next invocation
+                    # would accept the visible `completed` as a finished
+                    # transaction despite the interrupted rollback. Roll back
+                    # only while the record provably still is this
+                    # transaction's durable, unfinished intent; otherwise
+                    # leave the activated unit intact and report.
+                    if not _unfinished_switch_record_visible(path, identity):
+                        return {**record, "journal_durability_uncertain":
+                                type(write_error).__name__ + ": "
+                                + str(write_error)[:400]}
+                    raise  # pre-replacement failure: record still unfinished
                 return record
             except (Exception, KeyboardInterrupt) as exc:
                 try:
