@@ -1217,6 +1217,62 @@ class HoldPersistenceTest(unittest.TestCase):
         self.assertTrue(self.hold.created)
         self.assertFalse(self.hold.acquired)
 
+    def test_release_resyncs_hold_when_removal_sync_fails(self):
+        # The unlink succeeds but the directory fsync fails: admission must
+        # not be left open, so the hold is re-established and stays acquired.
+        self.hold.acquire()
+        with mock.patch.object(rb.Hold, "sync_directory",
+                               side_effect=OSError(5, "I/O error")):
+            with self.assertRaises(rb.RecoveryRequired) as caught:
+                self.hold.release()
+        self.assertIn("re-established", str(caught.exception))
+        self.assertTrue(self.hold.acquired)
+        self.assertEqual(self.hold.path.read_bytes(), self.hold.token)
+
+    def test_release_reports_open_admission_when_hold_cannot_return(self):
+        self.hold.acquire()
+        with mock.patch.object(rb.Hold, "sync_directory",
+                               side_effect=OSError(5, "I/O error")), \
+                mock.patch.object(rb.Hold, "_recreate",
+                                  side_effect=OSError(28, "full")):
+            with self.assertRaises(rb.RecoveryRequired) as caught:
+                self.hold.release()
+        self.assertIn("admission may be open", str(caught.exception))
+        self.assertTrue(self.hold.acquired)
+
+    def test_acquire_syncs_parent_of_each_created_directory(self):
+        root = Path(self.temp.name)
+        synced = []
+        real = rb.Hold._sync_path
+
+        def record(path):
+            synced.append(Path(path))
+            return real(path)
+
+        with mock.patch.object(rb.Hold, "_sync_path",
+                               side_effect=record):
+            self.hold.acquire()
+        state = self.hold.path.parent
+        self.assertIn(state, synced)
+        self.assertIn(state.parent, synced)
+        self.assertTrue(state.parent.is_relative_to(root))
+
+    def test_acquire_recovery_when_new_directory_parent_sync_fails(self):
+        real = rb.Hold._sync_path
+        marker_dir = self.hold.path.parent
+
+        def fail_parent(path):
+            if Path(path) != marker_dir:
+                raise OSError(5, "I/O error")
+            return real(path)
+
+        with mock.patch.object(rb.Hold, "_sync_path",
+                               side_effect=fail_parent):
+            with self.assertRaises(rb.RecoveryRequired):
+                self.hold.acquire()
+        self.assertFalse(self.hold.acquired)
+        self.assertTrue(self.hold.path.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

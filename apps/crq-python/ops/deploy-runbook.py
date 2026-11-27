@@ -396,6 +396,14 @@ class Hold:
         self.acquired = False
 
     def acquire(self):
+        # Directories this call creates: each one's entry lives in its
+        # parent, so every such parent must be synced before the hold counts
+        # as durable.
+        created_dirs = []
+        probe = self.path.parent
+        while not probe.exists() and probe != probe.parent:
+            created_dirs.append(probe)
+            probe = probe.parent
         self.path.parent.mkdir(parents=True, exist_ok=True)
         try:
             descriptor = os.open(self.path, os.O_CREAT | os.O_EXCL
@@ -453,6 +461,8 @@ class Hold:
         # the run reports recovery instead of proceeding.
         try:
             self.sync_directory()
+            for created in created_dirs:
+                self._sync_path(created.parent)
         except OSError as exc:
             raise RecoveryRequired(
                 "the admission marker " + str(self.path)
@@ -466,7 +476,11 @@ class Hold:
     def sync_directory(self):
         """fsync the marker's directory so its entry — the creation or the
         removal — survives a power loss; raises OSError when it cannot."""
-        directory = os.open(self.path.parent, os.O_RDONLY)
+        self._sync_path(self.path.parent)
+
+    @staticmethod
+    def _sync_path(path):
+        directory = os.open(path, os.O_RDONLY)
         try:
             os.fsync(directory)
         finally:
@@ -496,15 +510,46 @@ class Hold:
         require(self.owns(),
                 "cannot release the admission marker: it is not this run's")
         try:
-            self._remove_durably()
+            self.path.unlink()
         except OSError as exc:
             raise RecoveryRequired(
                 "the admission marker " + str(self.path)
                 + " could not be verifiably removed (" + repr(exc)[:200]
-                + "); the admission release could not be verified: after a "
-                "power loss the marker may reappear and hold admission"
+                + "); the admission release could not be verified: the "
+                "marker is still present and holds admission"
             ) from exc
+        try:
+            self.sync_directory()
+        except OSError as exc:
+            # The unlink took effect but is not durable, and the caller is
+            # about to terminate in recovery: admission must not be left
+            # open. Put this run's hold back (acquired stays true) so the
+            # recovery outcome and the on-disk state agree.
+            try:
+                self._recreate()
+            except OSError as again:
+                raise RecoveryRequired(
+                    "the admission marker " + str(self.path)
+                    + " was removed but its removal could not be synced ("
+                    + repr(exc)[:200] + ") and the hold could not be "
+                    "re-established (" + repr(again)[:200] + "); admission "
+                    "may be open: re-create the marker with this run's "
+                    "token " + self.token.decode().strip()) from exc
+            raise RecoveryRequired(
+                "the admission marker " + str(self.path)
+                + " was removed but its removal could not be synced ("
+                + repr(exc)[:200] + "); the hold was re-established with "
+                "this run's token " + self.token.decode().strip()
+                + " and admission stays disabled") from exc
         self.acquired = False
+
+    def _recreate(self):
+        descriptor = os.open(self.path, os.O_CREAT | os.O_WRONLY
+                             | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(self.token)
+            handle.flush()
+            os.fsync(handle.fileno())
 
 
 class DeployLock:
