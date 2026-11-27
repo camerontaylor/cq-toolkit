@@ -1117,6 +1117,42 @@ class DeployTests(DeployFixture, unittest.TestCase):
         self.assertEqual(self.marker().read_bytes(), run.hold.token)
         self.assertTrue(run.hold.acquired)
 
+    def test_rollback_release_sync_failure_is_recorded_and_exits_3(self):
+        real_sync = rb.Hold.sync_directory
+        absent_syncs = []
+
+        def sync(hold):
+            if not hold.path.exists():
+                absent_syncs.append(1)
+                # the forward release syncs first; fail the rollback's
+                if len(absent_syncs) == 2:
+                    raise OSError(5, "I/O error")
+            return real_sync(hold)
+
+        runs = []
+
+        def factory(args):
+            runs.append(self.build(
+                health=lambda: {"healthy": False, "observations": ["bad"]}))
+            return runs[0]
+
+        with mock.patch.object(rb.Hold, "sync_directory", sync), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            code = rb.main(
+                ["deploy", "--root", str(self.root),
+                 "--overlay", str(self.overlay_path),
+                 "--record-dir", str(self.record_dir),
+                 "--target-sha", self.target, "--no-fetch"],
+                run_factory=factory)
+        self.assertEqual(code, 3)
+        error = json.loads(output.getvalue())["error"]
+        run = runs[0]
+        self.assertEqual(len(absent_syncs), 2)
+        self.assertEqual(error["run_dir"], str(run.run_dir))
+        self.assertEqual(error["outcome"], "recovery_required")
+        self.assertEqual(self.record(run)["outcome"], "recovery_required")
+        self.assertEqual(self.marker().read_bytes(), run.hold.token)
+
     def test_health_failure_keeps_hold_when_rollback_is_disabled(self):
         real_switch = host.switch
 
@@ -1478,6 +1514,25 @@ class HoldPersistenceTest(unittest.TestCase):
         self.assertNotIn("foreign", str(caught.exception))
         self.assertTrue(self.hold.acquired)
         self.assertTrue(self.hold.owns())
+
+    def test_acquire_collision_text_matches_verified_ownership(self):
+        self.hold.path.parent.mkdir(parents=True)
+        self.hold.path.write_bytes(b"operator\n")
+        with self.assertRaises(rb.Refused) as foreign:
+            self.hold.acquire()
+        self.assertIn("another deploy or a manual hold owns it",
+                      str(foreign.exception))
+        with mock.patch.object(rb.Hold, "ownership", return_value=None):
+            with self.assertRaises(rb.Refused) as unknown:
+                self.hold.acquire()
+        self.assertIn("could not be read", str(unknown.exception))
+        self.assertNotIn("another deploy", str(unknown.exception))
+        self.assertEqual(self.hold.path.read_bytes(), b"operator\n")
+        self.hold.path.write_bytes(self.hold.token)
+        with self.assertRaises(rb.Refused) as ours:
+            self.hold.acquire()
+        self.assertIn("this run's token", str(ours.exception))
+        self.assertNotIn("another deploy", str(ours.exception))
 
     def test_unsynced_recreated_hold_is_reported_as_present(self):
         self.hold.acquire()

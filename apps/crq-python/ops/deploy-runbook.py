@@ -409,6 +409,18 @@ class Hold:
             descriptor = os.open(self.path, os.O_CREAT | os.O_EXCL
                                  | os.O_WRONLY, 0o600)
         except FileExistsError as exc:
+            owner = self.ownership()
+            if owner is None:
+                raise Refused(
+                    "admission is already held by " + str(self.path)
+                    + "; its ownership could not be read, so it may be "
+                    "this run's own marker or another's, and it was left "
+                    "untouched") from exc
+            if owner is True:
+                raise Refused(
+                    "admission is already held by " + str(self.path)
+                    + " with this run's token; it was left untouched"
+                ) from exc
             raise Refused(
                 "admission is already held by " + str(self.path)
                 + "; another deploy or a manual hold owns it") from exc
