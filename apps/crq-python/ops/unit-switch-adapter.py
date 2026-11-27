@@ -181,9 +181,9 @@ class GuestFixtureAdapter:
                                               + str(result.get("rc"))))
         return result
 
-    def _show(self, unit, props):
+    def _show(self, unit, props, timeout=30):
         result = self.run_command(["systemctl", "--user", "show", unit,
-                                   "-p", ",".join(props)], timeout=30)
+                                   "-p", ",".join(props)], timeout=timeout)
         if result.get("timeout") or result.get("rc") != 0:
             detail = (result.get("stderr") or result.get("stdout") or "").strip()
             self.refuse("unit observation failed for " + unit + ": "
@@ -198,10 +198,11 @@ class GuestFixtureAdapter:
                 self.refuse("unit observation omitted " + prop + " for " + unit)
         return values
 
-    def _jobs(self):
+    def _jobs(self, timeout=30):
         self.last_jobs_observation = None
         result = self.run_command(["systemctl", "--user", "list-jobs",
-                                   "--no-legend", "--no-pager"], timeout=30)
+                                   "--no-legend", "--no-pager"],
+                                  timeout=timeout)
         if result.get("timeout") or result.get("rc") != 0:
             self.refuse("systemctl list-jobs failed; job absence is unknown")
         stdout = result.get("stdout")
@@ -212,13 +213,14 @@ class GuestFixtureAdapter:
             "lines": [line for line in stdout.splitlines() if line.strip()]}
         return self.last_jobs_observation["lines"]
 
-    def _jobs_for(self, names):
-        return [line for line in self._jobs()
+    def _jobs_for(self, names, timeout=30):
+        return [line for line in self._jobs(timeout=timeout)
                 if any(re.search(r"(?:^|\s)" + re.escape(name) + r"(?:\s|$)", line)
                        for name in names)]
 
-    def _cgroup_pids(self, unit):
-        props = self._show(unit, ["MainPID", "ControlGroup", "ActiveState"])
+    def _cgroup_pids(self, unit, timeout=30):
+        props = self._show(unit, ["MainPID", "ControlGroup", "ActiveState"],
+                           timeout=timeout)
         main = props.get("MainPID", "0")
         if not main.isdigit():
             self.refuse("unit MainPID is not an integer for " + unit)
@@ -825,28 +827,39 @@ class GuestFixtureAdapter:
 
     def _wait_drain(self):
         deadline = self.clock() + self.drain_timeout
+
+        def budget():
+            remaining = deadline - self.clock()
+            if remaining <= 0:
+                self.refuse("drain did not establish absence within the "
+                            "bound: budget exhausted before observation")
+            return remaining
+
         attempts = 0
         activator_units = [self._topology()[name]
                            for name in self._activator_names()]
         while True:
             attempts += 1
-            jobs = self._jobs_for([self.unit, *activator_units])
-            owned = self._cgroup_pids(self.unit)
-            state = self._show(self.unit, ["ActiveState", "SubState", "LoadState"])
-            activators = {unit: self._show(unit, ["ActiveState", "LoadState"])
+            jobs = self._jobs_for([self.unit, *activator_units],
+                                  timeout=budget())
+            owned = self._cgroup_pids(self.unit, timeout=budget())
+            state = self._show(self.unit, ["ActiveState", "SubState",
+                                           "LoadState"], timeout=budget())
+            activators = {unit: self._show(unit, ["ActiveState", "LoadState"],
+                                           timeout=budget())
                           for unit in activator_units}
-            if (not jobs and not owned["pids"] and owned["main_pid"] == 0
-                    and state["ActiveState"] == "inactive"
-                    and all(item["ActiveState"] in ("inactive", "failed")
-                            for item in activators.values())):
-                return {"jobs": jobs, "owned": owned, "state": state,
-                        "activators": activators, "attempts": attempts}
             if self.clock() >= deadline:
                 self.refuse("drain did not establish absence within the bound: "
                             + json.dumps({"jobs": jobs, "owned": owned,
                                           "state": state,
                                           "activators": activators},
                                          sort_keys=True)[:500])
+            if (not jobs and not owned["pids"] and owned["main_pid"] == 0
+                    and state["ActiveState"] == "inactive"
+                    and all(item["ActiveState"] in ("inactive", "failed")
+                            for item in activators.values())):
+                return {"jobs": jobs, "owned": owned, "state": state,
+                        "activators": activators, "attempts": attempts}
             self.sleep(0.25)
 
     def _observe_queue_drain(self):
