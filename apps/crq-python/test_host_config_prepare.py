@@ -83,7 +83,8 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
         import plistlib
         value = plistlib.loads((output / 'com.crq.fleet-reader.plist').read_bytes())
         self.assertEqual(value['ProgramArguments'], ['/usr/bin/python3',
-                         str(self.runner / 'ops/fleet-reader.py'), '--overlay', str(self.overlay_path)])
+                         str(Path.home() / 'Library/Application Support/crq/fleet-reader.py'),
+                         '--overlay', str(self.overlay_path)])
         self.assertNotIn('@HOME@', (output / 'com.crq.watchdog.plist').read_text())
 
     def test_prepare_stays_inert_verifies_before_install_and_reloads_without_start(self):

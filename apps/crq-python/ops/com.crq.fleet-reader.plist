@@ -5,7 +5,7 @@
   <key>Label</key><string>com.crq.fleet-reader</string>
   <key>ProgramArguments</key><array>
     <string>/usr/bin/python3</string>
-    <string>@CRQ_ROOT@/ops/fleet-reader.py</string>
+    <string>@HOME@/Library/Application Support/crq/fleet-reader.py</string>
     <string>--overlay</string><string>@OVERLAY@</string>
   </array>
   <key>StartInterval</key><integer>300</integer>
