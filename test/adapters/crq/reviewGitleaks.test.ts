@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -45,6 +45,19 @@ describe('inactive gitleaks binding', () => {
     const malformed = await fixture(`${reportPath}\nprintf '%s' 'SECRET' > "$report"`);
     await expect(malformed.scan('')).rejects.toThrow('gitleaks execution or report failed');
     expect(await readdir(malformed.root)).toEqual(['gitleaks']);
+  });
+  it('treats ELOOP, ENAMETOOLONG and an empty PATH like Python: not this entry, never a throw', async () => {
+    const f = await fixture('exit 2');
+    await symlink(join(f.root, 'loop'), join(f.root, 'loop'));
+    for (const path of [
+      `${join(f.root, 'loop')}:${f.root}`,
+      `${join(f.root, 'x'.repeat(300))}:${f.root}`,
+    ]) {
+      const scan = fileReviewGitleaks({ path, scratchRoot: f.root, timeoutMs: 1000 });
+      expect(await scan('')).toEqual({ kind: 'exit', code: 2, hits: null });
+    }
+    const none = fileReviewGitleaks({ path: '', scratchRoot: f.root });
+    expect(await none('')).toEqual({ kind: 'not-run' });
   });
   it('resolves relative PATH and scratch paths before changing the child cwd', async () => {
     const f = await fixture(`${reportPath}\nIFS= read -r value || :\nhelper > "$report"`);

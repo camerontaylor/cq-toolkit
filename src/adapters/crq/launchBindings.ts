@@ -24,7 +24,9 @@
  *   the `_pending_admission_compaction` global): this `saveQueue` does not log
  *   (`fileRepairSaveQueue` and `pendingCompactionLoader` hold the pinned halves, uncomposed
  *   here), and the production loader still refuses a queue needing the compaction pass;
- * - gitleaks discovery: the caller supplies the binding (`fileReviewGitleaks`);
+ * - gitleaks discovery: the semantics are pinned (`findGitleaksOnPath`, differentially pinned
+ *   by `gitleaks_discovery_vectors.py`); the caller still supplies the binding (`fileReviewGitleaks`)
+ *   and chooses its PATH and scratch root;
  * - `provision` (the on-demand `git clone`): not part of `launch`; its only caller is the
  *   review-v1 `submit` path, bound by `createReviewEffects` (`provisionRepo`, pinned by
  *   `provision_vectors.py`).
