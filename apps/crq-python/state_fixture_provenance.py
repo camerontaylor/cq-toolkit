@@ -255,7 +255,7 @@ def project(args: argparse.Namespace) -> Dict[str, Any]:
         states = set()
         for row in rows:
             state = row.get("state")
-            if state in ITEM_STATES:
+            if isinstance(state, str) and state in ITEM_STATES:
                 states.add(state)
                 all_states.add(state)
             elif state is not None:
