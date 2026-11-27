@@ -1326,6 +1326,28 @@ class HoldPersistenceTest(unittest.TestCase):
         self.assertFalse(self.hold.owns())
         self.assertIn("foreign hold", str(caught.exception))
 
+    def test_unreadable_marker_after_collision_is_unknown_not_foreign(self):
+        self.hold.acquire()
+        sync = self._sync_failing_after_planting(self.hold.token)
+        real_ownership = rb.Hold.ownership
+        calls = []
+
+        def ownership(hold):
+            # readable while the release verifies ownership, unreadable
+            # once the re-create collides with the planted marker
+            calls.append(1)
+            return real_ownership(hold) if len(calls) == 1 else None
+
+        with mock.patch.object(rb.Hold, "sync_directory", sync), \
+                mock.patch.object(rb.Hold, "ownership", ownership):
+            with self.assertRaises(rb.RecoveryRequired) as caught:
+                self.hold.release()
+        message = str(caught.exception)
+        self.assertNotIn("foreign", message)
+        self.assertIn("unknown", message)
+        self.assertTrue(self.hold.acquired)
+        self.assertEqual(self.hold.path.read_bytes(), self.hold.token)
+
     def test_same_token_marker_already_present_is_tolerated(self):
         self.hold.acquire()
         with mock.patch.object(rb.Hold, "sync_directory",

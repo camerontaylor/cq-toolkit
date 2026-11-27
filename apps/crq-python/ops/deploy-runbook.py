@@ -534,7 +534,22 @@ class Hold:
             except FileExistsError:
                 # Something took the path between the unlink and now. The
                 # bytes decide whose it is; a foreign hold is never touched.
-                if self.ownership() is not True:
+                present = self.ownership()
+                if present is None:
+                    # The marker exists but cannot be read back, so it may
+                    # be this run's own: leave ``acquired`` as it is (the
+                    # marker holds admission either way) and say the
+                    # ownership is unknown rather than call it foreign.
+                    raise RecoveryRequired(
+                        "the admission marker " + str(self.path)
+                        + " was removed but its removal could not be synced ("
+                        + repr(exc)[:200] + "); a marker is present at the "
+                        "path but could not be read back, so whether it is "
+                        "this run's token "
+                        + self.token.decode().strip() + " is unknown; it "
+                        "was left untouched and admission stays disabled "
+                        "under it") from exc
+                if present is False:
                     self.acquired = False
                     raise RecoveryRequired(
                         "the admission marker " + str(self.path)
@@ -548,7 +563,7 @@ class Hold:
                 # token: without one, fail-stop must re-acquire (or report
                 # the refusal) rather than skip it and record a hold that
                 # is not there.
-                self.acquired = self.owns()
+                self.acquired = self.ownership() is not False
                 raise RecoveryRequired(
                     "the admission marker " + str(self.path)
                     + " was removed but its removal could not be synced ("
