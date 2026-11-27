@@ -102,6 +102,15 @@ def build_scenarios() -> None:
         [exe("/T/cwd/rel/gitleaks"), exe("/T/b/gitleaks")])
     add("dot entry", ["."], [exe("/T/cwd/gitleaks")])
     add("dot-dot entry", [".."], [exe("/T/gitleaks")])
+    add("dot-dot after a symlink resolves physically, not lexically", ["/T/base/link/.."],
+        [exe("/T/target/gitleaks"), exe("/T/base/gitleaks"), ["symlink", "/T/base/link", "/T/target/bin"],
+         ["dir", "/T/target/bin"]])
+    add("dot-dot after a symlink, file only through the link target's parent", ["/T/base/link/.."],
+        [exe("/T/target/gitleaks"), ["symlink", "/T/base/link", "/T/target/bin"], ["dir", "/T/target/bin"]])
+    add("relative dot-dot after a symlink", ["base/link/.."],
+        [exe("/T/target/gitleaks"), exe("/T/cwd/base/gitleaks"), ["symlink", "/T/cwd/base/link", "/T/target/bin"],
+         ["dir", "/T/target/bin"]])
+    add("trailing slash entry", ["/T/a/"], [exe("/T/a/gitleaks")])
     add("relative entry with dot-dot", ["../a"], [exe("/T/a/gitleaks")])
     add("relative entry missing, absolute found", ["rel", "/T/b"], [exe("/T/b/gitleaks")])
     # --- the empty PATH string ---------------------------------------------------------------

@@ -16,7 +16,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   DEFAULT_SEARCH_PATH,
@@ -82,6 +82,10 @@ function materialize(scenario: Scenario): { tmp: string; path: string; cwd: stri
   return { tmp, path: scenario.path.map(sub).join(':'), cwd: sub(scenario.cwd) };
 }
 
+/** The cwd prefixed to Python's relative answer, with no lexical normalisation. */
+const joinUnnormalised = (cwd: string, answer: string): string =>
+  answer.startsWith('/') ? answer : `${cwd}/${answer}`;
+
 const isRoot = process.geteuid?.() === 0;
 
 describe('gitleaks discovery differential (shutil.which, Python 3.14)', () => {
@@ -94,14 +98,9 @@ describe('gitleaks discovery differential (shutil.which, Python 3.14)', () => {
       it(c.name, () => {
         const { tmp, path, cwd } = materialize(c.scenario);
         const found = findGitleaksOnPath(path, { cwd });
-        // Python returns the joined string (relative for a relative entry); same file.
+        // Python returns the joined string, relative for a relative entry; ours is the cwd prefix of it, never normalised.
         const expected =
-          c.expected === null
-            ? null
-            : resolve(
-                cwd,
-                c.expected.startsWith('/T') ? c.expected.replace('/T', tmp) : c.expected,
-              );
+          c.expected === null ? null : joinUnnormalised(cwd, c.expected.replace('/T', tmp));
         expect(found).toBe(expected);
       });
     }
@@ -124,7 +123,7 @@ describe('gitleaks discovery differential (shutil.which, Python 3.14)', () => {
         );
         expect(live.status).toBe(0);
         const out = live.stdout.replace(/\n$/, '');
-        const pyFound = out === '' ? null : resolve(cwd, out.slice(1));
+        const pyFound = out === '' ? null : joinUnnormalised(cwd, out.slice(1));
         expect(findGitleaksOnPath(path, { cwd })).toBe(pyFound);
       });
     }
@@ -152,7 +151,7 @@ describe('gitleaks discovery differential (shutil.which, Python 3.14)', () => {
       const c = fixture.cases.find((x) => x.name === 'empty entry means the cwd');
       if (c === undefined) throw new Error('missing scenario');
       const { tmp, path, cwd } = materialize(c.scenario);
-      expect(findGitleaksOnPath(path, { cwd })).toBe(join(cwd, 'gitleaks'));
+      expect(findGitleaksOnPath(path, { cwd })).toBe(`${cwd}/gitleaks`);
       expect(findGitleaksOnPath(path, { cwd, emptyEntries: 'skip' })).toBe(
         join(tmp, 'b', 'gitleaks'),
       );
@@ -162,7 +161,7 @@ describe('gitleaks discovery differential (shutil.which, Python 3.14)', () => {
       if (c === undefined) throw new Error('missing scenario');
       const { cwd, path } = materialize(c.scenario);
       expect(c.expected).toBe('rel/gitleaks');
-      expect(findGitleaksOnPath(path, { cwd })).toBe(join(cwd, 'rel', 'gitleaks'));
+      expect(findGitleaksOnPath(path, { cwd })).toBe(`${cwd}/rel/gitleaks`);
     });
   });
 });
