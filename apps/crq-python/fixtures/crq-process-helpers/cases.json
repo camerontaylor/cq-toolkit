@@ -6275,7 +6275,7 @@
   "schema": "cq.crq-process-helpers-vector/v1",
   "source": {
     "failure_class_for_stop": "apps/crq-python/crq_repair.py:161-166",
-    "judge_required": "apps/crq-python/crq_repair.py:670",
+    "judge_required": "apps/crq-python/crq_repair.py:679",
     "retain": "apps/crq-python/crq_repair/retain.py:56-107",
     "retain_preserving_nested": "apps/crq-python/crq_repair.py:300-326",
     "untracked_directories": "apps/crq-python/crq_repair/retain.py:110-119",
