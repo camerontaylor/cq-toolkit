@@ -3,10 +3,16 @@ import contextlib
 import importlib.util
 import io
 import json
+import plistlib
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+
+from test_host_config_fixtures import HostConfigFixture, host
 
 ROOT = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("fleet_reader_contract", ROOT / "ops/fleet-reader.py")
@@ -72,6 +78,46 @@ class FleetReaderContractTests(unittest.TestCase):
         self.assertTrue(out.startswith("usage:"))
         with self.assertRaises(ValueError):
             json.loads(out)
+
+
+class InstalledLayoutTests(HostConfigFixture, unittest.TestCase):
+    """The launchd job runs only the files copied to Application Support/crq."""
+
+    def install(self, names):
+        home = self.base / "home"
+        installed = home / "Library/Application Support/crq"
+        installed.mkdir(parents=True)
+        for name in names:
+            shutil.copy(ROOT / "ops" / name, installed / name)
+        return home, installed
+
+    def load_installed(self, installed):
+        spec = importlib.util.spec_from_file_location("installed_reader", installed / "fleet-reader.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_plist_target_runs_from_the_two_copied_files_alone(self):
+        home, installed = self.install(["fleet-reader.py", "prepare-host.py"])
+        self.assertEqual(sorted(p.name for p in installed.iterdir()),
+                         ["fleet-reader.py", "prepare-host.py"])
+        output = self.base / "launchd"
+        with mock.patch.object(Path, "home", return_value=home):
+            host.render_plists(self.root, output, self.overlay_path)
+        args = plistlib.loads((output / "com.crq.fleet-reader.plist").read_bytes())["ProgramArguments"]
+        self.assertEqual(Path(args[1]), installed / "fleet-reader.py")
+        self.assertTrue(Path(args[1]).is_file())
+        self.assertEqual(args[2:], ["--overlay", str(self.overlay_path)])
+        self.assertEqual(self.load_installed(installed).source_settings(args[3]),
+                         self.overlay["fleet_reader"])
+        done = subprocess.run([sys.executable, "-I", args[1], "--help"],
+                              capture_output=True, text=True, cwd=installed)
+        self.assertEqual((done.returncode, done.stdout[:6]), (0, "usage:"))
+
+    def test_reader_copied_alone_cannot_load_its_settings(self):
+        _, installed = self.install(["fleet-reader.py"])
+        with self.assertRaises(FileNotFoundError):
+            self.load_installed(installed).source_settings(self.overlay_path)
 
 
 if __name__ == "__main__":

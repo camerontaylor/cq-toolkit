@@ -132,11 +132,15 @@ ordinary completed tick; this is runtime operation, not a probe. Do not claim
 
 ## 5. Preserve fleet-reader compatibility
 
-After queue-host publishes a valid schema-2 XDG summary, copy ops/fleet-reader.py to
-~/Library/Application Support/crq/fleet-reader.py and its plist to
-~/Library/LaunchAgents/com.crq.fleet-reader.plist on worker-host, then:
+After queue-host publishes a valid schema-2 XDG summary, copy BOTH ops/fleet-reader.py and
+ops/prepare-host.py to ~/Library/Application Support/crq/ (the reader loads its overlay settings
+from the adjacent prepare-host.py), and the rendered plist to
+~/Library/LaunchAgents/com.crq.fleet-reader.plist on worker-host. The job now runs only the
+copied files, never the checkout, so refresh the two copies together whenever either changes.
+Confirm all three exist, then bootstrap:
 
 ```sh
+test -f "$HOME/Library/Application Support/crq/fleet-reader.py" && test -f "$HOME/Library/Application Support/crq/prepare-host.py" && test -f "$HOME/Library/LaunchAgents/com.crq.fleet-reader.plist"
 launchctl bootstrap gui/$(id -u) "$HOME/Library/LaunchAgents/com.crq.fleet-reader.plist"
 ```
 

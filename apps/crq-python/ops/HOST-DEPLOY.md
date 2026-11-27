@@ -101,8 +101,11 @@ recipient and ignores the retired template and spool values. Remove them after
 the source has switched.
 The overlay also supplies the fleet-reader's source host and absolute source path;
 `fleet-reader.py --overlay /private/host.json` reads only that summary via SSH.
-Render launchd templates with `preview`; install from a retained detached toolkit
-checkout on the reader host, so its adjacent `prepare-host.py` remains available.
+Render launchd templates with `preview`. The launchd job runs only the copied files:
+copy both `ops/fleet-reader.py` and `ops/prepare-host.py` to
+`~/Library/Application Support/crq/` (the reader loads `prepare-host.py` from its own
+directory), run `test -f` on both and on the installed plist before `launchctl bootstrap`,
+and refresh the two copies together whenever either changes.
 The reader host has its own private overlay and checkout paths.
 
 ## Rendering and evidence
