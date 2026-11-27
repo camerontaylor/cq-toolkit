@@ -20,9 +20,14 @@ class RepairProcessItemVectorsTest(unittest.TestCase):
         self.assertEqual(emitter.FIXTURE.read_text(encoding="utf-8"), emitter.render(emitter.build()))
 
     def test_core_paths_are_covered(self) -> None:
-        names = " ".join(case["name"] for case in emitter.build()["cases"])
-        for path in ("chain:", "deferral:", "prior:", "resume:", "non-dict prior list", "non-dict prior null"):
-            self.assertIn(path, names)
+        names = [case["name"] for case in emitter.build()["cases"]]
+        for group in (
+            "chain:", "deferral:", "prior:", "resume:", "pause:", "blocked:", "runner-disabled:",
+            "worktree:", "canonical:", "shape:",
+            "non-dict prior list", "non-dict prior string", "non-dict prior number",
+            "non-dict prior float", "non-dict prior null", "non-dict prior bool",
+        ):
+            self.assertTrue(any(name.startswith(group) for name in names), f"no scenario group {group!r}")
 
 
 if __name__ == "__main__":
