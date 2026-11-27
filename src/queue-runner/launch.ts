@@ -176,11 +176,11 @@ export async function launch(
   // names a review scope would give the CLI conflicting selectors. Refuse it
   // before any run directory or worktree exists, as preparation does.
   if (
-    truthy(plan.profile) &&
+    pyTruthy(plan.profile) &&
     (kind === AUTHOR_KIND ||
       kind === RECEIPT_KIND ||
       kind === PUSH_KIND ||
-      truthy(plan.range_policy))
+      pyTruthy(plan.range_policy))
   )
     assertProfileSetsNoReviewScope(flagList(record(plan.profile).flags));
   const runId = `${String(item.id)}-${fx.runStamp()}`;
