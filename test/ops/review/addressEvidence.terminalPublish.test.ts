@@ -1,18 +1,45 @@
-import {
-  mkdir,
-  mkdtemp,
-  readdir,
-  readFile,
-  realpath,
-  rm,
-  writeFile,
-  lstat,
-} from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { mkdtemp, readdir, readFile, realpath, rm, writeFile, lstat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, test, vi } from 'vitest';
 
 const authority = vi.hoisted(() => ({ calls: 0, failOn: 0 }));
+// Seams over the fs calls that carry publication: each hook runs around the real call.
+const fsHooks = vi.hoisted(() => ({
+  openFlags: [] as { path: string; flags: unknown }[],
+  unlinked: [] as string[],
+  renamed: [] as { from: string; to: string }[],
+  afterRename: undefined as undefined | ((to: string) => Promise<void>),
+  unlinkError: undefined as undefined | Error,
+  reset() {
+    this.openFlags = [];
+    this.unlinked = [];
+    this.renamed = [];
+    this.afterRename = undefined;
+    this.unlinkError = undefined;
+  },
+}));
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    open: (async (path: string, flags: unknown, mode: unknown) => {
+      fsHooks.openFlags.push({ path: String(path), flags });
+      return actual.open(path, flags as never, mode as never);
+    }) as typeof actual.open,
+    unlink: async (path: string) => {
+      fsHooks.unlinked.push(String(path));
+      if (fsHooks.unlinkError) throw fsHooks.unlinkError;
+      return actual.unlink(path);
+    },
+    rename: async (from: string, to: string) => {
+      fsHooks.renamed.push({ from: String(from), to: String(to) });
+      await actual.rename(from, to);
+      await fsHooks.afterRename?.(String(to));
+    },
+  };
+});
 vi.mock('../../../src/ops/review/internal/addressRunLifecycle.js', () => ({
   validateAddressTerminalAuthority: async () => {
     authority.calls += 1;
@@ -26,6 +53,7 @@ const { noteAddressOrdinaryReport, persistAddressTerminalReport } =
   await import('../../../src/ops/review/internal/addressEvidence.js');
 
 afterEach(() => {
+  fsHooks.reset();
   authority.calls = 0;
   authority.failOn = 0;
 });
@@ -75,20 +103,80 @@ test('a successful publication swaps the full terminal report in and removes the
   }
 });
 
-test('a new report is created exclusively and never overwrites a racing file', async () => {
+test('a new report is refused with EEXIST when a racing file already holds the path', async () => {
   const base = await realpath(await mkdtemp(join(tmpdir(), 'terminal-publish-')));
   try {
     const stat = await lstat(base);
     const path = join(base, 'new.json');
-    await mkdir(join(base, 'x'));
     await writeFile(path, 'racer');
     authority.calls = 1;
     await expect(
       persistAddressTerminalReport({}, path, { terminal: true }, { dev: stat.dev, ino: stat.ino }),
-    ).rejects.toThrow();
+    ).rejects.toThrow(/EEXIST/);
     expect(await readFile(path, 'utf8')).toBe('racer');
-    expect((await readdir(base)).sort()).toEqual(['new.json', 'x']);
+    expect(await readdir(base)).toEqual(['new.json']);
   } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test('the stage is opened exclusively and without following symlinks', async () => {
+  const { base, path, token, dir } = await setup();
+  try {
+    authority.calls = 1;
+    await persistAddressTerminalReport(token, path, { terminal: true }, dir);
+    const stage = fsHooks.openFlags.find((o) => o.path.includes('.terminal-'));
+    const flags = stage?.flags as number;
+    expect(flags & constants.O_EXCL).toBe(constants.O_EXCL);
+    expect(flags & constants.O_CREAT).toBe(constants.O_CREAT);
+    expect(flags & constants.O_NOFOLLOW).toBe(constants.O_NOFOLLOW);
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test('an ordinary report is replaced by renaming the stage over it, never by unlinking it first', async () => {
+  const { base, path, token, dir } = await setup();
+  try {
+    authority.calls = 1;
+    await persistAddressTerminalReport(token, path, { terminal: true }, dir);
+    expect(fsHooks.renamed).toHaveLength(1);
+    expect(fsHooks.renamed[0]?.to).toBe(path);
+    expect(fsHooks.renamed[0]?.from).toMatch(/\.report\.json\.terminal-/);
+    expect(fsHooks.unlinked).not.toContain(path);
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test('a report swapped in right after publication is refused', async () => {
+  const { base, path, token, dir } = await setup();
+  try {
+    authority.calls = 1;
+    fsHooks.afterRename = async (to) => {
+      await rm(to);
+      await writeFile(to, 'impostor');
+    };
+    await expect(
+      persistAddressTerminalReport(token, path, { terminal: true }, dir),
+    ).rejects.toThrow(/terminal report replaced/);
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test('when publication and staged cleanup both fail the publication error is the one rethrown', async () => {
+  const { base, path, token, dir } = await setup();
+  try {
+    authority.calls = 1;
+    authority.failOn = 4;
+    fsHooks.unlinkError = Object.assign(new Error('cleanup denied'), { code: 'EACCES' });
+    await expect(
+      persistAddressTerminalReport(token, path, { terminal: true }, dir),
+    ).rejects.toThrow(/authority lost mid-publication/);
+    expect(await readFile(path, 'utf8')).toBe('{"ordinary":true}\n');
+  } finally {
+    fsHooks.reset();
     await rm(base, { recursive: true, force: true });
   }
 });

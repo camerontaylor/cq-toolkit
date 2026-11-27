@@ -1162,6 +1162,8 @@ export async function persistAddressTerminalReport(
       // exclusive-create rule for a new report, and renaming over the verified
       // ordinary inode swaps fully written bytes into place, so a failed
       // publication can never tear the original report.
+      // The stage is a sibling of the target (same directory, same filesystem),
+      // so the rename cannot cross a device and stays atomic.
       if (ordinary) await rename(staged, path);
       else await link(staged, path);
       if (
