@@ -63,8 +63,9 @@ export function syncInto(target: unknown, source: unknown): unknown {
   return source;
 }
 
-const toJson = (queue: Queue): JsonObject => fromPlainJson(keepUnsafeFloats(queue)) as JsonObject;
-const pull = (queue: Queue, json: JsonObject): void => {
+export const toJson = (queue: Queue): JsonObject =>
+  fromPlainJson(keepUnsafeFloats(queue)) as JsonObject;
+export const pull = (queue: Queue, json: JsonObject): void => {
   syncInto(queue, toPlainJson(json, { bigints: true }));
 };
 

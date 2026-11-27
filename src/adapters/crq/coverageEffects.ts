@@ -29,10 +29,13 @@
  *   {@link CoverageEffectsInput.dispatch} supplies the state root and policy
  *   loader; without them the caller's injected one is used.
  *
- * Left injected: `select` (its launch half builds the real ledger, artifact
- * store, outbox and publisher spool over the clone and calls `launch`, which is
- * itself unbound). A member that is neither bound nor injected must throw,
- * never succeed.
+ * - `select` over `src/adapters/crq/coverageSelect.ts` (`backfill_runtime.select`)
+ *   when {@link CoverageEffectsInput.select} supplies the live effects it reaches:
+ *   the ledger fetch, the coverage snapshot reader and request writer, the
+ *   publication-failure probe and `launch` (the reviewer process spawn). Those
+ *   stay injected; without the input the caller's injected `select` is used.
+ *
+ * A member that is neither bound nor injected must throw, never succeed.
  */
 import {
   bindBindRun,
@@ -41,6 +44,7 @@ import {
   type Rank4Collaborators,
 } from './coverageBackfillSeams.js';
 import { buildSynthetic, type BuildSyntheticDeps } from './buildSynthetic.js';
+import { bindSelect, type SelectCollaborators } from './coverageSelect.js';
 import {
   bindBackfillDispatchConfigured,
   bindTickSeams,
@@ -69,22 +73,23 @@ import { UtcInstant } from '../../policy/crq/utc.js';
 
 /**
  * The seams `coverage_fallback` needs that no merged module implements yet:
- * `select` is required; the tick seams, the dispatch switch and `buildSynthetic`
- * may be injected when their binding input is not supplied.
+ * `select`, the tick seams, the dispatch switch and `buildSynthetic` may be
+ * injected when their binding input is not supplied; one that is neither bound
+ * nor injected throws when called.
  */
-export type InjectedCoverageSeams = Pick<CoverageEffects, 'select'> &
-  Partial<
-    Pick<
-      CoverageEffects,
-      | 'backfillDispatchConfigured'
-      | 'liveItems'
-      | 'compareItems'
-      | 'nowMs'
-      | 'parseIsoMs'
-      | 'depsMet'
-      | 'buildSynthetic'
-    >
-  >;
+export type InjectedCoverageSeams = Partial<
+  Pick<
+    CoverageEffects,
+    | 'select'
+    | 'backfillDispatchConfigured'
+    | 'liveItems'
+    | 'compareItems'
+    | 'nowMs'
+    | 'parseIsoMs'
+    | 'depsMet'
+    | 'buildSynthetic'
+  >
+>;
 
 export interface CoverageEffectsInput {
   readonly git: MeasureGit;
@@ -100,6 +105,11 @@ export interface CoverageEffectsInput {
   readonly tick?: TickSeamsInput;
   /** Binds `backfillDispatchConfigured`; absent, the injected one is used. */
   readonly dispatch?: DispatchSettingsInput;
+  /**
+   * Binds `select` over the live effects it reaches (ledger fetch, coverage
+   * reader and request writer, launch); absent, `injected.select` is used.
+   */
+  readonly select?: SelectCollaborators;
 }
 
 const COVERAGE_KEYS = new Set(['max_paths', 'min_age_hours', 'excluded_paths']);
@@ -176,15 +186,19 @@ export function makeCoverageEffects(input: CoverageEffectsInput): Omit<CoverageE
   // The injected clock is called on `injected`, so a method that reads `this` keeps its receiver.
   const nowMs =
     tick?.nowMs ?? (injected.nowMs ? () => (injected.nowMs as () => number)() : unbound('nowMs'));
+  const dispatchConfigured =
+    dispatch ?? injected.backfillDispatchConfigured ?? unbound('backfillDispatchConfigured');
+  const select = input.select
+    ? bindSelect(input.rank4, input.select, dispatchConfigured)
+    : (injected.select ?? unbound('select'));
   return {
-    select: injected.select,
+    select,
     nowMs,
     parseIsoMs: tick?.parseIsoMs ?? injected.parseIsoMs ?? unbound('parseIsoMs'),
     liveItems: tick?.liveItems ?? injected.liveItems ?? unbound('liveItems'),
     compareItems: tick?.compareItems ?? injected.compareItems ?? unbound('compareItems'),
     depsMet: tick?.depsMet ?? injected.depsMet ?? unbound('depsMet'),
-    backfillDispatchConfigured:
-      dispatch ?? injected.backfillDispatchConfigured ?? unbound('backfillDispatchConfigured'),
+    backfillDispatchConfigured: dispatchConfigured,
     ...synthetic,
     rank4Gate: bindRank4Gate(input.rank4),
     bindRun: bindBindRun,

@@ -68,6 +68,68 @@ describe('makeCoverageEffects', () => {
     expect(() => effects.select({} as never, [], false, null)).toThrow('select is not bound');
   });
 
+  it('binds select only when its collaborators are supplied, and never touches them when dispatch is off', async () => {
+    const touched: string[] = [];
+    const base = {
+      git: { git: () => Promise.resolve(''), pathExists: () => Promise.resolve(true) },
+      measure: { defaultRef: 'origin/main', minFileFocus: 0.25, iso: () => '2026-11-20T12:00:00Z' },
+      coverageConfig: {},
+      rank4: {
+        iso: () => '2026-11-20T12:00:00Z',
+        ordinaryEligible: unbound('ordinaryEligible'),
+        stateEvent: unbound('stateEvent') as never,
+        saveQueue: unbound('saveQueue') as never,
+      },
+    };
+    const live = {
+      publicationFailureExists: () => {
+        touched.push('probe');
+        return false;
+      },
+      fetchLedger: () => {
+        touched.push('fetch');
+        return Promise.resolve({ head: 'h', events: [] });
+      },
+      loadCoverage: () => {
+        touched.push('load');
+        return Promise.resolve(null);
+      },
+      requestCoverage: () => {
+        touched.push('request');
+        return Promise.resolve();
+      },
+      launch: () => {
+        touched.push('launch');
+        return Promise.resolve('run');
+      },
+    };
+    const queue = { items: [] } as unknown as Queue;
+    // Without the input, select is whatever the caller injected (here: nothing, so it throws).
+    const bare = makeCoverageEffects({ ...base, injected: {} });
+    expect(() => bare.select(queue, [], false, null)).toThrow('select is not bound');
+    // With the input but no dispatch switch bound or injected, it throws when called.
+    const noSwitch = makeCoverageEffects({ ...base, injected: {}, select: live });
+    await expect(noSwitch.select(queue, [], false, null)).rejects.toThrow(
+      'backfillDispatchConfigured is not bound',
+    );
+    // With the switch off it answers without reaching a live effect.
+    const off = makeCoverageEffects({
+      ...base,
+      injected: { backfillDispatchConfigured: () => false },
+      select: live,
+    });
+    expect(await off.select(queue, [], false, null)).toEqual({ started: null, available: false });
+    // The publication-failure probe runs before the dispatch switch, as in Python; nothing else does.
+    expect(touched).toEqual(['probe', 'probe']);
+    // An injected select is ignored once the input is supplied.
+    const wins = makeCoverageEffects({
+      ...base,
+      injected: { select: unbound('injected') as never, backfillDispatchConfigured: () => false },
+      select: live,
+    });
+    expect(await wins.select(queue, [], false, null)).toEqual({ started: null, available: false });
+  });
+
   it('binds the tick seams and the dispatch switch only when their input is supplied', () => {
     const root = mkdtempSync(join(tmpdir(), 'cq-effects-bind-'));
     try {
