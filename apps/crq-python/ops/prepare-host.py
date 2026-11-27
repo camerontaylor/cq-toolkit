@@ -900,8 +900,11 @@ def switch(root, overlay, raw, target, tag=None, rollback_config=None):
                     except subprocess.CalledProcessError:
                         saved = False
                     if saved:
-                        # Same commit, so this only reattaches HEAD.
-                        git(root, 'checkout', previous_branch)
+                        # Same commit, so this only reattaches HEAD. A full
+                        # refs/heads/ name given to `checkout` is a commit-ish
+                        # and would stay detached; symbolic-ref repoints HEAD
+                        # without touching the index or worktree.
+                        git(root, 'symbolic-ref', 'HEAD', previous_branch)
             except BaseException as rollback:
                 # HEAD may still name the target commit, so reinstalling the
                 # previous rendering here would install config from a different
