@@ -1130,6 +1130,8 @@ export async function persistAddressTerminalReport(
   // (new prefix, old tail) when the filesystem accepts part of the new JSON and
   // then fails, and the lifecycle cannot recover the original afterwards.
   const staged = join(dirname(path), `.${basename(path)}.terminal-${randomUUID()}`);
+  let failed = false;
+  let failure: unknown;
   try {
     const stage = await open(
       staged,
@@ -1170,13 +1172,21 @@ export async function persistAddressTerminalReport(
     } finally {
       await stage.close();
     }
-  } finally {
-    try {
-      await unlink(staged);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    }
+  } catch (error) {
+    failed = true;
+    failure = error;
   }
+  // Cleanup runs outside any finally block so it can never replace the original
+  // failure: the publication error wins, and a cleanup error surfaces only when
+  // publication itself succeeded.
+  let cleanupFailure: unknown;
+  try {
+    await unlink(staged);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') cleanupFailure = error;
+  }
+  if (failed) throw failure;
+  if (cleanupFailure !== undefined) throw cleanupFailure;
   await validateEvidenceAuthority(token, true);
   const directory = await open(dirname(path), constants.O_RDONLY | constants.O_DIRECTORY);
   try {
