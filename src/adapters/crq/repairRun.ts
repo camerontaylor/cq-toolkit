@@ -8,8 +8,8 @@
  *   `service.lock` is taken without blocking and a held lock is the
  *   `busy` result (exit 0); the triage report is the one artifact, and a
  *   `None` report is the explicit `no-triage` result ({@link runTriageDryRun});
- * - `run()` drain tail (:1650-1672): the lock-busy result and the
- *   `None` -> `{'status': 'drained'}` fold, exit 1 only for status `error`
+ * - `run()` drain tail (:1650-1680): the lock-busy result and the
+ *   drain result as returned, exit 1 only for status `error`
  *   ({@link finishDrain}, {@link lockedResult});
  * - `drain()` (:972-1073): the admission stops, the triage fold (a triage
  *   exception is narrated and the pass continues, `triage` rides inside the
@@ -97,10 +97,9 @@ export function runTriageDryRun(
   });
 }
 
-/** The end of `run()` (crq_repair.py:1670-1672): `None` is a plain drain; `error` exits 1. */
-export function finishDrain(result: Dict | null): RepairRunOutcome {
-  const folded = result ?? { status: 'drained' };
-  return { exitCode: folded['status'] === 'error' ? 1 : 0, result: folded };
+/** The end of `run()` (crq_repair.py:1690-1691): `drain` always returns a result; `error` exits 1. */
+export function finishDrain(result: Dict): RepairRunOutcome {
+  return { exitCode: result['status'] === 'error' ? 1 : 0, result };
 }
 
 export type GroupMap = Map<string, string[]>;
@@ -212,29 +211,30 @@ function typeName(value: unknown): string {
 }
 
 /**
- * Python `drain` (crq_repair.py:972-1073): the pass's JSON result, `null` only
- * on a narrated early exit.
+ * Python `drain` (crq_repair.py:972-1073): the pass's JSON result; a narrated
+ * early exit reports a `refused`, `paused` or `deferred` status, never `null`.
  */
-export async function drain(config: Dict, effects: RepairDrainEffects): Promise<Dict | null> {
+export async function drain(config: Dict, effects: RepairDrainEffects): Promise<Dict> {
   if (await effects.runnerDisabled()) {
     effects.narrate(gateMessage({ stage: 'pass-start' }));
-    return null;
+    return { status: 'refused', reason: 'runner-disabled' };
   }
   if (!Object.hasOwn(config, 'repair')) throw new PyError('KeyError', "'repair'");
   await effects.workerLimit(config);
   const until = await effects.dispatchPaused(config);
   if (until) {
     effects.narrate(`repair drain paused: provider rate limit until ${until}`);
-    return null;
+    return { status: 'paused', reason: `provider rate limit until ${until}` };
   }
   const fetchError = await effects.fetchClone(config);
   if (fetchError !== null) {
-    effects.narrate(`repair drain skipped: ${Array.from(fetchError).slice(0, 200).join('')}`);
-    return null;
+    const reason = Array.from(fetchError).slice(0, 200).join('');
+    effects.narrate(`repair drain skipped: ${reason}`);
+    return { status: 'deferred', reason };
   }
   if (await effects.runnerDisabled()) {
     effects.narrate(gateMessage({ stage: 'before-triage' }));
-    return null;
+    return { status: 'deferred', reason: 'runner-disabled' };
   }
   let triage: Dict | null = null;
   try {

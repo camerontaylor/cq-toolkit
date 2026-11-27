@@ -356,7 +356,10 @@ describe('drainItem', () => {
 describe('runRepairDrain admission', () => {
   test('a disabled runner refuses the pass before any read or effect', async () => {
     const r = rig({ disabled: [true], jobs: { j1: { item: 'pr-1' } } });
-    expect(await runRepairDrain(r.effects)).toBeNull();
+    expect(await runRepairDrain(r.effects)).toEqual({
+      status: 'refused',
+      reason: 'runner-disabled',
+    });
     expect(r.calls).toEqual([]);
     expect(r.said).toEqual([`${RUNNER_DISABLED}: pass not started`]);
   });
@@ -371,19 +374,42 @@ describe('runRepairDrain admission', () => {
   });
   test('a provider pause skips the pass before any fetch', async () => {
     const r = rig({ paused: ['2026-11-20T13:00:00Z'] });
-    expect(await runRepairDrain(r.effects)).toBeNull();
+    expect(await runRepairDrain(r.effects)).toEqual({
+      status: 'paused',
+      reason: 'provider rate limit until 2026-11-20T13:00:00Z',
+    });
     expect(r.calls).toEqual([]);
     expect(r.said).toEqual(['repair drain paused: provider rate limit until 2026-11-20T13:00:00Z']);
   });
   test('a failed fetch skips the pass and truncates its error to 200 characters', async () => {
     const r = rig({ fetchError: 'f'.repeat(300) });
-    expect(await runRepairDrain(r.effects)).toBeNull();
+    expect(await runRepairDrain(r.effects)).toEqual({
+      status: 'deferred',
+      reason: 'f'.repeat(200),
+    });
     expect(r.calls).toEqual(['fetch']);
     expect(r.said).toEqual([`repair drain skipped: ${'f'.repeat(200)}`]);
   });
+  test('a failed fetch clips its error by code point like Python error[:200]', async () => {
+    const emoji = rig({ fetchError: '😀'.repeat(300) });
+    expect(await runRepairDrain(emoji.effects)).toEqual({
+      status: 'deferred',
+      reason: '😀'.repeat(200),
+    });
+    expect(emoji.said).toEqual([`repair drain skipped: ${'😀'.repeat(200)}`]);
+    const edge = rig({ fetchError: `${'a'.repeat(199)}😀tail` });
+    expect(await runRepairDrain(edge.effects)).toEqual({
+      status: 'deferred',
+      reason: `${'a'.repeat(199)}😀`,
+    });
+    expect(edge.said).toEqual([`repair drain skipped: ${'a'.repeat(199)}😀`]);
+  });
   test('a marker written during the fetch stops the pass before triage', async () => {
     const r = rig({ disabled: [false, true] });
-    expect(await runRepairDrain(r.effects)).toBeNull();
+    expect(await runRepairDrain(r.effects)).toEqual({
+      status: 'deferred',
+      reason: 'runner-disabled',
+    });
     expect(r.calls).toEqual(['fetch']);
     expect(r.said).toEqual([`${RUNNER_DISABLED}: pass stopped before triage`]);
   });
@@ -616,8 +642,11 @@ describe('runRepairDrain queue and ordering', () => {
       artifact: { status: 'drained' },
     });
   });
-  test('a narrated early exit reports the drained artifact with exit code zero', () => {
-    expect(drainOutcome(null)).toEqual({ exitCode: 0, artifact: { status: 'drained' } });
+  test('a narrated early exit reports its own structured status with exit code zero', () => {
+    for (const status of ['refused', 'paused', 'deferred'] as const) {
+      const result = { status, reason: 'why' };
+      expect(drainOutcome(result)).toEqual({ exitCode: 0, artifact: result });
+    }
   });
 });
 

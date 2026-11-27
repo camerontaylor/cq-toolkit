@@ -981,29 +981,31 @@ def triage_phase(config, dry_run=False):
 def drain(config):
     """Automatic inbox drain, minor-only items after critical/major items. Items use isolated worker
     processes up to the configured cap, with serial findings within each item. Returns the pass's
-    JSON result (None only on a narrated early exit), with the triage report inside when triage ran."""
+    JSON result with the triage report inside when triage ran. Every narrated early exit returns a
+    structured 'deferred', 'paused' or 'refused' status instead of None, so a caller reading only
+    JSON can tell that no inbox work ran; 'drained' means a pass that ran."""
     # Admission before any fetch, triage or write: a handed-over host must cost
     # nothing and leave the queue and inbox exactly as they are.
     if runner_disabled():
         narrate(RUNNER_DISABLED + ': pass not started')
-        return
+        return {'status': 'refused', 'reason': 'runner-disabled'}
     repair = config['repair']
     worker_limit(config)  # validate before triage or any provider spend
     until = dispatch_paused(config)
     if until:
         narrate('repair drain paused: provider rate limit until ' + until)
-        return
+        return {'status': 'paused', 'reason': 'provider rate limit until ' + until}
     # Stale checks read origin refs; refresh them first. Fetch only: the worker
     # never pushes or calls the GitHub API. A failed fetch skips this pass.
     error = fetch_clone(config)
     if error is not None:
         narrate('repair drain skipped: ' + error[:200])
-        return
+        return {'status': 'deferred', 'reason': error[:200]}
     # A marker written while the fetch ran must stop the pass before triage
     # spends: the guard at the top was sampled before the network work.
     if runner_disabled():
         narrate(RUNNER_DISABLED + ': pass stopped before triage')
-        return
+        return {'status': 'deferred', 'reason': 'runner-disabled'}
     triage = None
     try:
         triage = triage_phase(config)
@@ -1683,9 +1685,9 @@ def run(argv=None):
             job = select_job(ROOT, config, args.job, args.source_sha, args.finding_sha256)
             outcome = process_item(config, [job])
             return 0, explicit_job_result(job, outcome)
+        # drain() never returns None: each early exit reports its own
+        # structured status, so 'drained' only ever means a pass that ran.
         result = drain(config)
-        if result is None:
-            result = {'status': 'drained'}
         return (1 if result.get('status') == 'error' else 0), result
 
 
