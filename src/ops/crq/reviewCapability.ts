@@ -110,7 +110,7 @@ export interface ReviewCapabilityEffects {
   readonly hasCommit: (repo: string, commit: string) => Promise<boolean>;
   /** Fetch the repository's clone when a required object is absent. */
   readonly fetchRepo: (repo: string) => Promise<void>;
-  /** Install a version-2 snapshot into the repository clone, bound to the commit. */
+  /** Install a version-1 snapshot into the repository clone, bound to the commit. */
   readonly installSnapshot: (
     repo: string,
     snapshot: JsonObject,
