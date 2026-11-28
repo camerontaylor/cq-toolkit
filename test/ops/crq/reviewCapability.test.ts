@@ -483,3 +483,56 @@ describe('review-v1 pure handler', () => {
     expect(error.get('retryable')).toBe(false);
   });
 });
+
+// An explicit repeat never reaches receipt verification, so submit must not
+// preload (read) retained receipts for it; a plain submit still does.
+describe('repeat submit receipt preload', () => {
+  test('explicit repeat performs no receipt reads; non-repeat still reads', async () => {
+    const receipt = Buffer.from(
+      receiptJsonText(
+        object({
+          v: 1,
+          kind: 'review',
+          identity: 'x',
+          identity_inputs: { repo: REPO },
+          scope_adequate: true,
+          outcome: 'clean',
+          generated_at: '2026-11-13T00:00:00Z',
+        }),
+      ),
+      'utf8',
+    );
+    const h = harness({ receipt });
+    let reads = 0;
+    const inner = h.effects.readReceipt;
+    h.effects.readReceipt = async (id) => {
+      reads += 1;
+      return inner(id);
+    };
+    const created = await h.call(frame());
+    expect(created.get('action')).toBe('created');
+    const itemId = created.get('item');
+    // Mark the item done with a receipt id on disk: a preload would read it.
+    const items = (h.state.queue.get('items') as JsonObject[]).map((item) =>
+      item.get('id') === itemId
+        ? withObjectKeys(item, [
+            ['state', 'done'],
+            ['outcome', 'clean'],
+            ['receipt_id', sha256Hex(receipt)],
+          ])
+        : item,
+    );
+    h.state.queue = withObjectKeys(h.state.queue, [['items', items]]);
+    expect(reads).toBe(0);
+
+    const repeat = await h.call(frame({ request_id: 'req-2', repeat: true }));
+    expect(repeat.get('action')).toBe('created');
+    expect(repeat.get('item')).not.toBe(itemId);
+    expect(reads).toBe(0);
+
+    // Control: a non-repeat submit for the same head does verify receipts.
+    const plain = await h.call(frame({ request_id: 'req-3' }));
+    expect(reads).toBeGreaterThan(0);
+    expect(plain.get('action')).toBe('joined');
+  });
+});
