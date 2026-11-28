@@ -2,32 +2,6 @@
   "version": 1,
   "repo": "camerontaylor/cq-toolkit",
   "prs": {
-    "2425": {
-      "tuple": {
-        "head": "adf891a66b33174ffb81f0967d4277456e7561cb",
-        "base": "4d3b14654a71198e0310c650a203ca91210f8104",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-27T23:05:56.499Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "2431": {
-      "tuple": {
-        "head": "f848049b8e1160fdb7d4803b2d537da3e3ff3f5d",
-        "base": "f8e364fbf88340d0eaa648597a82367be8d5e67e",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-28T00:10:22.461Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
     "2433": {
       "tuple": {
         "head": "405ef74a3b1c0c2fd0c7149bdacb38cdef579d07",
@@ -76,6 +50,45 @@
       "observations": [
         {
           "observedAt": "2026-11-28T00:25:08.734Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
+    },
+    "2437": {
+      "tuple": {
+        "head": "6b3a9abff880bc07f23cafc55b3297ca93aa7750",
+        "base": "615262287f386977700c9650f318e12b991c49b4",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-11-28T00:49:21.539Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
+    },
+    "2438": {
+      "tuple": {
+        "head": "7b73b77630544fb664b7e816ec2709e528756d03",
+        "base": "615262287f386977700c9650f318e12b991c49b4",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-11-28T00:49:21.539Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
+    },
+    "2439": {
+      "tuple": {
+        "head": "c34affb0bdc1bd90d5f12804c93c8d0c303508b6",
+        "base": "615262287f386977700c9650f318e12b991c49b4",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-11-28T00:49:21.539Z",
           "by": "self-merge-prs:observe"
         }
       ]
