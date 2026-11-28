@@ -61,6 +61,7 @@ interface Harness {
     locked: boolean;
     busy: boolean;
     events: JsonObject[];
+    receiptReads: number;
   };
   callRaw(frameText: string): Promise<JsonObject>;
   call(body: unknown, overrides?: { policy?: unknown; principal?: string }): Promise<JsonObject>;
@@ -74,6 +75,7 @@ function harness(options: { queue?: JsonObject; receipt?: Uint8Array } = {}): Ha
     locked: false,
     busy: false,
     events: [] as JsonObject[],
+    receiptReads: 0,
   };
   const gitCalls: string[][] = [];
   const receipts = new Map<string, Uint8Array>();
@@ -97,6 +99,7 @@ function harness(options: { queue?: JsonObject; receipt?: Uint8Array } = {}): Ha
       }
     },
     readReceipt: async (receiptId) => {
+      state.receiptReads += 1;
       const bytes = receipts.get(receiptId);
       if (bytes === undefined) throw Object.assign(new Error('missing'), { code: 'ENOENT' });
       return bytes;
@@ -503,12 +506,6 @@ describe('repeat submit receipt preload', () => {
       'utf8',
     );
     const h = harness({ receipt });
-    let reads = 0;
-    const inner = h.effects.readReceipt;
-    h.effects.readReceipt = async (id) => {
-      reads += 1;
-      return inner(id);
-    };
     const created = await h.call(frame());
     expect(created.get('action')).toBe('created');
     const itemId = created.get('item');
@@ -523,16 +520,16 @@ describe('repeat submit receipt preload', () => {
         : item,
     );
     h.state.queue = withObjectKeys(h.state.queue, [['items', items]]);
-    expect(reads).toBe(0);
+    expect(h.state.receiptReads).toBe(0);
 
     const repeat = await h.call(frame({ request_id: 'req-2', repeat: true }));
     expect(repeat.get('action')).toBe('created');
     expect(repeat.get('item')).not.toBe(itemId);
-    expect(reads).toBe(0);
+    expect(h.state.receiptReads).toBe(0);
 
     // Control: a non-repeat submit for the same head does verify receipts.
     const plain = await h.call(frame({ request_id: 'req-3' }));
-    expect(reads).toBeGreaterThan(0);
+    expect(h.state.receiptReads).toBeGreaterThan(0);
     expect(plain.get('action')).toBe('joined');
   });
 });
