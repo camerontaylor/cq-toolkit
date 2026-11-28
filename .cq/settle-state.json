@@ -2,32 +2,6 @@
   "version": 1,
   "repo": "camerontaylor/cq-toolkit",
   "prs": {
-    "2480": {
-      "tuple": {
-        "head": "548e57fa3b9066a6e27b328fc575dd1a09e8b1d4",
-        "base": "24c0f2dccff3f5e1445f8fea66f6246032049787",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-28T07:09:25.456Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "2483": {
-      "tuple": {
-        "head": "ddc152073381e92893f6874020238ba462e7940c",
-        "base": "24c0f2dccff3f5e1445f8fea66f6246032049787",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-28T07:09:25.456Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
     "2485": {
       "tuple": {
         "head": "a7470b6291b323196da153d1a04a6906b739c7b0",
@@ -128,6 +102,45 @@
       "observations": [
         {
           "observedAt": "2026-11-28T07:13:13.952Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
+    },
+    "2493": {
+      "tuple": {
+        "head": "a441e459fde8e4c782bdcdaeaa8d917c33dd0a48",
+        "base": "79af977dec745624c27cfeda325a4c104eb0a9d4",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-11-28T07:20:32.967Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
+    },
+    "2494": {
+      "tuple": {
+        "head": "f09d677923981971048c6d43ef030b1e5504fb77",
+        "base": "79af977dec745624c27cfeda325a4c104eb0a9d4",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-11-28T07:20:32.967Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
+    },
+    "2495": {
+      "tuple": {
+        "head": "589ea511d91d86524f05bd445a011e1b9b1fcaea",
+        "base": "79af977dec745624c27cfeda325a4c104eb0a9d4",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-11-28T07:20:32.967Z",
           "by": "self-merge-prs:observe"
         }
       ]
