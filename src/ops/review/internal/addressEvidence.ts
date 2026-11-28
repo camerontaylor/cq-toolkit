@@ -147,7 +147,8 @@ interface TerminalSession {
   bytes: number;
   records: number;
   verifiedHeads?: Map<string, Set<string>>;
-  bookkeeping?: Map<string, string>;
+  /** Untracked-bookkeeping digests per canonical checkout root. */
+  bookkeeping?: Map<string, Map<string, string>>;
 }
 const terminalSessions = new WeakMap<object, Promise<TerminalSession>>();
 export interface AddressTerminalAttemptInput {
@@ -581,7 +582,12 @@ export async function noteAddressTerminalBookkeeping(
   entries: ReadonlyMap<string, string>,
 ) {
   const session = await terminalSession(token, root, false, true);
-  session.bookkeeping = new Map(entries);
+  // One session can serve several checkouts: registering a root must never
+  // drop entries another root recorded, so each canonical root keeps its own
+  // slot and settlement looks up only its own checkout's bookkeeping files.
+  const canonical = await realpath(root);
+  session.bookkeeping ??= new Map();
+  session.bookkeeping.set(canonical, new Map(entries));
 }
 
 /** The private association admits only a candidate created by this worker. */
@@ -984,7 +990,7 @@ export async function settleAddressTerminalEvidence(
         .filter(Boolean);
       for (const file of untracked) {
         const path = resolve(attempt.root, file);
-        const expected = session.bookkeeping?.get(path);
+        const expected = session.bookkeeping?.get(attempt.root)?.get(path);
         if (
           !expected ||
           (await realpath(path)) !== path ||
