@@ -594,24 +594,35 @@ class SubprocessSystemd:
                     + str(path) + ": " + str(exc)[:120])
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
             return "declared drop-in path is not a real directory: " + str(path)
+        declared_names = set(declared)
         try:
-            entries = sorted(path.iterdir())
+            seen = 0
+            for entry in path.iterdir():
+                # The first unexpected name is enough to refuse; do not
+                # materialize the whole directory before checking names.
+                if entry.name not in declared_names:
+                    return ("declared drop-in directory does not contain "
+                            "exactly the declared entries: " + str(path))
+                seen += 1
+                try:
+                    entry_info = os.stat(entry, follow_symlinks=False)
+                except OSError as exc:
+                    return ("declared drop-in entry is unreadable: "
+                            + str(entry) + ": " + str(exc)[:120])
+                if not (stat.S_ISREG(entry_info.st_mode)
+                        or stat.S_ISLNK(entry_info.st_mode)):
+                    return ("declared drop-in entry is not a regular file or "
+                            "symlink: " + str(entry))
+                # No early exit once every declared name is seen: an
+                # undeclared entry may still follow. Names are unique, so
+                # more than len(declared_names) entries implies an undeclared
+                # one, which returns above; the walk is therefore bounded.
+            if seen != len(declared_names):
+                return ("declared drop-in directory does not contain exactly "
+                        "the declared entries: " + str(path))
         except OSError as exc:
             return ("declared drop-in directory is unreadable: "
                     + str(path) + ": " + str(exc)[:120])
-        if {entry.name for entry in entries} != set(declared):
-            return ("declared drop-in directory does not contain exactly the "
-                    "declared entries: " + str(path))
-        for entry in entries:
-            try:
-                entry_info = os.stat(entry, follow_symlinks=False)
-            except OSError as exc:
-                return ("declared drop-in entry is unreadable: "
-                        + str(entry) + ": " + str(exc)[:120])
-            if not (stat.S_ISREG(entry_info.st_mode)
-                    or stat.S_ISLNK(entry_info.st_mode)):
-                return ("declared drop-in entry is not a regular file or "
-                        "symlink: " + str(entry))
         return None
 
     @staticmethod
@@ -972,21 +983,30 @@ class SubprocessSystemd:
                 continue
             if is_dir and name.endswith((".wants", ".requires", ".upholds")):
                 try:
-                    children = list(entry.iterdir())
+                    seen = 0
+                    for child in entry.iterdir():
+                        seen += 1
+                        if seen > MAX_SCAN_ENTRIES:
+                            # Enforce the scan bound while enumerating so a
+                            # large enablement directory is refused instead
+                            # of being materialized in full.
+                            error = error or (
+                                "enablement directory exceeds the dependency "
+                                "scan bound: " + str(entry))
+                            break
+                        if child.is_symlink() \
+                                and os.path.realpath(child) == os.devnull:
+                            # systemd ignores a /dev/null mask in an
+                            # enablement directory.
+                            continue
+                        if child.name.startswith(prefix) \
+                                and str(child) not in declared_set:
+                            foreign.append("unexpected enablement link: "
+                                           + str(child))
                 except OSError as exc:
                     error = error or ("enablement directory is unreadable: "
                                       + str(exc)[:160])
                     continue
-                for child in sorted(children):
-                    if child.is_symlink() \
-                            and os.path.realpath(child) == os.devnull:
-                        # systemd ignores a /dev/null mask in an
-                        # enablement directory.
-                        continue
-                    if child.name.startswith(prefix) \
-                            and str(child) not in declared_set:
-                        foreign.append("unexpected enablement link: "
-                                       + str(child))
 
         scan_error = self._scan_dependencies(
             self.unit_dir, units, declared, foreign, all_dropins)
