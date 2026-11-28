@@ -1827,6 +1827,20 @@ def main(argv=None) -> int:
         if not parser.json_mode:
             print("error: " + message, file=sys.stderr)
         return 1
+    except KeyboardInterrupt as exc:
+        # An operator interrupt (Ctrl-C during, say, SSH readiness) reaches
+        # here only after cmd_boot/cmd_run cleaned up their guest in their
+        # BaseException branch. Without this boundary handler stdout would
+        # carry no JSON artifact in machine mode (I1); _error_message keeps
+        # the notes cleanup attached to the re-raised interrupt. An interrupt
+        # is a thrown error, so it stays inside the exit-code contract (1)
+        # rather than inventing a signal-style code.
+        message = _error_message(exc)
+        print(json.dumps(_error_artifact("interrupted", args.command, message, 1),
+                         indent=2, sort_keys=True))
+        if not parser.json_mode:
+            print("interrupted: " + message, file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
