@@ -149,7 +149,7 @@ def rank4_gate(c, queue, item, dry=False):
         return False
     if not dry:
         state_event(c, queue, item, c.iso(), "atomic quota reservation before launch")
-        day = queue.setdefault("backfill_daily_capacity", {}).setdefault(c.iso()[:10], {"spare_admissions": 0, "completed_partitions": 0})
+        day = queue.setdefault("backfill_daily_capacity", {}).setdefault(c.iso()[:10], {"spare_admissions": 0, "completed_partitions": 0, "completed_T1_partitions": 0})
         day["spare_admissions"] += 1
         c.save_queue(queue)
     return True
@@ -438,8 +438,15 @@ def harvest(c, queue, item, rdir, meta, classification, exit_code, *, terminal_v
     counted_runs = queue.setdefault("backfill_capacity_runs", [])
     if meta["run_id"] not in counted_runs:
         counted_runs.append(meta["run_id"])
-        day = queue.setdefault("backfill_daily_capacity", {}).setdefault(ended_at[:10], {"spare_admissions": 0, "completed_partitions": 0})
+        day = queue.setdefault("backfill_daily_capacity", {}).setdefault(ended_at[:10], {"spare_admissions": 0, "completed_partitions": 0, "completed_T1_partitions": 0})
         day["completed_partitions"] += item["state"] == "publication-pending"
+        # tier_importance carries the partition's min path tier, the same rule
+        # inventory.rank uses for a candidate's tier, so the daily T1 count
+        # matches the T1-only population the capacity estimate divides by.
+        # A legacy row (written before the field existed) stays legacy: adding the key now would
+        # turn that day's earlier, unknown completions into an observed zero-T1 count.
+        if "completed_T1_partitions" in day:
+            day["completed_T1_partitions"] += item["state"] == "publication-pending" and item.get("tier_importance") == "T1"
     c.save_queue(queue)
     if meta.get("worktree") and meta.get("wt_branch"):
         c.remove_worktree(Path(meta["worktree"]), meta["wt_branch"])

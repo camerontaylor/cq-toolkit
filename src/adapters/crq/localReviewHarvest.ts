@@ -1,7 +1,11 @@
 import { lstat, readFile, realpath } from 'node:fs/promises';
 import { isAbsolute, join, relative } from 'node:path';
 import { JsonNumber, JsonObject, toPlainJson } from '../../policy/crq/jsonValue.js';
-import { IdentitySchema, ReceiptSchema } from '../../ops/review/internal/reviewOperation.js';
+import {
+  IdentitySchema,
+  ReceiptSchema,
+  reviewDigest,
+} from '../../ops/review/internal/reviewOperation.js';
 import type { LocalHarvestEffects } from '../../ops/crq/internal/localReviewHarvest.js';
 import { writeLocalReviewReceipt } from './localReviewReceipt.js';
 
@@ -20,7 +24,9 @@ export function validateLocalReviewReceipt(value: JsonObject): void {
   const identity = value.get('identity_inputs');
   if (!(identity instanceof JsonObject)) throw new Error('invalid identity');
   validateLocalReviewIdentity(identity);
-  ReceiptSchema.parse(toPlainJson(value));
+  const receipt = ReceiptSchema.parse(toPlainJson(value));
+  if (reviewDigest(receipt.identity_inputs) !== receipt.identity)
+    throw new Error('receipt identity mismatch');
 }
 
 /** Resolve a regular run artifact without following symlinked run ownership. */

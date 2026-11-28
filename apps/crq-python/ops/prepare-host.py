@@ -714,7 +714,9 @@ def render_units(root, output, sha='HEAD', runtimes=None):
 def render_plists(root, output, overlay_path):
     output.mkdir(parents=True, exist_ok=True)
     replacements = {'@CRQ_ROOT@': str(root / 'apps/crq-python'),
-                    '@OVERLAY@': str(Path(overlay_path).resolve()), '@HOME@': str(Path.home())}
+                    '@OVERLAY@': str(Path(overlay_path).resolve()), '@HOME@': str(Path.home()),
+                    '@XDG_STATE_HOME@': os.environ.get('XDG_STATE_HOME',
+                                                       str(Path.home() / '.local/state'))}
     def replace(value):
         if isinstance(value, str):
             for key, item in replacements.items():

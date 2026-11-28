@@ -360,10 +360,12 @@
           ],
           "backfill_daily_capacity": {
             "2026-11-08": {
-              "completed_partitions": 2
+              "completed_partitions": 2,
+              "completed_T1_partitions": 1
             },
             "2026-11-09": {
-              "completed_partitions": 2
+              "completed_partitions": 2,
+              "completed_T1_partitions": 1
             }
           }
         },
@@ -616,7 +618,377 @@
               }
             ],
             "remaining_eligible_T1_partitions": 2,
-            "estimated_days_at_observed_capacity": 1,
+            "estimated_days_at_observed_capacity": 2,
+            "capacity_estimate_limit": "eligible partitions only; missing daily observations prevent an estimate; held work and unresolved objects remain separately visible",
+            "target_status": "pending"
+          },
+          "required": [],
+          "states": {
+            "pending": 1
+          },
+          "publication_pending": 0,
+          "quarantined_families": 0,
+          "finding_triage": {
+            "status": "not-collected"
+          },
+          "finding_delivery_backlog": {
+            "status": "not-collected"
+          },
+          "spare_quota_admissions": [],
+          "daily_capacity": {
+            "2026-11-08": {
+              "completed_partitions": 2,
+              "completed_T1_partitions": 1
+            },
+            "2026-11-09": {
+              "completed_partitions": 2,
+              "completed_T1_partitions": 1
+            }
+          },
+          "idle_with_coverage_candidate": 0,
+          "strict_T1_zero": false,
+          "operational_target": "zero surviving baseline T1 debt within 14 days, conditional on spare included quota and no unresolved exclusions"
+        }
+      }
+    },
+    {
+      "name": "summary-baseline-legacy-capacity-row-withholds-estimate",
+      "source": "backfill_report.summary",
+      "input": {
+        "ranked": {
+          "manifest_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "target": "5555555555555555555555555555555555555555",
+          "evaluated_at": "2026-11-09T00:00:00Z",
+          "candidates": [
+            {
+              "tier": "T1"
+            },
+            {
+              "tier": "T1"
+            },
+            {
+              "tier": "T2"
+            }
+          ],
+          "required": [],
+          "evidence_gaps": {},
+          "paths": [
+            {
+              "path": "src/a.py",
+              "tier": "T1",
+              "lines": 4,
+              "uncovered": [
+                [
+                  2,
+                  3
+                ]
+              ],
+              "disposition": "included",
+              "reason": "tracked"
+            },
+            {
+              "path": "src/renamed.py",
+              "tier": "T1",
+              "lines": 2,
+              "uncovered": [
+                [
+                  1,
+                  2
+                ]
+              ],
+              "disposition": "included",
+              "reason": "tracked"
+            },
+            {
+              "path": "src/new.py",
+              "tier": "T1",
+              "lines": 2,
+              "uncovered": [
+                [
+                  1,
+                  2
+                ]
+              ],
+              "disposition": "included",
+              "reason": "tracked"
+            },
+            {
+              "path": "src/bad.py",
+              "tier": "T1",
+              "lines": null,
+              "uncovered": [],
+              "disposition": "unsupported",
+              "reason": "binary"
+            }
+          ]
+        },
+        "queue": {
+          "items": [
+            {
+              "kind": "backfill",
+              "state": "pending"
+            }
+          ],
+          "backfill_daily_capacity": {
+            "2026-11-08": {
+              "completed_partitions": 2
+            },
+            "2026-11-09": {
+              "completed_partitions": 2,
+              "completed_T1_partitions": 1
+            }
+          }
+        },
+        "original": {
+          "schema": "cq.backfill-baseline/v1",
+          "target": "1111111111111111111111111111111111111111",
+          "tree": "7777777777777777777777777777777777777777",
+          "manifest_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "ledger_head": "9999999999999999999999999999999999999999",
+          "policy_digest": "8888888888888888888888888888888888888888888888888888888888888888",
+          "pinned_at": "2026-11-08T00:00:00Z",
+          "paths": [
+            {
+              "path": "src/a.py",
+              "blob": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "tier": "T1",
+              "lines": 4,
+              "uncovered": [
+                [
+                  1,
+                  2
+                ]
+              ],
+              "disposition": "included",
+              "reason": "tracked"
+            },
+            {
+              "path": "src/old.py",
+              "blob": "cccccccccccccccccccccccccccccccccccccccc",
+              "tier": "T1",
+              "lines": 2,
+              "uncovered": [
+                [
+                  1,
+                  2
+                ]
+              ],
+              "disposition": "included",
+              "reason": "tracked"
+            },
+            {
+              "path": "src/gone.py",
+              "blob": "dddddddddddddddddddddddddddddddddddddddd",
+              "tier": "T1",
+              "lines": 1,
+              "uncovered": [
+                [
+                  1,
+                  1
+                ]
+              ],
+              "disposition": "included",
+              "reason": "tracked"
+            },
+            {
+              "path": "src/unknown.py",
+              "blob": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "tier": "T1",
+              "lines": 1,
+              "uncovered": [
+                [
+                  1,
+                  1
+                ]
+              ],
+              "disposition": "included",
+              "reason": "tracked"
+            },
+            {
+              "path": "src/bad.py",
+              "blob": "ffffffffffffffffffffffffffffffffffffffff",
+              "tier": "T1",
+              "lines": null,
+              "uncovered": [],
+              "disposition": "unsupported",
+              "reason": "binary"
+            }
+          ],
+          "bounded_partitions": 0,
+          "id": "9d8ff12b65eae6fbaa11e7497c871488a1986c228181070fe4b6af5ea2585505"
+        },
+        "repo": {
+          "tree": {
+            "5555555555555555555555555555555555555555": "6666666666666666666666666666666666666666"
+          },
+          "lineage": [
+            {
+              "old": "1111111111111111111111111111111111111111",
+              "new": "5555555555555555555555555555555555555555",
+              "path": "src/a.py",
+              "result": "src/a.py"
+            },
+            {
+              "old": "1111111111111111111111111111111111111111",
+              "new": "5555555555555555555555555555555555555555",
+              "path": "src/old.py",
+              "result": "src/renamed.py"
+            },
+            {
+              "old": "1111111111111111111111111111111111111111",
+              "new": "5555555555555555555555555555555555555555",
+              "path": "src/gone.py",
+              "result": null
+            },
+            {
+              "old": "1111111111111111111111111111111111111111",
+              "new": "5555555555555555555555555555555555555555",
+              "path": "src/unknown.py",
+              "result": null
+            },
+            {
+              "old": "1111111111111111111111111111111111111111",
+              "new": "5555555555555555555555555555555555555555",
+              "path": "src/bad.py",
+              "result": "src/bad.py"
+            }
+          ],
+          "proven_deleted": [
+            {
+              "old": "1111111111111111111111111111111111111111",
+              "new": "5555555555555555555555555555555555555555",
+              "path": "src/gone.py",
+              "result": true
+            },
+            {
+              "old": "1111111111111111111111111111111111111111",
+              "new": "5555555555555555555555555555555555555555",
+              "path": "src/unknown.py",
+              "result": false
+            }
+          ],
+          "carry": [
+            {
+              "old": "1111111111111111111111111111111111111111",
+              "new": "5555555555555555555555555555555555555555",
+              "path": "src/a.py",
+              "result": "src/a.py",
+              "mapped": [
+                [
+                  1,
+                  1
+                ],
+                [
+                  2,
+                  2
+                ],
+                [
+                  3,
+                  3
+                ],
+                [
+                  4,
+                  4
+                ]
+              ]
+            },
+            {
+              "old": "1111111111111111111111111111111111111111",
+              "new": "5555555555555555555555555555555555555555",
+              "path": "src/old.py",
+              "result": "src/renamed.py",
+              "mapped": [
+                [
+                  1,
+                  1
+                ],
+                [
+                  2,
+                  2
+                ]
+              ]
+            },
+            {
+              "old": "1111111111111111111111111111111111111111",
+              "new": "5555555555555555555555555555555555555555",
+              "path": "src/bad.py",
+              "result": "src/bad.py",
+              "mapped": []
+            }
+          ]
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "manifest_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "target": "5555555555555555555555555555555555555555",
+          "tiers": {
+            "T1": {
+              "covered_lines": 2,
+              "uncovered_lines": 6,
+              "unresolved_objects": [
+                {
+                  "path": "src/bad.py",
+                  "reason": "binary",
+                  "countable_lines": null
+                }
+              ],
+              "empty_files": 0
+            },
+            "T2": {
+              "covered_lines": 0,
+              "uncovered_lines": 0,
+              "unresolved_objects": [],
+              "empty_files": 0
+            },
+            "T3": {
+              "covered_lines": 0,
+              "uncovered_lines": 0,
+              "unresolved_objects": [],
+              "empty_files": 0
+            },
+            "T4": {
+              "covered_lines": 0,
+              "uncovered_lines": 0,
+              "unresolved_objects": [],
+              "empty_files": 0
+            }
+          },
+          "baseline": {
+            "id": "9d8ff12b65eae6fbaa11e7497c871488a1986c228181070fe4b6af5ea2585505",
+            "target": "1111111111111111111111111111111111111111",
+            "surviving_T1_debt": 3,
+            "baseline_T1_reviewed_since": 1,
+            "baseline_T1_removed_or_superseded": 1,
+            "new_T1_debt": 2,
+            "unresolved_baseline_objects": [
+              {
+                "path": "src/unknown.py",
+                "blob": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                "tier": "T1",
+                "lines": 1,
+                "uncovered": [
+                  [
+                    1,
+                    1
+                  ]
+                ],
+                "disposition": "included",
+                "reason": "unverified baseline lineage"
+              },
+              {
+                "path": "src/bad.py",
+                "blob": "ffffffffffffffffffffffffffffffffffffffff",
+                "tier": "T1",
+                "lines": null,
+                "uncovered": [],
+                "disposition": "unsupported",
+                "reason": "unmeasurable current object"
+              }
+            ],
+            "remaining_eligible_T1_partitions": 2,
+            "estimated_days_at_observed_capacity": null,
             "capacity_estimate_limit": "eligible partitions only; missing daily observations prevent an estimate; held work and unresolved objects remain separately visible",
             "target_status": "pending"
           },
@@ -638,7 +1010,8 @@
               "completed_partitions": 2
             },
             "2026-11-09": {
-              "completed_partitions": 2
+              "completed_partitions": 2,
+              "completed_T1_partitions": 1
             }
           },
           "idle_with_coverage_candidate": 0,
