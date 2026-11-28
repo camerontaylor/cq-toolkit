@@ -217,9 +217,10 @@ class GuestFixtureAdapter:
         result = self.run_command(argv, timeout=timeout)
         if result.get("timeout") or result.get("rc") != 0:
             self.refuse("systemctl list-jobs failed; job absence is unknown")
-        if result.get("stdout_truncated"):
-            self.refuse("systemctl list-jobs output was truncated; "
-                        "job absence is unknown")
+        if result.get("stdout_truncated") is not False:
+            # A runner that does not report completeness cannot prove absence.
+            self.refuse("systemctl list-jobs output was truncated or its "
+                        "completeness is unreported; job absence is unknown")
         stdout = result.get("stdout")
         if not isinstance(stdout, str):
             self.refuse("systemctl list-jobs returned no text")

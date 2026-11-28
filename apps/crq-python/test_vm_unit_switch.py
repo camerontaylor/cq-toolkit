@@ -2582,7 +2582,7 @@ class PartialHarnessCheckTests(unittest.TestCase):
                         "queue_drain": {"drained": True, "blocked": []},
                         "jobs": [],
                         "jobs_observation": {
-                            "command": {"argv": harness.LIST_JOBS_ARGV,
+                            "command": {"argv": harness.DRAIN_LIST_JOBS_ARGV,
                                         "rc": 0, "timeout": False,
                                         "stdout": "", "stderr": ""},
                             "lines": []},
@@ -2866,6 +2866,34 @@ class PartialHarnessCheckTests(unittest.TestCase):
             harness._verify_partial_raw({}, root, problems, phases_value)
             self.assertTrue(any("record set is not one" in item
                                 for item in problems))
+
+    def test_drain_job_observation_requires_scoped_argv(self):
+        obs = {"command": {"argv": list(harness.DRAIN_LIST_JOBS_ARGV),
+                           "rc": 0, "timeout": False, "stdout": "",
+                           "stderr": ""},
+               "lines": []}
+        scoped = harness.DRAIN_LIST_JOBS_ARGV
+        self.assertEqual(scoped[-3:], [harness.REPAIR_UNIT,
+                                       harness.REPAIR_TIMER,
+                                       harness.REPAIR_PATH])
+        self.assertTrue(harness._job_observation_ok(
+            obs, "drain", [], [], expected_argv=scoped))
+        # The unfiltered argv is no longer drain evidence, and the scoped
+        # argv is not the complete-queue evidence.
+        self.assertFalse(harness._job_observation_ok(
+            obs, "drain", [], [], expected_argv=harness.LIST_JOBS_ARGV))
+        self.assertFalse(harness._job_observation_ok(obs, "seed", [], []))
+        old = copy.deepcopy(obs)
+        old["command"]["argv"] = list(harness.LIST_JOBS_ARGV)
+        self.assertFalse(harness._job_observation_ok(
+            old, "drain", [], [], expected_argv=scoped))
+        guest = {"rc": 3, "json": {
+            "recovery_required": {"reason": "activation may have occurred"},
+            "drain": {"queue_drain": {"drained": True},
+                      "jobs_observation": old, "jobs": []}}}
+        with self.assertRaises(RuntimeError) as ctx:
+            guest_partial.require_fence(guest, "probe")
+        self.assertIn("list-jobs evidence", str(ctx.exception))
 
     def test_partial_rejects_contradictory_recovery_commands(self):
         cases = (

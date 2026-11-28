@@ -108,7 +108,7 @@ class FakeSystemd:
                         "stderr": "", "timeout": False}
             if rest[0] == "list-jobs":
                 return {"argv": argv, "rc": 0, "stdout": "", "stderr": "",
-                        "timeout": False}
+                        "timeout": False, "stdout_truncated": False}
             if rest[0] == "daemon-reload":
                 self.masked = self.service.is_symlink()
                 return {"argv": argv, "rc": 0, "stdout": "", "stderr": "",
@@ -219,7 +219,7 @@ class RepairSystemd:
                         "stderr": "", "timeout": False}
             if rest[0] == "list-jobs":
                 return {"argv": argv, "rc": 0, "stdout": "", "stderr": "",
-                        "timeout": False}
+                        "timeout": False, "stdout_truncated": False}
             if rest[0] == "daemon-reload":
                 self.masked = self.paths[adapter_mod.REPAIR_UNIT].is_symlink()
                 return {"argv": argv, "rc": 0, "stdout": "", "stderr": "",
@@ -610,6 +610,28 @@ class AdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "malformed"):
             self.adapter.stop_and_drain(UNIT)
         self.assertTrue(self.fake.masked)
+
+    def test_stop_drain_scopes_list_jobs_to_owned_units(self):
+        self._snapshot()
+        self.adapter.queue_drain = lambda: {"drained": True, "blocked": []}
+        drain = self.adapter.stop_and_drain(UNIT)
+        argv = drain["jobs_observation"]["command"]["argv"]
+        self.assertEqual(argv[:5], ["systemctl", "--user", "list-jobs",
+                                    "--no-legend", "--no-pager"])
+        self.assertIn(UNIT, argv[5:])
+        self.assertGreater(len(argv), 5)
+
+    def test_list_jobs_refuses_truncated_or_unreported_output(self):
+        for extra in ({"stdout_truncated": True}, {}):
+            def runner(argv, timeout, extra=extra):
+                return dict({"argv": argv, "rc": 0, "stdout": "",
+                             "stderr": "", "timeout": False}, **extra)
+
+            self.adapter.runner = runner
+            with self.assertRaisesRegex(RuntimeError,
+                                        "truncated|completeness"):
+                self.adapter._jobs([UNIT])
+            self.assertIsNone(self.adapter.last_jobs_observation)
 
     def test_failed_list_jobs_clears_stale_empty_observation(self):
         self.adapter.last_jobs_observation = {

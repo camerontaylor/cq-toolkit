@@ -1717,6 +1717,9 @@ def _job_lines_ok(lines, label, problems):
 
 LIST_JOBS_ARGV = ["systemctl", "--user", "list-jobs", "--no-legend",
                   "--no-pager"]
+# The drain absence check is scoped to the owned units by the adapter.
+DRAIN_LIST_JOBS_ARGV = LIST_JOBS_ARGV + [REPAIR_UNIT, REPAIR_TIMER,
+                                         REPAIR_PATH]
 
 
 def _job_observation_lines(observation):
@@ -1732,14 +1735,16 @@ def _job_observation_lines(observation):
     return stdout.splitlines()
 
 
-def _job_observation_ok(observation, label, problems, lines=None):
+def _job_observation_ok(observation, label, problems, lines=None,
+                        expected_argv=None):
     command = observation.get("command") if isinstance(observation, dict) else None
     argv = command.get("argv") if isinstance(command, dict) else None
     derived = _job_observation_lines(observation)
     retained = observation.get("lines") if isinstance(observation, dict) else None
     ok = (isinstance(observation, dict)
           and _command_ok(command, label, problems)
-          and argv == LIST_JOBS_ARGV
+          and argv == (LIST_JOBS_ARGV if expected_argv is None
+                       else expected_argv)
           and derived is not None
           and _job_lines_ok(derived, label, problems)
           and retained == derived
@@ -2478,7 +2483,8 @@ def _activator_checks(phases):
             and _fence_job_ok(queue_seed, during, problems)
             and drain.get("jobs") == []
             and _job_observation_ok(drain_jobs_observation,
-                                    "fence drain job observation", problems, [])
+                                    "fence drain job observation", problems, [],
+                                    expected_argv=DRAIN_LIST_JOBS_ARGV)
             and _command_ok(drain.get("service_stop"),
                             "fence service stop", problems, allowed=(0, 5))
             and _command_ok(blocker_stop, "fence blocker stop", problems)
@@ -2956,7 +2962,8 @@ def _partial_fence_ok(cli, label, problems):
         problems.append(label + " queue drain is not a bounded success")
     observation = drain.get("jobs_observation")
     if not _job_observation_ok(observation, label + " job observation",
-                               problems, []):
+                               problems, [],
+                               expected_argv=DRAIN_LIST_JOBS_ARGV):
         problems.append(label + " job observation is not the exact bounded "
                         "list-jobs absence")
     if drain.get("jobs") != []:
