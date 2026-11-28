@@ -1420,6 +1420,47 @@ class LifecycleTests(unittest.TestCase):
             self.assertEqual((run_dir / "qemu.log").read_bytes(), b"launch 1\n")
             self.assertEqual((run_dir / "qemu.log.1").read_bytes(), b"launch 2\n")
 
+    def test_boot_propagates_an_interrupt_without_retrying(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = pathlib.Path(temporary) / "r1"
+            run_dir.mkdir()
+            run = {"run_id": "r1", "path": str(run_dir), "port": 2222}
+
+            class Interrupted:
+                pid = 4321
+                fired = False
+
+                def poll(self):
+                    if not Interrupted.fired:
+                        Interrupted.fired = True
+                        raise KeyboardInterrupt
+                    return 1
+
+            popen = mock.Mock(side_effect=lambda *a, **k: Interrupted())
+            recorder = vm.Recorder(run_dir)
+            with mock.patch.object(vm, "require_memory"), \
+                 mock.patch.object(vm, "tool", return_value="/bin/true"), \
+                 mock.patch.object(vm, "free_port", return_value=2223), \
+                 mock.patch.object(vm, "port_held", return_value=True), \
+                 mock.patch.object(vm.subprocess, "Popen", popen):
+                with self.assertRaises(KeyboardInterrupt):
+                    vm.boot(run, recorder, None, {"kvm_writable": True})
+            self.assertEqual(popen.call_count, 1)
+
+    def test_pid_file_error_names_the_attempt_log(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = pathlib.Path(temporary) / "r1"
+            run_dir.mkdir()
+            run = {"run_id": "r1", "path": str(run_dir), "port": 2222}
+            outcome, _ = self._boot_with(run_dir, run, [], lambda port: False)
+            self.assertIn("see qemu.log", str(outcome))
+            run = {"run_id": "r1", "path": str(run_dir), "port": 2222}
+            held = iter([True, True, False])
+            outcome, _ = self._boot_with(
+                run_dir, run, [2223, 2224], lambda port: next(held))
+            self.assertIsInstance(outcome, RuntimeError)
+            self.assertIn("qemu.log.2", str(outcome.__cause__))
+
     def test_boot_does_not_retry_when_the_port_is_free(self):
         with tempfile.TemporaryDirectory() as temporary:
             run_dir = pathlib.Path(temporary) / "r1"

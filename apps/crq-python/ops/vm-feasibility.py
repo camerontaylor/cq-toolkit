@@ -810,7 +810,8 @@ def boot(run: dict, recorder: Recorder, tools: pathlib.Path | None,
             pid_path = run_dir / "qemu.pid"
             while time.time() < deadline and not pid_path.exists():
                 if process.poll() is not None:
-                    raise RuntimeError("QEMU exited before writing its pid file; see qemu.log")
+                    raise RuntimeError(
+                        "QEMU exited before writing its pid file; see %s" % log_name)
                 time.sleep(0.25)
             if not pid_path.exists():
                 raise RuntimeError("QEMU did not write a pid file")
@@ -843,7 +844,8 @@ def boot(run: dict, recorder: Recorder, tools: pathlib.Path | None,
                     process.wait(timeout=10)
                 except subprocess.TimeoutExpired:
                     process.kill()
-            if launches < PORT_ATTEMPTS and port_held(port):
+            if (isinstance(failure, Exception) and launches < PORT_ATTEMPTS
+                    and port_held(port)):
                 continue
             if launches > 1 and isinstance(failure, Exception):
                 raise RuntimeError(
