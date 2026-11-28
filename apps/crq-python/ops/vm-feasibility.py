@@ -283,6 +283,22 @@ def free_port(start: int = 2222, end: int = 2299) -> int:
     raise ValueError("no free forwarded port in range")
 
 
+# Bound the launch retries in boot(): the port is claimed at launch and can
+# lose the bind race to another process a few times before one sticks.
+PORT_ATTEMPTS = 3
+
+
+def port_held(port: int) -> bool:
+    """True when something still binds the forwarded port on the host, the
+    sign that QEMU just failed to acquire it."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        try:
+            sock.bind(("127.0.0.1", port))
+        except OSError:
+            return True
+    return False
+
+
 def process_starttime(pid: int, proc: pathlib.Path = pathlib.Path("/proc")):
     text = (proc / str(pid) / "stat").read_text()
     return text.rsplit(") ", 1)[1].split()[19]
@@ -683,8 +699,12 @@ def prepare_run(state: pathlib.Path, image: dict, recorder: Recorder,
                   "-b", image["path"], "-F", "qcow2",
                   str(run / "overlay.qcow2"), OVERLAY_SIZE],
                  check=True, cwd=run)
+    # The forwarded port is deliberately not picked here: free_port() closes
+    # its probe socket before returning, so a port stored at preparation can
+    # already be gone by launch time, and two runs prepared before either
+    # boots could both store 2222. boot() claims a port under the run lock.
     return {"run_id": run_id, "path": str(run), "image": image,
-            "port": free_port(), "started_at": utc_now()}
+            "port": None, "started_at": utc_now()}
 
 
 def live_identity(run: dict) -> dict | None:
@@ -741,69 +761,89 @@ def boot(run: dict, recorder: Recorder, tools: pathlib.Path | None,
     if not stamp["kvm_writable"]:
         raise ValueError("/dev/kvm is not writable; no KVM acceleration")
     run_dir = pathlib.Path(run["path"])
-    # A stopped run must leave no pid file or identity behind for this launch
-    # to misread: drop the stale files so the wait below and the identity write
-    # capture the process this launch actually starts. A live run never reaches
-    # this point -- the callers refuse it under the run lock first.
-    for stale in ("process.json", "qemu.pid"):
-        try:
-            (run_dir / stale).unlink()
-        except FileNotFoundError:
-            pass
     unit = run_scope_unit(run_dir, run["run_id"])
     scope_unit = unit + ".scope"
-    qemu = qemu_command(run_dir, run["port"])
-    qemu[0] = tool("qemu-system-x86_64", tools)
-    argv = bounded_scope_argv(qemu, unit)
-    log = (run_dir / "qemu.log").open("wb")
-    process = subprocess.Popen(argv, cwd=run_dir, stdout=log, stderr=subprocess.STDOUT,
-                               start_new_session=True)
-    try:
-        # The launch record is written inside the guarded block so a failure
-        # here cannot skip the cleanup below: the spawned child is terminated
-        # and reaped before the run lock is released, before it can start
-        # QEMU after this process exits.
-        recorder.append({"at": utc_now(), "argv": argv, "spawned_pid": process.pid,
-                         "scope_unit": scope_unit})
-        deadline = time.time() + 30
-        pid_path = run_dir / "qemu.pid"
-        while time.time() < deadline and not pid_path.exists():
-            if process.poll() is not None:
-                raise RuntimeError("QEMU exited before writing its pid file; see qemu.log")
-            time.sleep(0.25)
-        if not pid_path.exists():
-            raise RuntimeError("QEMU did not write a pid file")
-        pid = int(pid_path.read_text().strip())
-        starttime = process_starttime(pid)
-        (run_dir / "process.json").write_text(json.dumps(
-            {"pid": pid, "starttime": starttime, "scope_unit": scope_unit},
-            indent=2) + "\n")
-    except BaseException:
-        identity_ok = False
-        identity_path = run_dir / "process.json"
-        if identity_path.exists():
+    # The forwarded port is claimed at launch, not at preparation: free_port()
+    # closes its probe socket before returning, so two runs prepared together
+    # can both store 2222, the first VM to bind wins, and every retry of the
+    # loser would read the same unusable port from run.json. The choice is
+    # made here under the run lock, and a launch that lost the bind race
+    # retries on a fresh port without touching the port the winning VM holds.
+    chosen = run["port"]
+    attempted: set[int] = set()
+    while True:
+        port = run["port"]
+        if port is None or port in attempted:
+            port = free_port()
+        attempted.add(port)
+        run["port"] = port
+        # A stopped run must leave no pid file or identity behind for this
+        # launch to misread: drop the stale files so the wait below and the
+        # identity write capture the process this launch actually starts. A
+        # live run never reaches this point -- the callers refuse it under the
+        # run lock first.
+        for stale in ("process.json", "qemu.pid"):
             try:
-                identity = json.loads(identity_path.read_text())
-                pid = identity.get("pid")
-                identity_ok = (
-                    isinstance(pid, int)
-                    and identity.get("scope_unit") == scope_unit
-                    and process_matches(pid, identity.get("starttime"),
-                                        str(run_dir / "overlay.qcow2")))
-            except (OSError, ValueError):
-                identity_ok = False
-        if identity_ok:
-            subprocess.run(["systemctl", "--user", "stop", scope_unit],
-                           capture_output=True, text=True)
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-        raise
-    finally:
-        log.close()
+                (run_dir / stale).unlink()
+            except FileNotFoundError:
+                pass
+        qemu = qemu_command(run_dir, port)
+        qemu[0] = tool("qemu-system-x86_64", tools)
+        argv = bounded_scope_argv(qemu, unit)
+        log = (run_dir / "qemu.log").open("wb")
+        process = subprocess.Popen(argv, cwd=run_dir, stdout=log, stderr=subprocess.STDOUT,
+                                   start_new_session=True)
+        try:
+            # The launch record is written inside the guarded block so a failure
+            # here cannot skip the cleanup below: the spawned child is terminated
+            # and reaped before the run lock is released, before it can start
+            # QEMU after this process exits.
+            recorder.append({"at": utc_now(), "argv": argv, "spawned_pid": process.pid,
+                             "scope_unit": scope_unit})
+            deadline = time.time() + 30
+            pid_path = run_dir / "qemu.pid"
+            while time.time() < deadline and not pid_path.exists():
+                if process.poll() is not None:
+                    raise RuntimeError("QEMU exited before writing its pid file; see qemu.log")
+                time.sleep(0.25)
+            if not pid_path.exists():
+                raise RuntimeError("QEMU did not write a pid file")
+            pid = int(pid_path.read_text().strip())
+            starttime = process_starttime(pid)
+            (run_dir / "process.json").write_text(json.dumps(
+                {"pid": pid, "starttime": starttime, "scope_unit": scope_unit},
+                indent=2) + "\n")
+            break
+        except BaseException:
+            identity_ok = False
+            identity_path = run_dir / "process.json"
+            if identity_path.exists():
+                try:
+                    identity = json.loads(identity_path.read_text())
+                    pid = identity.get("pid")
+                    identity_ok = (
+                        isinstance(pid, int)
+                        and identity.get("scope_unit") == scope_unit
+                        and process_matches(pid, identity.get("starttime"),
+                                            str(run_dir / "overlay.qcow2")))
+                except (OSError, ValueError):
+                    identity_ok = False
+            if identity_ok:
+                subprocess.run(["systemctl", "--user", "stop", scope_unit],
+                               capture_output=True, text=True)
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+            if len(attempted) < PORT_ATTEMPTS and port_held(port):
+                continue
+            raise
+        finally:
+            log.close()
+    if run["port"] != chosen:
+        save_json(run_dir / "run.json", run)
     return {"pid": pid, "starttime": starttime, "scope_unit": scope_unit,
             "spawned_pid": process.pid, "qemu": argv, "port": run["port"]}
 
@@ -1333,9 +1373,6 @@ def _cleanup_diagnostic(args, prefix: str, cleanup_error: Exception,
 def cmd_boot(args) -> int:
     state = pathlib.Path(args.state_dir).expanduser().resolve()
     run = load_run(state, args.run_id, require_process=False)
-    if not run["port"]:
-        run["port"] = free_port()
-        save_json(pathlib.Path(run["path"]) / "run.json", run)
     recorder = Recorder(pathlib.Path(run["path"]))
     stamp = host_stamp()
     entered_boot = False
