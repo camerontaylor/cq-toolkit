@@ -241,7 +241,7 @@ def project(args: argparse.Namespace) -> Dict[str, Any]:
     unknown_kinds = 0
     for item in items:
         kind = item.get("kind") if isinstance(item, dict) else None
-        if kind in ITEM_KINDS:
+        if isinstance(kind, str) and kind in ITEM_KINDS:
             by_kind[kind].append(item)
         else:
             unknown_kinds += 1
