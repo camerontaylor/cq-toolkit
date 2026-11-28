@@ -2,28 +2,15 @@
   "version": 1,
   "repo": "camerontaylor/cq-toolkit",
   "prs": {
-    "2441": {
-      "tuple": {
-        "head": "98c014e4f35e5af59a076e6069802a3e44541279",
-        "base": "f568a1c9ef932a4c36f5285928d93894c0e8051b",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-28T01:16:52.788Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
     "2442": {
       "tuple": {
-        "head": "d6ed34a9dc11da631bb5d778be5f21e8d9b412b6",
+        "head": "c88b1ff1412e1e60460e27a5f7f5d0dc4b1d1920",
         "base": "aa034b1284e13b230575a47c3b70d1d28760c5a4",
         "forcePushEpoch": 0
       },
       "observations": [
         {
-          "observedAt": "2026-11-28T01:24:54.110Z",
+          "observedAt": "2026-11-28T02:40:49.606Z",
           "by": "self-merge-prs:observe"
         }
       ]
@@ -43,13 +30,13 @@
     },
     "2444": {
       "tuple": {
-        "head": "247f69b0b0c17f0978d19a40fdd5d6f8f779cbf7",
-        "base": "8edcb9e2110f1d86413d238c439624fd16749647",
+        "head": "1a68a4dfc9c82732d662215fb5d1b0d2f34d9aed",
+        "base": "0197386fe87c0927742f360ee6a85caca7a4248f",
         "forcePushEpoch": 0
       },
       "observations": [
         {
-          "observedAt": "2026-11-28T01:37:31.353Z",
+          "observedAt": "2026-11-28T02:40:49.606Z",
           "by": "self-merge-prs:observe"
         }
       ]
@@ -69,13 +56,13 @@
     },
     "2446": {
       "tuple": {
-        "head": "eec4e4485c736acd1ea10b13203eb36ce1d0263a",
-        "base": "626112553d8bc45dbcfdf2bc48536dd0c351a813",
+        "head": "91fa3e1202b64a39a59d1543d7a840689002587e",
+        "base": "0197386fe87c0927742f360ee6a85caca7a4248f",
         "forcePushEpoch": 0
       },
       "observations": [
         {
-          "observedAt": "2026-11-28T01:53:05.869Z",
+          "observedAt": "2026-11-28T02:40:49.606Z",
           "by": "self-merge-prs:observe"
         }
       ]
