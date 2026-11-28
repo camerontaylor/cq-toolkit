@@ -2867,6 +2867,44 @@ class PartialHarnessCheckTests(unittest.TestCase):
             self.assertTrue(any("record set is not one" in item
                                 for item in problems))
 
+    def test_full_fence_drain_uses_scoped_job_argv(self):
+        # Drives the activators-fence call site in _activator_checks and
+        # records the argv it demands of the drain observation.
+        seen = []
+
+        def spy(observation, label, problems, lines=None,
+                expected_argv=None):
+            seen.append((label, expected_argv))
+            return False
+
+        runtime = {"outcome": "completed", "phase": "activation_pending",
+                   "unit": harness.REPAIR_UNIT,
+                   "runtime": harness.NODE_RUNTIME,
+                   "prior_runtime": harness.PYTHON_RUNTIME,
+                   "transaction_id": "t"}
+        fence = {"cli": {"rc": 0, "pause_reached": True, "timeout": False,
+                         "json": {"record": {
+                             "transaction_id": "t",
+                             "snapshot_runtime": harness.PYTHON_RUNTIME,
+                             "snapshot_paths": list(
+                                 harness.REPAIR_PATHS.values())},
+                             "drain": {"jobs": []}}},
+                 "record": runtime,
+                 "before": {"repair_files": {"staged": {"type": "missing"}}},
+                 "after": {"repair_files": {"staged": {"type": "missing"}}}}
+        phases = {"prepare": {"snapshot": {}, "prepared": {
+                      "state": {"x": 1}, "history_sha256": "h"}},
+                  "activators-fence": fence}
+        always = lambda *a, **k: True
+        with mock.patch.multiple(
+                harness, _job_observation_ok=spy, _fence_completion_ok=always,
+                _fence_records_ok=always, _stat_file=always,
+                _stat_link=always, _unit_ok=always, _fence_job_ok=always):
+            harness._activator_checks(phases)
+        self.assertEqual(
+            [item for item in seen if "fence drain" in item[0]],
+            [("fence drain job observation", harness.DRAIN_LIST_JOBS_ARGV)])
+
     def test_drain_job_observation_requires_scoped_argv(self):
         obs = {"command": {"argv": list(harness.DRAIN_LIST_JOBS_ARGV),
                            "rc": 0, "timeout": False, "stdout": "",
