@@ -133,6 +133,23 @@ class CoverageRepairDebtTest(unittest.TestCase):
         policy.record_legacy_success(q, old, [AFFECTED])
         self.assertTrue(q["backfill_families"][family]["quarantined"])
 
+    def test_legacy_success_keeps_counters_for_released_family(self):
+        # Built directly from the state dict: the public API never leaves a
+        # released family with un-quarantined counters.
+        q = queue("blocked")
+        old = q["items"][1]; old.update(coverage_source="source", pr=1, cycles=[])
+        family = policy._legacy_family(1, AFFECTED)
+        q["backfill_families"] = {family: {"failures": 3}}
+        q["backfill_scope_failures"] = {family: {"failures": 3}}
+        q["legacy_coverage_releases"] = [{"family": family, "floors": [3, 3]}]
+        policy.record_legacy_success(q, old, [AFFECTED])
+        self.assertEqual(q["backfill_families"][family]["failures"], 3)
+        self.assertEqual(q["backfill_scope_failures"][family]["failures"], 3)
+        del q["legacy_coverage_releases"]
+        policy.record_legacy_success(q, old, [AFFECTED])
+        self.assertNotIn(family, q["backfill_families"])
+        self.assertNotIn(family, q["backfill_scope_failures"])
+
     def test_legacy_retry_history_follows_verified_source_alias(self):
         q = queue("blocked")
         old = q["items"][1]; old.update(coverage_source="source", pr=1, cycles=[])
