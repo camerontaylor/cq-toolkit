@@ -1236,8 +1236,8 @@ def backfill_report_vectors() -> Dict[str, Any]:
     baseline_queue = {
         "items": [{"kind": "backfill", "state": "pending"}],
         "backfill_daily_capacity": {
-            "2026-11-08": {"completed_partitions": 2},
-            "2026-11-09": {"completed_partitions": 2},
+            "2026-11-08": {"completed_partitions": 2, "completed_T1_partitions": 1},
+            "2026-11-09": {"completed_partitions": 2, "completed_T1_partitions": 1},
         },
     }
     baseline_case_two = _capture(
@@ -1248,7 +1248,24 @@ def backfill_report_vectors() -> Dict[str, Any]:
         lambda: backfill_report.summary(_ReportRepo(report_repo), baseline_ranked,
                                         baseline_queue, original))
 
-    return _family("backfill-report", [baseline_case, mixed_case, baseline_case_two])
+    # A record without completed_T1_partitions (written before the field existed) is a
+    # missing observation, so the estimate must be withheld rather than read as a zero-T1 day.
+    legacy_queue = {
+        "items": [{"kind": "backfill", "state": "pending"}],
+        "backfill_daily_capacity": {
+            "2026-11-08": {"completed_partitions": 2},
+            "2026-11-09": {"completed_partitions": 2, "completed_T1_partitions": 1},
+        },
+    }
+    legacy_case = _capture(
+        "summary-baseline-legacy-capacity-row-withholds-estimate",
+        "backfill_report.summary",
+        {"ranked": baseline_ranked, "queue": legacy_queue,
+         "original": original, "repo": report_repo},
+        lambda: backfill_report.summary(_ReportRepo(report_repo), baseline_ranked,
+                                        legacy_queue, original))
+
+    return _family("backfill-report", [baseline_case, mixed_case, baseline_case_two, legacy_case])
 
 
 # --------------------------------------------------------------- status helpers
