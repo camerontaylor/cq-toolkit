@@ -1990,10 +1990,19 @@ class PlanTests(unittest.TestCase):
         subcommands = (["plan"], ["fetch"], ["prepare"], ["boot"],
                        ["phase", "install"], ["restart-manager"], ["reboot"],
                        ["run"], ["destroy"])
-        with tempfile.TemporaryDirectory() as temporary:
-            state = pathlib.Path(temporary) / "probe,local"
+        def forbidden(*_args, **_kwargs):
+            raise AssertionError("refusal missing: I/O attempted before it")
+
+        # A missing refusal must fail fast: no download, subprocess or
+        # socket work may run, so the failure path has no side effects.
+        with mock.patch.object(vm.urllib.request, "urlopen", forbidden), \
+                mock.patch.object(vm.subprocess, "run", forbidden), \
+                mock.patch.object(vm.subprocess, "Popen", forbidden), \
+                mock.patch.object(vm.socket, "socket", forbidden):
             for command in subcommands:
-                with self.subTest(command=command[0]):
+                with self.subTest(command=command[0]), \
+                        tempfile.TemporaryDirectory() as temporary:
+                    state = pathlib.Path(temporary) / "probe,local"
                     out, err = io.StringIO(), io.StringIO()
                     with contextlib.redirect_stdout(out), \
                             contextlib.redirect_stderr(err):
