@@ -141,8 +141,9 @@ construction-time schema — the request rides `OpInvocation.outputSchema`
 Isolation contract (I6): no `sessionRef` → fresh empty session record
 (`SessionStore.create`); with no `workspace` binding it lands in a fresh
 temp workspace (`harness.tempWorkspace`); a bound `workspace` instead
-hosts the fresh record IN realpath(workspace.path) and the tools bind
-there; `sessionRef` → `SessionStore.load` resumes the recorded messages
+becomes the fresh record's workspace (the tools bind in
+`realpath(workspace.path)`). The record itself is always stored in
+`sessionsDir`, which must be outside the workspace; `sessionRef` → `SessionStore.load` resumes the recorded messages
 AND workspace; unknown sessionRef throws. Session turns persist in our
 `SessionMessage` vocabulary only — never vendor message shapes.
 

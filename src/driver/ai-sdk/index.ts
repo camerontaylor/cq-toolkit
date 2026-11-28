@@ -70,8 +70,8 @@
 //     `SessionStore.create()` — a fresh record with zero messages in a
 //     workspace nothing has ever touched: the invocation shares NOTHING
 //     with a previous one. When the invocation carries a `workspace`
-//     binding (ADR-0002 §2.4), the fresh record is instead created IN
-//     realpath(workspace.path) and the tools bind there; a workspace set
+//     binding (ADR-0002 §2.4), the fresh record instead names
+//     realpath(workspace.path) as its workspace and the tools bind there; a workspace set
 //     alongside a sessionRef must record the SAME realpath (else a
 //     pre-dispatch config throw). Session records stay in the lane's
 //     sessionsDir — never inside the workspace.
