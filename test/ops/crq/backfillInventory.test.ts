@@ -115,6 +115,17 @@ describe('backfill inventory route', () => {
     expect(recorder.writes.size).toBe(0);
   });
 
+  test.each([true, 7, null, '', '   '])(
+    'a non-string or blank durable_artifact_root (%j) is refused with exit 3',
+    async (root) => {
+      const recorder = memoryEffects({ rollout: { ...ROLLOUT, durable_artifact_root: root } });
+      const result = await runBackfillInventory(['--report-only'], recorder.effects);
+      expect(result.exitCode).toBe(3);
+      expect(result.artifact).toMatchObject({ status: 'failed' });
+      expect(recorder.writes.size).toBe(0);
+    },
+  );
+
   test('an incomplete rollout configuration is refused, never guessed', async () => {
     const recorder = memoryEffects({ rollout: { ...ROLLOUT, runner_identity: 'someone-else' } });
     const result = await runBackfillInventory(['--report-only'], recorder.effects);
@@ -256,6 +267,14 @@ describe('rollout prerequisites', () => {
     expect(() =>
       rolloutSettings({ ...ROLLOUT, publisher_spool: { ssh_alias: 'a@b', ssh_key: 'k\nk' } }),
     ).toThrow('publisher_spool incomplete or invalid');
+  });
+
+  test('a non-string or blank durable_artifact_root is refused', () => {
+    for (const root of [true, 7, '   ']) {
+      expect(() => rolloutSettings({ ...ROLLOUT, durable_artifact_root: root })).toThrow(
+        'durable_artifact_root incomplete or invalid',
+      );
+    }
   });
 
   test('a rollout without an explicit enabled flag is not treated as enabled', () => {
