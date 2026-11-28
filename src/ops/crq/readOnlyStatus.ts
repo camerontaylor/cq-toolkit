@@ -104,7 +104,7 @@ const COMPACT_JSON: PythonJsonOptions = {
 };
 const PRETTY_JSON: PythonJsonOptions = { ...COMPACT_JSON, indent: 2 };
 
-const USAGE = 'usage: crq read-only-status <summary-core|health> [--pretty]\n';
+const USAGE = 'usage: crq read-only-status <summary-core|health> [--pretty] [--json]\n';
 
 /**
  * `datetime.fromtimestamp(value, utc).strftime("%Y-%m-%dT%H:%M:%SZ")`.
@@ -212,15 +212,30 @@ export async function readClientHealth(
 /**
  * The read-only CLI route. Errors are returned, never thrown, so the adapter
  * can write them to stdio without a process-level handler.
+ *
+ * `--json` (or its `-json` alias) is machine mode (doctrine I1): stderr stays EMPTY on every path,
+ * and an error that has no result artifact writes ONE
+ * `{ "error": { "kind", "subcommand", "message", "exitCode" } }` JSON
+ * document to stdout instead, so stdout is still exactly one machine-readable
+ * artifact. Human mode keeps the current narration on stderr.
  */
 export async function runReadOnlyStatus(
   argv: readonly string[],
   effects: ReadOnlyStatusEffects,
 ): Promise<CommandResult> {
+  // Usage errors are detected before (or while) the flags parse, so the
+  // machine-mode decision scans the raw argv (the dispatcher's
+  // rawNarrationMode pattern: both `--json` and its `-json` alias).
+  const machine = argv.includes('--json') || argv.includes('-json');
   const [command, ...rest] = argv;
-  if (command === undefined) return usageError('missing subcommand');
+  if (command === undefined) return usageError('missing subcommand', machine, null);
   if (command === 'help' || command === '--help' || command === '-h') {
-    return { exitCode: 0, stdout: USAGE, stderr: '' };
+    // Help is machine-readable JSON on stdout, never plain text (I1).
+    return {
+      exitCode: 0,
+      stdout: pythonJsonText({ usage: USAGE.trim() }, COMPACT_JSON),
+      stderr: '',
+    };
   }
   let pretty = false;
   for (const argument of rest) {
@@ -228,10 +243,13 @@ export async function runReadOnlyStatus(
       pretty = true;
       continue;
     }
-    return usageError(`unknown option ${argument} for ${command}`);
+    if (argument === '--json' || argument === '-json') {
+      continue; // machine mode, decided by the raw argv scan above
+    }
+    return usageError(`unknown option ${argument} for ${command}`, machine, command);
   }
   if (command !== 'summary-core' && command !== 'health') {
-    return usageError(`unknown subcommand ${command}`);
+    return usageError(`unknown subcommand ${command}`, machine, command);
   }
   const failureKind: StatusRouteErrorKind =
     command === 'health' ? 'health-failed' : 'summary-failed';
@@ -247,7 +265,11 @@ export async function runReadOnlyStatus(
     };
   } catch (error) {
     const route = asRouteError(failureKind, error);
-    return { exitCode: 1, stdout: '', stderr: `${route.kind}: ${route.message}\n` };
+    const message = `${route.kind}: ${route.message}`;
+    if (machine) {
+      return machineErrorArtifact('thrown', command, message, 1);
+    }
+    return { exitCode: 1, stdout: '', stderr: `${message}\n` };
   }
 }
 
@@ -520,6 +542,32 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function usageError(message: string): CommandResult {
-  return { exitCode: 2, stdout: '', stderr: `${message}\n${USAGE}` };
+/**
+ * The machine-mode (`--json`) error artifact: ONE
+ * `{ "error": { "kind", "subcommand", "message", "exitCode" } }` JSON
+ * document on stdout with stderr EMPTY (doctrine I1). It replaces the empty
+ * stream and never accompanies a result artifact.
+ */
+function machineErrorArtifact(
+  kind: 'usage' | 'thrown',
+  subcommand: string | null,
+  message: string,
+  exitCode: number,
+): CommandResult {
+  return {
+    exitCode,
+    stdout: pythonJsonText({ error: { kind, subcommand, message, exitCode } }, COMPACT_JSON),
+    stderr: '',
+  };
+}
+
+/**
+ * A usage refusal (exit 2): machine mode writes the one JSON error artifact
+ * with stderr empty; human mode leaves stdout empty and narrates the refusal
+ * and the usage line on stderr.
+ */
+function usageError(message: string, machine: boolean, subcommand: string | null): CommandResult {
+  return machine
+    ? machineErrorArtifact('usage', subcommand, message, 2)
+    : { exitCode: 2, stdout: '', stderr: `${message}\n${USAGE}` };
 }
