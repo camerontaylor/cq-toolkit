@@ -288,6 +288,41 @@ def free_port(start: int = 2222, end: int = 2299) -> int:
 PORT_ATTEMPTS = 3
 
 
+def port_listener_pid(pid: int, port: int) -> bool:
+    """True when process ``pid`` owns a LISTEN socket on ``port``.
+
+    Matches the socket inodes under /proc/<pid>/fd against the LISTEN rows
+    for the port in /proc/<pid>/net/tcp and tcp6, so a listener held by any
+    other process does not count. A process that is gone, or whose files are
+    unreadable, owns nothing.
+    """
+    inodes = set()
+    for table in ("tcp", "tcp6"):
+        try:
+            rows = pathlib.Path("/proc/%d/net/%s" % (pid, table)).read_text().splitlines()[1:]
+        except OSError:
+            continue
+        for row in rows:
+            fields = row.split()
+            if len(fields) > 9 and fields[3] == "0A" \
+                    and int(fields[1].rsplit(":", 1)[1], 16) == port:
+                inodes.add(fields[9])
+    if not inodes:
+        return False
+    fd_dir = pathlib.Path("/proc/%d/fd" % pid)
+    try:
+        for entry in fd_dir.iterdir():
+            try:
+                target = os.readlink(entry)
+            except OSError:
+                continue
+            if target.startswith("socket:[") and target[8:-1] in inodes:
+                return True
+    except OSError:
+        return False
+    return False
+
+
 def port_held(port: int) -> bool:
     """True when something still binds the forwarded port on the host, the
     sign that QEMU just failed to acquire it."""
@@ -811,25 +846,22 @@ def boot(run: dict, recorder: Recorder, tools: pathlib.Path | None,
             # The pid file alone does not prove the launch worked: the QEMU
             # 9.2.0 build whose ordering this probe observed writes its pid
             # file before it initializes the network, so QEMU can still fail
-            # the hostfwd bind and exit after the file appears -- leaving an
-            # identity recorded for a process that never served its port.
-            # Ready means the pid file exists and the forwarded port is held,
-            # the sign network initialization completed, seen across two
-            # consecutive polls so a lost bind surfaces as an exit here
-            # instead of a success. Either exit raises into the retry path
-            # below, as before.
-            confirmed = 0
+            # the hostfwd bind and exit after the file appears. A bare bind
+            # probe cannot tell QEMU's bind from another process's, so ready
+            # means the pid file names a process that itself holds a LISTEN
+            # socket on the forwarded port. A lost bind then surfaces as an
+            # exit (or the deadline) and takes the retry path below.
             while time.time() < deadline:
                 if process.poll() is not None:
                     raise RuntimeError(
                         "QEMU exited before binding port %d; see %s"
                         % (port, log_name))
-                if pid_path.exists() and port_held(port):
-                    confirmed += 1
-                    if confirmed >= 2:
-                        break
-                else:
-                    confirmed = 0
+                try:
+                    candidate = int(pid_path.read_text().strip())
+                except (OSError, ValueError):
+                    candidate = None
+                if candidate is not None and port_listener_pid(candidate, port):
+                    break
                 time.sleep(0.25)
             else:
                 raise RuntimeError(

@@ -7,6 +7,7 @@ recorded separately by the harness and is not part of the unit suite.
 import importlib.util
 import json
 import os
+import re
 import pathlib
 import subprocess
 import sys
@@ -1385,10 +1386,9 @@ class LifecycleTests(unittest.TestCase):
             run_dir.mkdir()
             run = {"run_id": "r1", "path": str(run_dir), "port": None}
             ports = iter([2222, 2223])
-            # The first True is the lost bind on 2222 that sends boot to the
-            # retry path; the next two are the wait loop seeing port 2223
-            # held by QEMU across two consecutive polls.
-            held = iter([True, True, True])
+            # The True is the lost bind on 2222 that sends boot to the retry
+            # path; readiness on 2223 is the owner check, stubbed below.
+            held = iter([True])
 
             class Process:
                 pid = 4321
@@ -1413,6 +1413,8 @@ class LifecycleTests(unittest.TestCase):
                  mock.patch.object(vm, "tool", return_value="/bin/true"), \
                  mock.patch.object(vm, "free_port", side_effect=lambda: next(ports)), \
                  mock.patch.object(vm, "port_held", side_effect=lambda p: next(held)), \
+                 mock.patch.object(vm, "port_listener_pid",
+                                   side_effect=lambda pid, p: p == 2223), \
                  mock.patch.object(vm, "process_starttime", return_value="9"), \
                  mock.patch.object(vm.subprocess, "Popen", side_effect=popen):
                 result = vm.boot(run, recorder, None, {"kvm_writable": True})
@@ -1488,12 +1490,106 @@ class LifecycleTests(unittest.TestCase):
             with mock.patch.object(vm, "require_memory"), \
                  mock.patch.object(vm, "tool", return_value="/bin/true"), \
                  mock.patch.object(vm, "free_port", return_value=2224), \
-                 mock.patch.object(vm, "port_held", return_value=True), \
+                 mock.patch.object(vm, "port_listener_pid", return_value=True), \
                  mock.patch.object(vm, "process_starttime", return_value="9"), \
                  mock.patch.object(vm.subprocess, "Popen", side_effect=popen):
                 vm.boot(run, vm.Recorder(run_dir), None, {"kvm_writable": True})
             saved = json.loads((run_dir / "run.json").read_text())
             self.assertEqual(saved, {**prepared, "port": 2224})
+
+    def _real_child_boot(self, behaviours, prepared_held):
+        """Run vm.boot with Popen replaced by real stand-in children.
+
+        behaviours[i] is the i-th launch's child: "bind" (listens on its own
+        port, writes the pidfile, stays up) or "exit" (writes the pidfile,
+        sleeps, exits 1 without binding). Returns (result, ports_launched,
+        children, run_dir).
+        """
+        import socket
+        import sys
+        real_popen = vm.subprocess.Popen
+        script = (
+            "import socket, sys, time\n"
+            "mode, pidfile, port, delay = sys.argv[1:5]\n"
+            "if mode == 'bind':\n"
+            "    s = socket.socket(); s.bind(('127.0.0.1', int(port))); s.listen(1)\n"
+            "open(pidfile, 'w').write('%d\\n' % __import__('os').getpid())\n"
+            "time.sleep(float(delay))\n"
+            "sys.exit(0 if mode == 'bind' else 1)\n")
+        launched = []
+        children = []
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        run_dir = pathlib.Path(temporary.name) / "r1"
+        run_dir.mkdir()
+        holder = socket.socket()
+        self.addCleanup(holder.close)
+        holder.bind(("127.0.0.1", 0))
+        holder.listen(1)
+        held_port = holder.getsockname()[1]
+        spare = []
+        for _ in behaviours:
+            probe = socket.socket()
+            probe.bind(("127.0.0.1", 0))
+            spare.append(probe.getsockname()[1])
+            probe.close()
+        fresh = iter(spare)
+
+        def popen(argv, cwd, stdout, stderr, start_new_session):
+            port = int(re.search(r"hostfwd=tcp:127.0.0.1:(\d+)-:22",
+                                 " ".join(argv)).group(1))
+            mode = behaviours[len(launched)]
+            launched.append(port)
+            child = real_popen(
+                [sys.executable, "-c", script, mode, str(run_dir / "qemu.pid"),
+                 str(port), "0.8" if mode == "exit" else "30"],
+                stdout=stdout, stderr=stderr)
+            children.append(child)
+            self.addCleanup(lambda: (child.kill(), child.wait()))
+            return child
+
+        run = {"run_id": "r1", "path": str(run_dir),
+               "port": held_port if prepared_held else None}
+        with mock.patch.object(vm, "require_memory"), \
+             mock.patch.object(vm, "tool", return_value="/bin/true"), \
+             mock.patch.object(vm, "free_port", side_effect=lambda: next(fresh)), \
+             mock.patch.object(vm, "bounded_scope_argv", side_effect=lambda q, u: q), \
+             mock.patch.object(vm.subprocess, "Popen", side_effect=popen):
+            try:
+                result = vm.boot(run, vm.Recorder(run_dir), None,
+                                 {"kvm_writable": True})
+            except RuntimeError as error:
+                result = error
+        return result, launched, held_port, spare, children
+
+    def test_boot_rejects_a_port_held_by_an_unrelated_listener(self):
+        # The stand-in writes its pidfile and exits after 0.8s without ever
+        # binding; an unrelated listener (this test) holds the prepared port.
+        result, launched, held_port, spare, _ = self._real_child_boot(
+            ["exit", "bind"], prepared_held=True)
+        self.assertIsInstance(result, dict, result)
+        self.assertEqual(launched, [held_port, spare[0]])
+        self.assertEqual(result["port"], spare[0])
+
+    def test_boot_accepts_a_child_that_binds_the_port_itself_promptly(self):
+        import time as clock
+        start = clock.monotonic()
+        result, launched, _, spare, _ = self._real_child_boot(
+            ["bind"], prepared_held=False)
+        self.assertIsInstance(result, dict, result)
+        self.assertEqual(launched, [spare[0]])
+        self.assertEqual(result["port"], spare[0])
+        self.assertLess(clock.monotonic() - start, 5)
+
+    def test_port_listener_pid_matches_only_the_owning_process(self):
+        import socket
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            sock.listen(1)
+            port = sock.getsockname()[1]
+            self.assertTrue(vm.port_listener_pid(os.getpid(), port))
+            self.assertFalse(vm.port_listener_pid(os.getppid(), port))
+            self.assertFalse(vm.port_listener_pid(2 ** 22 + 1, port))
 
     def test_boot_does_not_retry_when_the_port_is_free(self):
         with tempfile.TemporaryDirectory() as temporary:
