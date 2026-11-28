@@ -1881,19 +1881,19 @@ class EvidenceTests(unittest.TestCase):
 
     def test_post_boundary_activation_refusal_is_required(self):
         phases = self._phases()
-        manager = {"before": self._snapshot(10, "i1", "boot-1"),
-                   "after": self._snapshot(11, "i2", "boot-1"),
-                   "after_phase": {"direct": {"rc": 0},
-                                   "dependency": {"rc": 1}}}
-        reboot = {"before": self._snapshot(11, "i2", "boot-1"),
-                  "after": self._snapshot(12, "i3", "boot-2"),
-                  "after_phase": {"direct": {"rc": 1},
-                                  "dependency": {"rc": 0}},
-                  "boot_id_before": "boot-1", "boot_id_after": "boot-2",
-                  "qemu_pid_before": 99, "qemu_pid_after": 99,
-                  "qemu_identity_verified": True}
-        checks = vm.build_checks(phases, manager, reboot)
-        self.assertFalse(checks["mask_persisted"])
+        manager, reboot = self._boundaries()
+        self.assertTrue(vm.build_checks(phases, manager, reboot)
+                        ["mask_persisted"])
+        for boundary, activator in (("manager_restart", "direct"),
+                                    ("manager_restart", "dependency"),
+                                    ("reboot", "direct"),
+                                    ("reboot", "dependency")):
+            manager, reboot = self._boundaries()
+            observed = manager if boundary == "manager_restart" else reboot
+            observed["after_phase"][activator]["rc"] = 0
+            checks = vm.build_checks(phases, manager, reboot)
+            self.assertFalse(checks["mask_persisted"],
+                             "%s %s succeeds" % (boundary, activator))
 
     def test_same_boot_or_manager_fails(self):
         phases = self._phases()
