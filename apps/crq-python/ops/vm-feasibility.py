@@ -1330,6 +1330,12 @@ def _cleanup_diagnostic(args, prefix: str, cleanup_error: Exception,
     return message
 
 
+# _stop_partial_boot_note: a partial boot can leave a live guest with no
+# recorded identity. Stop it while the boot lock is still held: once the lock
+# is released another invocation can boot a replacement first, and an
+# unguarded stop would kill that one. stop_owned_process would re-take the run
+# lock the caller already holds, so callers use _stop_owned_process directly.
+
 def cmd_boot(args) -> int:
     state = pathlib.Path(args.state_dir).expanduser().resolve()
     run = load_run(state, args.run_id, require_process=False)
@@ -1347,12 +1353,9 @@ def cmd_boot(args) -> int:
             try:
                 info = boot(run, recorder, args.tools, stamp)
             except BaseException as boot_exc:
-                # A partial boot can leave a live guest with no recorded
-                # identity. Stop it while the boot lock is still held: once
-                # the lock is released another invocation can boot a
-                # replacement first, and an unguarded stop would kill that
-                # one. stop_owned_process would re-take the run lock this
-                # block already holds, so call its unguarded stop directly.
+                # Partial boot: stop it under the boot lock (see
+                # _stop_partial_boot_note). boot has no --keep, so a failed
+                # boot is always stopped here.
                 try:
                     _stop_owned_process(run, purge=False)
                 except Exception as cleanup_error:
@@ -1473,12 +1476,9 @@ def cmd_run(args) -> int:
             try:
                 boot_info = boot(run, recorder, args.tools, stamp)
             except BaseException as boot_exc:
-                # A partial boot can leave a live guest with no recorded
-                # identity. Stop it while the boot lock is still held: once
-                # the lock is released another invocation can boot a
-                # replacement first, and an unguarded stop would kill that
-                # one. stop_owned_process would re-take the run lock this
-                # block already holds, so call its unguarded stop directly.
+                # Partial boot: stop it under the boot lock (see
+                # _stop_partial_boot_note). Unlike cmd_boot, --keep means the
+                # operator asked to inspect the guest, so skip the stop.
                 if not args.keep:
                     try:
                         _stop_owned_process(run, purge=False)

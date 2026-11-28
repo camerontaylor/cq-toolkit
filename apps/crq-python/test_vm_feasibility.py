@@ -1322,6 +1322,72 @@ class LifecycleTests(unittest.TestCase):
             boot.assert_not_called()
             stop.assert_not_called()
 
+    def _lock_state_probe(self, run, held):
+        """Stand-in for _stop_owned_process recording whether run.lock is held."""
+        def unguarded(_run, *, purge):
+            import fcntl
+            with open(run / "run.lock", "a") as handle:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    held.append("FREE")
+                except OSError:
+                    held.append("HELD")
+            return {"stopped": True}
+        return unguarded
+
+    def test_cmd_boot_stops_a_partial_boot_under_the_run_lock(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state, run = self._prepared(temporary)
+            (run / "run.json").write_text('{"port": 2222}')
+            args = type("Args", (), {"state_dir": str(state), "run_id": "r1",
+                                     "tools": None, "json": False})()
+            held = []
+            with mock.patch.object(vm, "boot",
+                                   side_effect=RuntimeError("no pid file")), \
+                 mock.patch.object(vm, "host_stamp",
+                                   return_value={"kvm_writable": True}), \
+                 mock.patch.object(vm, "_stop_owned_process",
+                                   side_effect=self._lock_state_probe(run, held)) as stop, \
+                 mock.patch.object(vm, "stop_owned_process") as guarded:
+                with self.assertRaisesRegex(RuntimeError, "no pid file"):
+                    vm.cmd_boot(args)
+            self.assertEqual(held, ["HELD"])
+            self.assertEqual(stop.call_args.kwargs.get("purge"), False)
+            guarded.assert_not_called()
+
+    def test_cmd_run_stops_a_partial_boot_under_the_run_lock(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state, run = self._prepared(temporary)
+            patches = self._patched_run(run)
+            held = []
+            with patches[0], patches[1], patches[2], \
+                 mock.patch.object(vm, "verify_source_scripts"), \
+                 mock.patch.object(vm, "boot",
+                                   side_effect=RuntimeError("no pid file")), \
+                 mock.patch.object(vm, "_stop_owned_process",
+                                   side_effect=self._lock_state_probe(run, held)) as stop, \
+                 mock.patch.object(vm, "stop_owned_process") as guarded:
+                with self.assertRaisesRegex(RuntimeError, "no pid file"):
+                    vm.cmd_run(self._run_args(state, False))
+            self.assertEqual(held, ["HELD"])
+            stop.assert_called_once()
+            guarded.assert_not_called()
+
+    def test_cmd_run_partial_boot_with_keep_skips_the_stop(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state, run = self._prepared(temporary)
+            patches = self._patched_run(run)
+            with patches[0], patches[1], patches[2], \
+                 mock.patch.object(vm, "verify_source_scripts"), \
+                 mock.patch.object(vm, "boot",
+                                   side_effect=RuntimeError("no pid file")), \
+                 mock.patch.object(vm, "_stop_owned_process") as unguarded, \
+                 mock.patch.object(vm, "stop_owned_process") as guarded:
+                with self.assertRaisesRegex(RuntimeError, "no pid file"):
+                    vm.cmd_run(self._run_args(state, True))
+            unguarded.assert_not_called()
+            guarded.assert_not_called()
+
     def test_boot_drops_stale_identity_from_a_stopped_run(self):
         class ExitedProcess:
             pid = 4321
