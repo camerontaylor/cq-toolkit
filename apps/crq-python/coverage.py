@@ -471,12 +471,19 @@ def record_opportunity(ledger, *, at, started, pending, candidate_exists, blocke
 
     blocked_reason: paused/cooldown/hourly_cap/inflight/only, or another gate.
     started must mean a real CLI/signer start, never a failed secret scan or dry run.
+    Observations older than the 24-hour window utilization_digest reads are
+    dropped, so the retained ledger stays bounded.
     """
     import copy
     result = copy.deepcopy(ledger)
-    result["observations"][_iso(at)] = {
+    at_time = _time(at)
+    result["observations"][_iso(at_time)] = {
         "started": bool(started), "pending": bool(pending),
         "candidate_exists": bool(candidate_exists), "blocked_reason": blocked_reason}
+    cutoff = at_time - dt.timedelta(hours=24)
+    result["observations"] = {key: value
+                              for key, value in result["observations"].items()
+                              if _time(key) > cutoff}
     return result
 
 

@@ -9,12 +9,15 @@
  * - `record_opportunity` deep-copies the ledger and sets ONE observation keyed
  *   by `_iso(at)`, so a repeated timestamp replaces its entry (idempotent) and
  *   a new key is appended in insertion order.
+ * - After inserting, observations at or before `at - 24h` are dropped (the
+ *   window `utilization_digest` reads); an existing key that `_time` would
+ *   reject (unparseable, or naive without a timezone) raises.
  * - A truthy ledger that is not an object, or whose `observations` is missing
  *   or not an object, raises (Python's TypeError/KeyError abandon the tick).
  */
 import { JsonNumber, JsonObject, type JsonValue } from './jsonValue.js';
 import { withObjectKeys } from './queueDoc.js';
-import { parseIso } from './utc.js';
+import { parseIso, parseUtc } from './utc.js';
 
 /** One tick opportunity, as `runTick` observes it. */
 export interface OpportunityObservation {
@@ -78,9 +81,20 @@ export function recordOpportunity(
     ['candidate_exists', observation.candidateExists],
     ['blocked_reason', observation.blockedReason],
   ]);
-  return withObjectKeys(ledger, [
-    ['observations', withObjectKeys(observations, [[coverageIso(observation.at), entry]])],
-  ]);
+  const at = coverageIso(observation.at);
+  const cutoff = observationMicros(at) - DAY_MICROS;
+  const inserted = withObjectKeys(observations, [[at, entry]]);
+  const kept = inserted.entries.filter(([key]) => observationMicros(key) > cutoff);
+  return withObjectKeys(ledger, [['observations', new JsonObject(kept)]]);
+}
+
+const DAY_MICROS = 86_400n * 1_000_000n;
+
+/** Python `_time(key)` for an observation key: needs a timezone, else raises. */
+function observationMicros(key: string): bigint {
+  const parsed = /(Z|[+-]\d{2}(:?\d{2}(:?\d{2}(\.\d+)?)?)?)$/.test(key) ? parseUtc(key) : null;
+  if (parsed === null) throw new Error(`invalid timestamp: ${key}`);
+  return parsed.epochMicros;
 }
 
 /** The tick's `q["coverage"] = record_opportunity(q.get("coverage") or new_ledger(), ...)`. */
