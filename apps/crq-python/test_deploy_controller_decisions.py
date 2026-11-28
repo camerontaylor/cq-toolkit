@@ -248,3 +248,20 @@ class HelperIdentityTests(unittest.TestCase):
     def test_unreadable_helper_refuses(self):
         with self.assertRaisesRegex(dc.Refused, "helper unreadable"):
             dc._load_helper(Path(self.temp.name) / "absent.py")
+
+
+class SchemaProblemTests(unittest.TestCase):
+    def test_unknown_type_name_is_reported_not_raised(self):
+        for rule in ({"type": "number"}, {"type": ["integer", "number"]},
+                     {"type": [["x"]]}):
+            self.assertEqual(dc.schema_problem(1, rule),
+                             "receipt: unsupported schema type")
+
+    def test_unknown_keyword_is_reported(self):
+        self.assertEqual(dc.schema_problem(1, {"format": "int32"}),
+                         "receipt: unsupported schema keyword")
+
+    def test_supported_types_still_evaluate(self):
+        self.assertIsNone(dc.schema_problem(1, {"type": "integer"}))
+        self.assertEqual(dc.schema_problem("a", {"type": "integer"}),
+                         "receipt: type mismatch")
