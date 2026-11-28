@@ -448,6 +448,63 @@ def unit_command(unit, runtime, home=None):
             + ' ' + UNIT_COMMANDS[unit])
 
 
+def _exec_start_logical(lines):
+    """Yield ``(start, end, logical)`` for each effective ExecStart directive.
+
+    Physical lines ending in an odd run of backslashes (an even run is
+    escaped) join into one logical line, as systemd reads them, so a lone
+    ``\\`` line followed by ``ExecStart=/old`` is one directive that starts
+    at the ``\\`` line. Comment lines (``#`` or ``;``) are skipped whether or
+    not a join is pending, so a comment's trailing backslash never continues.
+    ``end`` is exclusive; ``logical`` is the joined text, joined with a space
+    as systemd does.
+    """
+    def continues(body):
+        return (len(body) - len(body.rstrip('\\'))) % 2 == 1
+    start = None
+    logical = ''
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith(('#', ';')):
+            continue
+        if start is None:
+            start = i
+            logical = ''
+        body = line.rstrip('\r\n')
+        if continues(body):
+            logical += body[:-1] + ' '
+            continue
+        logical += body
+        head, sep, _ = logical.lstrip().partition('=')
+        if sep and head.strip() == 'ExecStart':
+            yield start, i + 1, logical
+        start = None
+    if start is not None:
+        head, sep, _ = logical.lstrip().partition('=')
+        if sep and head.strip() == 'ExecStart':
+            yield start, len(lines), logical
+
+
+def exec_start_directives(lines):
+    """Spans of physical lines forming each effective ExecStart directive.
+
+    systemd skips leading whitespace and comment lines and allows whitespace
+    around the assignment ``=``, so ``ExecStart =`` names the same directive
+    as ``ExecStart=``; the directive is classified on its joined logical
+    line, so a lone backslash line before it still counts. Replacing only the
+    first physical line would leave a stale fragment of the old command.
+    Each span is the half-open range ``[start, end)`` of physical lines, so
+    one parser serves validation (the count), replacement (the span) and
+    ``exec_start`` reporting (the directive's first line).
+    """
+    return [(start, end) for start, end, _ in _exec_start_logical(lines)]
+
+
+def exec_start_arguments(text):
+    """Argument text after ``=`` of each effective ExecStart in ``text``."""
+    return [logical.lstrip().partition('=')[2].strip()
+            for _, _, logical in _exec_start_logical(text.splitlines(keepends=True))]
+
+
 def render_service_text(template_name, template_text, runner_root, command=None):
     """Pure byte render shared by the old renderer and the new wrapper.
 
@@ -462,25 +519,11 @@ def render_service_text(template_name, template_text, runner_root, command=None)
         raise ValueError('unexpanded runner root')
     if command is not None:
         lines = text.splitlines(keepends=True)
-        matches = [i for i, line in enumerate(lines) if line.startswith('ExecStart=')]
+        matches = exec_start_directives(lines)
         if len(matches) != 1:
             raise ValueError('unit must have exactly one ExecStart: ' + template_name)
-        end = matches[0] + 1
-        # systemd joins physical lines ending in an odd run of backslashes
-        # (an even run is escaped) into one logical directive, and skips
-        # comment lines without ending the continuation. Replacing only the
-        # first physical line would leave a stale fragment of the old command.
-        def continues(line):
-            body = line.rstrip('\r\n')
-            return (len(body) - len(body.rstrip('\\'))) % 2 == 1
-        pending = continues(lines[matches[0]])
-        while pending and end < len(lines):
-            line = lines[end]
-            end += 1
-            if line.lstrip().startswith(('#', ';')):
-                continue
-            pending = continues(line)
-        lines[matches[0]:end] = ['ExecStart=' + command + '\n']
+        start, end = matches[0]
+        lines[start:end] = ['ExecStart=' + command + '\n']
         text = ''.join(lines)
     return text
 
@@ -647,7 +690,7 @@ def render_service(root, unit, runtime='python', sha='HEAD', artifact_root=None)
         raise ValueError('template bytes do not match the pinned Git blob')
     text = raw.decode('utf-8')
     validate_unit_template(unit, text)
-    if len([line for line in text.splitlines() if line.startswith('ExecStart=')]) != 1:
+    if len(exec_start_directives(text.splitlines(keepends=True))) != 1:
         raise ValueError('unit must have exactly one ExecStart: ' + unit)
     runner = str(host_path(str(root)) / 'apps/crq-python')
     rendered = render_service_text(unit, text, runner, command)
@@ -657,9 +700,8 @@ def render_service(root, unit, runtime='python', sha='HEAD', artifact_root=None)
         artifact_root = (Path(artifact_root) if artifact_root is not None
                          else Path.home() / '.local/opt' / ('crq-' + runtime[5:]))
         artifact = artifact_identity(artifact_root, runtime)
-    exec_start = next((line[len('ExecStart='):].rstrip('\n')
-                       for line in rendered.splitlines()
-                       if line.startswith('ExecStart=')), None)
+    arguments = exec_start_arguments(rendered)
+    exec_start = arguments[0] if arguments else None
     return {
         'unit': unit,
         'runtime': runtime,

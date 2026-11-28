@@ -284,6 +284,50 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
             render('ExecStart=/a \\\\\\\n  --b\nRestart=always\n'),
             '[Service]\nExecStart=NEW\nRestart=always\n')
 
+    def test_comment_ending_in_backslash_does_not_swallow_next_line(self):
+        for marker in ('#', ';'):
+            comment = marker + ' note \\\n'
+            with self.subTest(marker=marker, case='single'):
+                self.assertEqual(
+                    host.render_service_text(
+                        'u', '[Service]\n' + comment + 'ExecStart=OLD\nRestart=always\n',
+                        '/r', 'NEW'),
+                    '[Service]\n' + comment + 'ExecStart=NEW\nRestart=always\n')
+            with self.subTest(marker=marker, case='double'):
+                with self.assertRaisesRegex(ValueError, 'exactly one ExecStart'):
+                    host.render_service_text(
+                        'u', '[Service]\n' + comment + 'ExecStart=A\nExecStart=B\n',
+                        '/r', 'NEW')
+
+    def test_exec_start_with_whitespace_before_equals_is_recognized(self):
+        for head in ('ExecStart =', 'ExecStart  =', 'ExecStart\t='):
+            with self.subTest(head=head, case='single'):
+                self.assertEqual(
+                    host.render_service_text(
+                        'u', '[Service]\n' + head + '/old\nRestart=always\n',
+                        '/r', 'NEW'),
+                    '[Service]\nExecStart=NEW\nRestart=always\n')
+            with self.subTest(head=head, case='double'):
+                with self.assertRaisesRegex(ValueError, 'exactly one ExecStart'):
+                    host.render_service_text(
+                        'u', '[Service]\n' + head + '/a\n' + head + '/b\n',
+                        '/r', 'NEW')
+
+    def test_lone_backslash_line_joins_the_following_exec_start(self):
+        def render(body):
+            return host.render_service_text('u', '[Service]\n' + body, '/r', 'NEW')
+        self.assertEqual(
+            render('\\\nExecStart=/old\nRestart=always\n'),
+            '[Service]\nExecStart=NEW\nRestart=always\n')
+        self.assertEqual(
+            render('\\\n  ExecStart = /old \\\n  --x\nRestart=always\n'),
+            '[Service]\nExecStart=NEW\nRestart=always\n')
+        with self.assertRaisesRegex(ValueError, 'exactly one ExecStart'):
+            render('ExecStart=/a\n\\\nExecStart=/b\n')
+        self.assertEqual(
+            host.exec_start_arguments('[Service]\n\\\nExecStart =/old  --x \\\n  --y\n'),
+            ['/old  --x    --y'])
+
     def test_single_unit_render_matches_render_units_for_all_services(self):
         sha = 'a' * 40
         artifact = self._node_artifact(sha)

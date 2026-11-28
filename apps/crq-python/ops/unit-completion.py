@@ -19,6 +19,7 @@ and what are its actual systemd facts?"
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 from dataclasses import dataclass
 import os
@@ -199,6 +200,26 @@ def sha256_file(path: Path) -> str:
     return sha256_bytes(path.read_bytes())
 
 
+_PREPARE = None
+
+
+def _prepare_host():
+    """Load ``prepare-host`` so installed units share its ExecStart parser."""
+    global _PREPARE
+    if _PREPARE is None:
+        spec = importlib.util.spec_from_file_location(
+            "crq_prepare_host_completion",
+            Path(__file__).with_name("prepare-host.py"))
+        module = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(module)
+        except (OSError, SyntaxError, ValueError, ImportError) as exc:
+            raise CompletionRefused("prepare-host is not loadable: "
+                                    + str(exc)[:160]) from exc
+        _PREPARE = module
+    return _PREPARE
+
+
 def parse_exec_start_from_unit(path: Path) -> list[str]:
     """Return the ``shlex`` tokens of a unit file's single ``ExecStart``."""
     try:
@@ -206,11 +227,11 @@ def parse_exec_start_from_unit(path: Path) -> list[str]:
     except OSError as exc:
         raise CompletionRefused("installed unit is unreadable: "
                                 + str(exc)[:160]) from exc
-    lines = [line for line in text.splitlines() if line.startswith("ExecStart=")]
+    lines = _prepare_host().exec_start_arguments(text)
     if len(lines) != 1:
         raise CompletionRefused("installed unit must contain one ExecStart")
     try:
-        return shlex.split(lines[0][len("ExecStart="):])
+        return shlex.split(lines[0])
     except ValueError as exc:
         raise CompletionRefused("installed unit ExecStart cannot be parsed: "
                                 + str(exc)[:160]) from exc

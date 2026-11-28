@@ -878,6 +878,33 @@ class ParserTests(unittest.TestCase):
                 ["/usr/bin/env", "python3",
                  "/checkout/apps/crq-python/crq.py", "tick"])
 
+    def test_exec_start_whitespace_form_is_parsed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / UNIT
+            path.write_text("[Service]\nExecStart =/usr/bin/env python3 /x\n")
+            self.assertEqual(completion.parse_exec_start_from_unit(path),
+                             ["/usr/bin/env", "python3", "/x"])
+            path.write_text("[Service]\nExecStart =/a\nExecStart=/b\n")
+            with self.assertRaises(completion.CompletionRefused):
+                completion.parse_exec_start_from_unit(path)
+
+    def test_unloadable_prepare_host_is_a_clean_refusal(self):
+        for case, content in (("missing", None), ("syntax", "def (:\n"),
+                              ("import", "import crq_no_such_module_xyz\n")):
+            with self.subTest(case=case):
+                with tempfile.TemporaryDirectory() as temporary:
+                    directory = Path(temporary)
+                    copy = directory / "unit-completion.py"
+                    copy.write_text((OPS / "unit-completion.py").read_text())
+                    if content is not None:
+                        (directory / "prepare-host.py").write_text(content)
+                    module = _load("crq_unit_completion_" + case, copy)
+                    unit = directory / UNIT
+                    unit.write_bytes(_python_unit())
+                    with self.assertRaisesRegex(
+                            module.CompletionRefused, "prepare-host is not loadable"):
+                        module.parse_exec_start_from_unit(unit)
+
     def test_journal_json_parses_records(self):
         records = completion.parse_journal_json(
             json.dumps({"_BOOT_ID": BOOT}) + "\n", max_records=2)

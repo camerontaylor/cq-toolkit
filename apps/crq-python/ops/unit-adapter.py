@@ -486,9 +486,7 @@ def declared_inventory(root: Path, source_sha: str) -> dict:
         service_oid, _service_raw, service_text = _read_template(
             prepare, root, source_sha, unit)
         prepare.validate_unit_template(unit, service_text)
-        exec_starts = [line for line in service_text.splitlines()
-                       if line.startswith("ExecStart=")]
-        if len(exec_starts) != 1:
+        if len(prepare.exec_start_arguments(service_text)) != 1:
             raise ValueError("service template must have exactly one ExecStart: " + unit)
         service_type = _single_value(
             _section_values(service_text, "Service", "Type"),
@@ -1199,12 +1197,11 @@ class ProductionUnitAdapter:
             text = path.read_text()
         except OSError as exc:
             self.refuse("installed unit is unreadable: " + str(exc)[:160])
-        lines = [line for line in text.splitlines()
-                 if line.startswith("ExecStart=")]
+        lines = _prepare_host().exec_start_arguments(text)
         if len(lines) != 1:
             self.refuse("installed unit must contain exactly one ExecStart")
         try:
-            parts = shlex.split(lines[0][len("ExecStart="):])
+            parts = shlex.split(lines[0])
         except ValueError as exc:
             self.refuse("installed unit ExecStart cannot be parsed: "
                         + str(exc)[:160])
