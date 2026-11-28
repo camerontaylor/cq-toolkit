@@ -386,7 +386,9 @@ async function submit(
   const acceptedNotify = request.has('notify')
     ? notifyDestination(request.get('notify'), effects.config)
     : null;
-  const verifiedReceipts = await retainedReceiptIds(queue, effects);
+  // An explicit repeat never reaches receipt verification (admit only calls
+  // verifyReceipt on its reuse and observed paths), so skip the preload reads.
+  const verifiedReceipts = repeat ? new Set<string>() : await retainedReceiptIds(queue, effects);
   const admitted = admit(queue, {
     requestId,
     inputs,
