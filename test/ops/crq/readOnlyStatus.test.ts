@@ -455,13 +455,16 @@ describe('CLI contract', () => {
       error: {
         kind: 'thrown',
         subcommand: 'health',
-        message: expect.stringMatching(/^queue-invalid: queue\.json unavailable:/u),
+        message: expect.stringMatching(/^queue-invalid: queue\.json unavailable:/u) as string,
         exitCode: 1,
       },
     });
 
     // Usage failures write the exit-2 usage artifact; stderr stays empty.
-    for (const argv of [['nope', '--json'], ['summary-core', '--wat', '--json']] as const) {
+    for (const argv of [
+      ['nope', '--json'],
+      ['summary-core', '--wat', '--json'],
+    ] as const) {
       const result = await runCli(argv, empty, FIXED_NOW);
       expect(result.exitCode, argv.join(' ')).toBe(2);
       expect(result.stderr, argv.join(' ')).toBe('');
