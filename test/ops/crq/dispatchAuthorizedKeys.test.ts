@@ -97,6 +97,11 @@ describe('dispatch authorized_keys line check', () => {
       line(`${queueCommand()} && sh`),
       'command contains shell metacharacters or expansion (no $SSH_ORIGINAL_COMMAND)',
     ],
+    [
+      'second command option',
+      `restrict,command="false",command="${queueCommand()}" ${KEY}`,
+      'at most one command option is allowed',
+    ],
   ])('refuses %s', (_name, input, problem) => {
     const result = checkDispatchAuthorizedKeysLine(input, ROOTS);
     expect(result.ok).toBe(false);
