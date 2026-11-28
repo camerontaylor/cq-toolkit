@@ -110,6 +110,14 @@ def build_scenarios() -> None:
     scenario("capacity run already counted", raw=lines(AUTH), queue={"backfill_capacity_runs": ["r"]})
     scenario("capacity day row preseeded", raw=lines(AUTH),
              queue={"backfill_daily_capacity": {"2026-10-30": {"spare_admissions": 4, "completed_partitions": 2}}})
+    # A T1 completion on a legacy day row must leave the row legacy (no completed_T1_partitions
+    # key), so the report keeps withholding the estimate; a row that has the key keeps counting.
+    scenario("T1 completion on a legacy preseeded day row stays legacy", raw=lines(COMPLETE), exit_code=0,
+             queue={**with_item(tier_importance="T1"),
+                    "backfill_daily_capacity": {"2026-10-30": {"spare_admissions": 4, "completed_partitions": 2}}})
+    scenario("T1 completion on a preseeded day row with the T1 count", raw=lines(COMPLETE), exit_code=0,
+             queue={**with_item(tier_importance="T1"),
+                    "backfill_daily_capacity": {"2026-10-30": {"spare_admissions": 4, "completed_partitions": 2, "completed_T1_partitions": 1}}})
     scenario("meta without worktree: no cleanup", raw=lines(AUTH), meta={"worktree": None})
     scenario("meta without branch: no cleanup", raw=lines(AUTH), meta={"wt_branch": ""})
     scenario("no reservation for the attempt", raw=lines(QUOTA), queue={"backfill_reservations": {}})

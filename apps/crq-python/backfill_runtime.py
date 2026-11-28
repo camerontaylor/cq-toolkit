@@ -443,7 +443,10 @@ def harvest(c, queue, item, rdir, meta, classification, exit_code, *, terminal_v
         # tier_importance carries the partition's min path tier, the same rule
         # inventory.rank uses for a candidate's tier, so the daily T1 count
         # matches the T1-only population the capacity estimate divides by.
-        day["completed_T1_partitions"] = day.get("completed_T1_partitions", 0) + (item["state"] == "publication-pending" and item.get("tier_importance") == "T1")
+        # A legacy row (written before the field existed) stays legacy: adding the key now would
+        # turn that day's earlier, unknown completions into an observed zero-T1 count.
+        if "completed_T1_partitions" in day:
+            day["completed_T1_partitions"] += item["state"] == "publication-pending" and item.get("tier_importance") == "T1"
     c.save_queue(queue)
     if meta.get("worktree") and meta.get("wt_branch"):
         c.remove_worktree(Path(meta["worktree"]), meta["wt_branch"])

@@ -222,20 +222,28 @@ export async function finishHarvest(
     if (!(done instanceof JsonNumber) || done.kind !== 'int' || done.integer === null)
       throw new LedgerTypeError('completed_partitions must be an integer');
     const t1 = row.get('completed_T1_partitions');
-    const t1Count =
-      t1 instanceof JsonNumber && t1.kind === 'int' && t1.integer !== null ? Number(t1.integer) : 0;
     const pending = result.item.get('state') === 'publication-pending';
     let counted = row;
     if (pending)
       counted = withObjectKeys(counted, [
         ['completed_partitions', JsonNumber.int(Number(done.integer) + 1)],
       ]);
-    counted = withObjectKeys(counted, [
-      [
-        'completed_T1_partitions',
-        JsonNumber.int(t1Count + (pending && result.item.get('tier_importance') === 'T1' ? 1 : 0)),
-      ],
-    ]);
+    // A legacy row (no completed_T1_partitions) stays legacy: adding the key would turn that
+    // day's earlier, unknown completions into an observed zero-T1 count.
+    if (t1 !== undefined) {
+      const t1Count =
+        t1 instanceof JsonNumber && t1.kind === 'int' && t1.integer !== null
+          ? Number(t1.integer)
+          : 0;
+      counted = withObjectKeys(counted, [
+        [
+          'completed_T1_partitions',
+          JsonNumber.int(
+            t1Count + (pending && result.item.get('tier_importance') === 'T1' ? 1 : 0),
+          ),
+        ],
+      ]);
+    }
     queue = withObjectKeys(queue, [
       ['backfill_capacity_runs', [...capacityRuns, runId]],
       ['backfill_daily_capacity', withObjectKeys(capacity, [[day, counted]])],
