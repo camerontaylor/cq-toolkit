@@ -1249,6 +1249,21 @@ def save_json(path: pathlib.Path, value) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
 
 
+def resolve_state(value: str) -> pathlib.Path:
+    """Expand and resolve ``--state-dir``, refusing a comma in the path.
+
+    QEMU parses option values such as ``-drive file=`` and ``-monitor
+    unix:`` with commas as the option delimiter and only reads a doubled
+    comma as a literal one, so no path under a comma-containing state
+    directory can be carried into the QEMU command line verbatim. Refuse the
+    directory here, before preparation creates anything under it.
+    """
+    state = pathlib.Path(value).expanduser().resolve()
+    if "," in str(state):
+        raise UsageRefusal("state dir must not contain a comma: " + str(state))
+    return state
+
+
 # -------------------------------------------------------------------- cli
 
 
@@ -1274,7 +1289,7 @@ def load_run(state: pathlib.Path, run_id: str | None, *,
 
 
 def cmd_plan(args) -> int:
-    state = pathlib.Path(args.state_dir).expanduser().resolve()
+    state = resolve_state(args.state_dir)
     print(json.dumps({
         "state_dir": str(state),
         "image": IMAGE_URL + IMAGE_NAME,
@@ -1294,7 +1309,7 @@ def cmd_plan(args) -> int:
 
 
 def cmd_fetch(args) -> int:
-    state = pathlib.Path(args.state_dir).expanduser().resolve()
+    state = resolve_state(args.state_dir)
     state.mkdir(parents=True, exist_ok=True)
     recorder = Recorder(state)
     image = fetch_image(state, recorder)
@@ -1303,7 +1318,7 @@ def cmd_fetch(args) -> int:
 
 
 def cmd_prepare(args) -> int:
-    state = pathlib.Path(args.state_dir).expanduser().resolve()
+    state = resolve_state(args.state_dir)
     state.mkdir(parents=True, exist_ok=True)
     recorder = Recorder(state)
     image = fetch_image(state, recorder)
@@ -1331,7 +1346,7 @@ def _cleanup_diagnostic(args, prefix: str, cleanup_error: Exception,
 
 
 def cmd_boot(args) -> int:
-    state = pathlib.Path(args.state_dir).expanduser().resolve()
+    state = resolve_state(args.state_dir)
     run = load_run(state, args.run_id, require_process=False)
     if not run["port"]:
         run["port"] = free_port()
@@ -1364,7 +1379,7 @@ def cmd_boot(args) -> int:
 
 
 def cmd_phase(args) -> int:
-    state = pathlib.Path(args.state_dir).expanduser().resolve()
+    state = resolve_state(args.state_dir)
     run = load_run(state, args.run_id)
     recorder = Recorder(pathlib.Path(run["path"]))
     payload = guest_phase(run, args.name, recorder)
@@ -1373,7 +1388,7 @@ def cmd_phase(args) -> int:
 
 
 def cmd_restart_manager(args) -> int:
-    state = pathlib.Path(args.state_dir).expanduser().resolve()
+    state = resolve_state(args.state_dir)
     run = load_run(state, args.run_id)
     recorder = Recorder(pathlib.Path(run["path"]))
     payload = restart_manager(run, recorder)
@@ -1383,7 +1398,7 @@ def cmd_restart_manager(args) -> int:
 
 
 def cmd_reboot(args) -> int:
-    state = pathlib.Path(args.state_dir).expanduser().resolve()
+    state = resolve_state(args.state_dir)
     run = load_run(state, args.run_id)
     recorder = Recorder(pathlib.Path(run["path"]))
     payload = reboot_guest(run, recorder)
@@ -1393,7 +1408,7 @@ def cmd_reboot(args) -> int:
 
 
 def cmd_run(args) -> int:
-    state = pathlib.Path(args.state_dir).expanduser().resolve()
+    state = resolve_state(args.state_dir)
     state.mkdir(parents=True, exist_ok=True)
     source_commit = (getattr(args, "source_commit", None)
                      or os.environ.get("CRQ_VM_SOURCE_COMMIT"))
@@ -1701,7 +1716,7 @@ def _stop_owned_process(run: dict, *, purge: bool) -> dict:
 
 
 def cmd_destroy(args) -> int:
-    state = pathlib.Path(args.state_dir).expanduser().resolve()
+    state = resolve_state(args.state_dir)
     run = load_run(state, args.run_id, require_process=False)
     payload = stop_owned_process(run, purge=args.purge)
     print(json.dumps(payload, indent=2, sort_keys=True))

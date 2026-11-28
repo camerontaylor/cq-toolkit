@@ -1971,6 +1971,17 @@ class PlanTests(unittest.TestCase):
             self.assertEqual(vm.cmd_plan(args), 0)
             self.assertFalse(state.exists())
 
+    def test_comma_state_dir_refused_before_preparation(self):
+        # QEMU splits -drive file= and -monitor unix: values on commas, so a
+        # state directory such as "probe,local" can never be carried verbatim
+        # into the QEMU command line; the CLI must refuse it before preparing.
+        with self.assertRaises(vm.UsageRefusal):
+            vm.resolve_state("/tmp/probe,local")
+        self.assertEqual(vm.resolve_state("/tmp/plain").name, "plain")
+        args = type("Args", (), {"state_dir": "/tmp/probe,local"})()
+        with self.assertRaises(vm.UsageRefusal):
+            vm.cmd_plan(args)
+
     def test_json_mode_serializes_operating_system_failures(self):
         import contextlib
         import io
