@@ -38,6 +38,20 @@ export interface DispatchRoots {
 /** Shell metacharacters and expansion, including the `&` and `&&` separators. */
 const SHELL_META = /[$`;&|<>\n\r(){}*?!#~\\]/;
 const KEY_TYPE = /^(?:ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp\d+|sk-ssh-ed25519@openssh\.com)$/;
+/**
+ * OpenSSH `expiry-time` values: absolute YYYYMMDD[HHMM[SS]] with an optional
+ * case-insensitive `Z` or `UTC` suffix. OpenSSH rejects `forever` and relative
+ * times here (parse_absolute_time); seconds 60 and 61 pass its strptime.
+ */
+const EXPIRY_TIME =
+  /^\d{4}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])(?:(?:[01]\d|2[0-3])[0-5]\d(?:[0-5]\d|6[01])?)?(?:z|utc)?$/i;
+
+/** OpenSSH refuses a time at or before the epoch (negative time_t, or valid_before == 0). */
+function isAfterEpoch(value: string): boolean {
+  const digits = value.replace(/[^0-9]/g, '');
+  const date = Number(digits.slice(0, 8));
+  return date > 19700101 || (date === 19700101 && Number(digits.slice(8) || '0') > 0);
+}
 
 /** Split `a,b="c,d",e` at commas outside double quotes; null when a quote is unbalanced. */
 function splitOptions(text: string): string[] | null {
@@ -201,6 +215,18 @@ export function checkDispatchAuthorizedKeysLine(
       const raw = part.slice(eq + 1);
       if (!/^".*"$/.test(raw)) problems.push('command must be a double-quoted string');
       else command = raw.slice(1, -1);
+    }
+    // OpenSSH rejects these options unless the value is a quoted string, and it
+    // parses the `expiry-time` value, so a bad date would stop the key working.
+    if (name === 'from' && !/^".+"$/.test(part.slice(eq + 1)))
+      problems.push('from must be a double-quoted pattern list');
+    if (name === 'expiry-time') {
+      const raw = part.slice(eq + 1);
+      if (!/^".*"$/.test(raw)) problems.push('expiry-time must be a double-quoted string');
+      else if (!EXPIRY_TIME.test(raw.slice(1, -1)))
+        problems.push('expiry-time must be YYYYMMDD[HHMM[SS]] with an optional Z or UTC suffix');
+      else if (!isAfterEpoch(raw.slice(1, -1)))
+        problems.push('expiry-time must be after 1970-01-01T00:00:00Z (OpenSSH rejects it)');
     }
   }
   if (!restrict) problems.push('restrict is required');
