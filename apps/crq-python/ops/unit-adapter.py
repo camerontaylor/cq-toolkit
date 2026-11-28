@@ -67,7 +67,7 @@ DURATION_UNITS = {
 # Blanks may sit between a magnitude and its unit: systemd parses both
 # ``TimeoutStartSec=5 min`` and ``TimeoutStartSec=5min`` as five minutes.
 DURATION_RE = re.compile(
-    r"(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>"
+    r"(?P<value>\d+(?:\.\d+)?)[ \t]*(?P<unit>"
     + "|".join(sorted(map(re.escape, DURATION_UNITS), key=len, reverse=True))
     + ")?")
 UNIT_FILE_STATES = {"enabled", "disabled", "static", "masked", "alias",
@@ -316,7 +316,7 @@ def _duration_seconds(text: str, zero_ok: bool = False) -> int | None:
     # systemd time spans join components with optional whitespace
     # ("5min 20s", "20min30s") and allow blanks between a magnitude and its
     # unit ("5 min", "5min"); every component must parse.
-    value = text.strip()
+    value = text.strip(SYSTEMD_BLANKS)
     if not value:
         return None
     # systemd parses time spans in microseconds, truncating each component's
@@ -328,7 +328,7 @@ def _duration_seconds(text: str, zero_ok: bool = False) -> int | None:
         if match is None:
             return None
         position = match.end()
-        while position < len(value) and value[position].isspace():
+        while position < len(value) and value[position] in SYSTEMD_BLANKS:
             position += 1
         factor = DURATION_UNITS[match.group("unit") or "s"]
         try:

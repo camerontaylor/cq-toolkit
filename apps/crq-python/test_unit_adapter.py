@@ -1619,6 +1619,14 @@ class AdapterTests(AdapterFixture):
                 recovery.restore_activation("crq-tick.service", snapshot)
                 self.assertEqual(self.fake.active["crq-tick.service"], "active")
 
+    def test_unicode_blank_between_magnitude_and_unit_is_not_a_duration(self):
+        # systemd rejects NBSP between magnitude and unit and keeps the earlier value.
+        recovery, snapshot = self._recovery_with_timeout_line(
+            "TimeoutStartSec=20min\nTimeoutStartSec=1\u00a0min")
+        self.fake.service_start_delay = 700
+        recovery.restore_activation("crq-tick.service", snapshot)
+        self.assertEqual(self.fake.active["crq-tick.service"], "active")
+
     def test_last_timeout_assignment_wins_across_both_keys(self):
         for lines in ("TimeoutStartSec=5min\nTimeoutStartSec=20min",
                       "TimeoutStartSec=1min\nTimeoutSec=20min",
