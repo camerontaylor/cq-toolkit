@@ -99,7 +99,8 @@ def record_legacy_success(queue, item, reviewed_paths):
         family = _legacy_family(source["pr"], origin)
         family_history = queue.get("backfill_families", {}).get(family, {})
         scope_history = queue.get("backfill_scope_failures", {}).get(family, {})
-        if not family_history.get("quarantined") and not scope_history.get("quarantined"):
+        released = any(r.get("family") == family for r in queue.get("legacy_coverage_releases", []))
+        if not released and not family_history.get("quarantined") and not scope_history.get("quarantined"):
             queue.get("backfill_families", {}).pop(family, None)
             queue.get("backfill_scope_failures", {}).pop(family, None)
 
