@@ -857,7 +857,15 @@ def boot(run: dict, recorder: Recorder, tools: pathlib.Path | None,
         finally:
             log.close()
     if run["port"] != chosen:
-        save_json(run_dir / "run.json", run)
+        # load_run() hands boot() only three keys, so merge the port into the
+        # on-disk metadata instead of replacing it (image, started_at, ...).
+        meta_path = run_dir / "run.json"
+        try:
+            meta = json.loads(meta_path.read_text())
+        except FileNotFoundError:
+            meta = dict(run)
+        meta["port"] = run["port"]
+        save_json(meta_path, meta)
     return {"pid": pid, "starttime": starttime, "scope_unit": scope_unit,
             "spawned_pid": process.pid, "qemu": argv, "port": run["port"]}
 

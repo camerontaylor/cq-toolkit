@@ -1461,6 +1461,36 @@ class LifecycleTests(unittest.TestCase):
             self.assertIsInstance(outcome, RuntimeError)
             self.assertIn("qemu.log.2", str(outcome.__cause__))
 
+    def test_first_boot_keeps_the_prepared_run_metadata(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = pathlib.Path(temporary)
+            run_dir = state / "runs" / "r1"
+            run_dir.mkdir(parents=True)
+            prepared = {"run_id": "r1", "path": str(run_dir), "port": None,
+                        "image": {"path": "/img", "sha256": "ab"},
+                        "started_at": "2026-11-28T00:00:00Z"}
+            vm.save_json(run_dir / "run.json", prepared)
+            run = vm.load_run(state, "r1", require_process=False)
+
+            class Process:
+                pid = 4321
+
+                def poll(self):
+                    return None
+
+            def popen(argv, **kwargs):
+                (run_dir / "qemu.pid").write_text("4321\n")
+                return Process()
+
+            with mock.patch.object(vm, "require_memory"), \
+                 mock.patch.object(vm, "tool", return_value="/bin/true"), \
+                 mock.patch.object(vm, "free_port", return_value=2224), \
+                 mock.patch.object(vm, "process_starttime", return_value="9"), \
+                 mock.patch.object(vm.subprocess, "Popen", side_effect=popen):
+                vm.boot(run, vm.Recorder(run_dir), None, {"kvm_writable": True})
+            saved = json.loads((run_dir / "run.json").read_text())
+            self.assertEqual(saved, {**prepared, "port": 2224})
+
     def test_boot_does_not_retry_when_the_port_is_free(self):
         with tempfile.TemporaryDirectory() as temporary:
             run_dir = pathlib.Path(temporary) / "r1"
