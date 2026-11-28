@@ -88,6 +88,17 @@ class DeployFixture(unittest.TestCase):
                     self.runner / "ops/deploy-controller.py")
         (self.root / ".gitignore").write_text("apps/crq-python/state/\n")
         self.command("init", "-q")
+        # Repo-local config isolates the fixture from the developer's git
+        # configuration before the first commit: an inherited
+        # commit.gpgSign=true without a key fails setup, and an inherited
+        # core.hooksPath would run developer hooks on fixture commits and
+        # helper checkouts. Being repo-local, the same settings also govern
+        # every git call the real helper and controller make against this
+        # clone.
+        self.empty_hooks = self.base / "empty-hooks"
+        self.empty_hooks.mkdir()
+        self.command("config", "commit.gpgSign", "false")
+        self.command("config", "core.hooksPath", str(self.empty_hooks))
         self.command("config", "user.email", "fixture@example.invalid")
         self.command("config", "user.name", "Fixture")
         self.command("add", ".")
