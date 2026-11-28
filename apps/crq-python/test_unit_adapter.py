@@ -1732,6 +1732,12 @@ class AdapterTests(AdapterFixture):
         self.assertIsNone(adapter_mod._duration_seconds("5min bogus"))
         self.assertIsNone(adapter_mod._duration_seconds(""))
 
+    def test_blank_between_magnitude_and_unit_is_accepted(self):
+        self.assertEqual(adapter_mod._duration_seconds("5min"), 300)
+        self.assertEqual(adapter_mod._duration_seconds("5 min"), 300)
+        self.assertEqual(adapter_mod._duration_seconds("5 min 20s"), 320)
+        self.assertIsNone(adapter_mod._duration_seconds("5 mins"))
+
     def test_forward_and_recovery_for_both_runtimes(self):
         cases = [
             ("crq-tick.service", NODE_RUNTIME, "python", 0o600),

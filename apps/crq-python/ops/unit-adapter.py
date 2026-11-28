@@ -64,8 +64,10 @@ DURATION_UNITS = {
     "years": 31557600, "year": 31557600, "y": 31557600,
 }
 # Longest spelling first so ``min`` never matches as ``m`` and ``ms`` never as ``m``.
+# Blanks may sit between a magnitude and its unit: systemd parses both
+# ``TimeoutStartSec=5 min`` and ``TimeoutStartSec=5min`` as five minutes.
 DURATION_RE = re.compile(
-    r"(?P<value>\d+(?:\.\d+)?)(?P<unit>"
+    r"(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>"
     + "|".join(sorted(map(re.escape, DURATION_UNITS), key=len, reverse=True))
     + ")?")
 UNIT_FILE_STATES = {"enabled", "disabled", "static", "masked", "alias",
@@ -312,7 +314,8 @@ def _section_assignments(text: str, section: str, keys: tuple[str, ...]) -> list
 
 def _duration_seconds(text: str, zero_ok: bool = False) -> int | None:
     # systemd time spans join components with optional whitespace
-    # ("5min 20s", "20min30s"); every component must parse.
+    # ("5min 20s", "20min30s") and allow blanks between a magnitude and its
+    # unit ("5 min", "5min"); every component must parse.
     value = text.strip()
     if not value:
         return None
