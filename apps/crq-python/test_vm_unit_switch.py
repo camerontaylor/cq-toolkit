@@ -629,6 +629,44 @@ class CompletionsReadTests(unittest.TestCase):
         sleep.assert_not_called()
 
 
+class WaitCompletionsRuntimeTests(unittest.TestCase):
+    """The activation wait counts only completions for the released runtime."""
+
+    def _wait(self, snapshots, minimum, runtime):
+        reads = list(snapshots)
+        clock = {"now": 1000.0}
+
+        def read(_path):
+            return reads.pop(0) if len(reads) > 1 else reads[0]
+
+        def sleep(seconds):
+            clock["now"] += 20
+
+        with mock.patch.object(guest_partial, "read_completions", read), \
+                mock.patch.object(guest_partial.time, "time",
+                                  lambda: clock["now"]), \
+                mock.patch.object(guest_partial.time, "sleep", sleep):
+            return guest_partial.wait_completions(minimum, "case", runtime)
+
+    def test_prior_runtime_completion_alone_does_not_end_the_wait(self):
+        prior = [{"runtime": "python"}, {"runtime": "python"}]
+        with self.assertRaisesRegex(Exception, "no released-runtime completion"):
+            self._wait([prior], 1, "node")
+
+    def test_node_completion_ends_the_wait(self):
+        self._wait([[{"runtime": "node"}]], 1, "node")
+
+    def test_node_completion_ends_the_wait_amid_stale_entries(self):
+        stale = [{"runtime": "python"}, {"runtime": "node"}]
+        self._wait([[{"runtime": "python"}], stale], 1, "node")
+
+    def test_stale_node_entries_before_the_boundary_are_not_counted(self):
+        stale = [{"runtime": "node"}]
+        with self.assertRaisesRegex(Exception, "no released-runtime completion"):
+            self._wait([stale + [{"runtime": "python"}]], 2, "node")
+        self._wait([stale, stale + [{"runtime": "node"}]], 2, "node")
+
+
 class HarnessCheckTests(unittest.TestCase):
     def test_complete_evidence_passes(self):
         checks, problems = harness.build_checks(phases())
