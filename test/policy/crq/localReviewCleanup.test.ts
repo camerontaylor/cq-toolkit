@@ -1,3 +1,4 @@
+import { reviewDigest } from '../../../src/ops/review/internal/reviewOperation.js';
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, mkdir, readFile, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -113,7 +114,7 @@ describe('safe local review worktree cleanup', () => {
             kind: 'local-review',
             state: 'reviewing',
             run: { run_id: id },
-            identity: digest,
+            identity: reviewDigest(identity),
             identity_inputs: identity,
             profile,
             observers: [],
