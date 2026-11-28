@@ -1074,8 +1074,10 @@ class HostLayout:
             host.validate(raw)
         except ValueError as exc:
             raise LiveBindingRefused("overlay refused: " + str(exc)[:300]) from exc
-        unit_dir = (Path(os.environ.get(
-            "XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "systemd/user")
+        config_home = os.environ.get("XDG_CONFIG_HOME", "")
+        if not config_home or not Path(config_home).is_absolute():
+            config_home = str(Path.home() / ".config")
+        unit_dir = Path(config_home) / "systemd/user"
         return cls(root=Path(root), unit_dir=unit_dir,
                    record_dir=Path(raw["record_dir"]), overlay=raw)
 
