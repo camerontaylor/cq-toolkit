@@ -525,11 +525,20 @@ class Outbox:
         validate(value)
         for reference in value["payload"].get("artifacts", []):
             self.artifacts.verify(reference)
+        # Admission applies the same per-record bound publish() enforces before
+        # it pushes any group: an unbounded payload.paths list or path/reason
+        # string can otherwise pass validate() yet exceed RECORD_BYTES, and the
+        # durably pending file would fail every later publish() at the same
+        # point, blocking all valid records behind it. Reject before the
+        # durable write so a successful spool leaves only publishable records.
+        encoded = canonical(value)
+        if len(encoded) > RECORD_BYTES:
+            raise IntegrityError("ledger record exceeds validation bound")
         filename = self.root / "pending" / (value["id"] + ".json")
         with locked(self.root / "outbox.lock"):
             if filename.exists() and loads(filename.read_bytes()) != value:
                 raise IntegrityError("outbox replay conflict")
-            atomic(filename, canonical(value))
+            atomic(filename, encoded)
         return value["id"]
 
     def retained(self):

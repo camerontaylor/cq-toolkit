@@ -162,6 +162,16 @@ describe('outbox against the Python oracle', () => {
     expect(files.lockCalls).toBe(0);
   });
 
+  test('spool refuses an oversized record before any write', async () => {
+    const caseEntry = caseNamed('spool-refuses-oversized');
+    const { files, outbox } = settings();
+    await expect(outbox.spool(valueOf(caseEntry))).rejects.toThrow(
+      stringAt(caseEntry.expect, 'message'),
+    );
+    expect(files.pending.size).toBe(0);
+    expect(files.lockCalls).toBe(0);
+  });
+
   test('an acknowledgement requires a remote id', async () => {
     const caseEntry = caseNamed('acknowledge-requires-remote');
     const { outbox } = settings();
