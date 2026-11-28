@@ -425,6 +425,11 @@ class DownloadTests(unittest.TestCase):
 class DiscardWarningTests(unittest.TestCase):
     """An unlink failure during cleanup must not leak to stderr in --json."""
 
+    def setUp(self):
+        # main() sets the module flag; keep tests order-independent.
+        self.addCleanup(setattr, vm, "_MACHINE_MODE", vm._MACHINE_MODE)
+        vm._MACHINE_MODE = False
+
     class _Broken:
         def __enter__(self):
             return self
@@ -472,6 +477,26 @@ class DiscardWarningTests(unittest.TestCase):
         with mock.patch.object(pathlib.Path, "unlink",
                                side_effect=OSError("read-only")):
             vm.discard("/x/part", primary)  # must not raise
+
+    def test_main_sets_machine_mode_for_the_fallback_path(self):
+        import contextlib
+        import io
+
+        def command(args):
+            vm.discard("/x/part")  # no exception in flight: fallback path
+            return 0
+
+        for argv, expect_warning in ((["--json", "fetch"], False), (["fetch"], True)):
+            err = io.StringIO()
+            with mock.patch.object(vm, "cmd_fetch", command), \
+                    mock.patch.object(pathlib.Path, "unlink",
+                                      side_effect=OSError("read-only")), \
+                    contextlib.redirect_stderr(err):
+                self.assertEqual(vm.main(argv), 0)
+            if expect_warning:
+                self.assertIn("warning: could not remove", err.getvalue())
+            else:
+                self.assertEqual(err.getvalue(), "")
 
     def test_fallback_is_silent_in_machine_mode(self):
         import contextlib
