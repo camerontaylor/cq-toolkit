@@ -91,6 +91,16 @@ def _load_helper(path: Path, expected_sha256: str | None = None):
     return module, digest
 
 
+def user_config_home() -> Path:
+    """XDG config home: an empty or relative XDG_CONFIG_HOME falls back to
+    ~/.config, per the XDG spec. Shared by the unit observation here and
+    the live binding's unit directory so both read one directory."""
+    config_home = os.environ.get("XDG_CONFIG_HOME", "")
+    if not config_home or not Path(config_home).is_absolute():
+        return Path.home() / ".config"
+    return Path(config_home)
+
+
 def _load_live_binding(path: Path | None = None):
     """Load the live binding only when a production unit switch runs.
 
@@ -338,8 +348,7 @@ class Effects:
         """Read-only observation of installed CRQ user units and their
         enablement links ($XDG_CONFIG_HOME/systemd/user, default
         ~/.config): file digests and link targets, never systemctl."""
-        home = Path(os.environ.get("XDG_CONFIG_HOME",
-                                   str(Path.home() / ".config"))) / "systemd/user"
+        home = user_config_home() / "systemd/user"
         units = {}
         if not home.is_dir():
             return units
