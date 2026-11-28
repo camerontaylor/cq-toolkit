@@ -1982,6 +1982,26 @@ class PlanTests(unittest.TestCase):
         artifact = json.loads(out.getvalue())
         self.assertEqual(artifact["error"]["kind"], "thrown")
 
+    def test_json_mode_serializes_operator_interrupts(self):
+        import contextlib
+        import io
+
+        def interrupted(args):
+            exc = KeyboardInterrupt()
+            exc.add_note("cleanup after failed boot: boom")
+            raise exc
+
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(vm, "cmd_boot", interrupted), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = vm.main(["--json", "boot"])
+        self.assertEqual(code, 1)
+        self.assertEqual(err.getvalue(), "")
+        artifact = json.loads(out.getvalue())
+        self.assertEqual(artifact["error"]["kind"], "interrupted")
+        self.assertEqual(artifact["error"]["exitCode"], 1)
+        self.assertIn("cleanup after failed boot: boom", artifact["error"]["message"])
+
     def test_json_mode_serializes_malformed_report_containers(self):
         import contextlib
         import io

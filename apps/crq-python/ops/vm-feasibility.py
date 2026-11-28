@@ -1828,9 +1828,10 @@ def main(argv=None) -> int:
             print("error: " + message, file=sys.stderr)
         return 1
     except KeyboardInterrupt as exc:
-        # An operator interrupt (Ctrl-C during, say, SSH readiness) reaches
-        # here only after cmd_boot/cmd_run cleaned up their guest in their
-        # BaseException branch. Without this boundary handler stdout would
+        # An operator interrupt (Ctrl-C during, say, SSH readiness) is
+        # re-raised by cmd_boot/cmd_run after their BaseException branch
+        # cleans up; other subcommands (and `run --keep`) may leave state
+        # behind, so this handler reports only. Without it stdout would
         # carry no JSON artifact in machine mode (I1); _error_message keeps
         # the notes cleanup attached to the re-raised interrupt. An interrupt
         # is a thrown error, so it stays inside the exit-code contract (1)
