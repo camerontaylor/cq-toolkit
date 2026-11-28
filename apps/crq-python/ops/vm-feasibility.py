@@ -808,13 +808,32 @@ def boot(run: dict, recorder: Recorder, tools: pathlib.Path | None,
                              "scope_unit": scope_unit})
             deadline = time.time() + 30
             pid_path = run_dir / "qemu.pid"
-            while time.time() < deadline and not pid_path.exists():
+            # The pid file alone does not prove the launch worked: the QEMU
+            # 9.2.0 build whose ordering this probe observed writes its pid
+            # file before it initializes the network, so QEMU can still fail
+            # the hostfwd bind and exit after the file appears -- leaving an
+            # identity recorded for a process that never served its port.
+            # Ready means the pid file exists and the forwarded port is held,
+            # the sign network initialization completed, seen across two
+            # consecutive polls so a lost bind surfaces as an exit here
+            # instead of a success. Either exit raises into the retry path
+            # below, as before.
+            confirmed = 0
+            while time.time() < deadline:
                 if process.poll() is not None:
                     raise RuntimeError(
-                        "QEMU exited before writing its pid file; see %s" % log_name)
+                        "QEMU exited before binding port %d; see %s"
+                        % (port, log_name))
+                if pid_path.exists() and port_held(port):
+                    confirmed += 1
+                    if confirmed >= 2:
+                        break
+                else:
+                    confirmed = 0
                 time.sleep(0.25)
-            if not pid_path.exists():
-                raise RuntimeError("QEMU did not write a pid file")
+            else:
+                raise RuntimeError(
+                    "QEMU did not write a pid file and bind port %d" % port)
             pid = int(pid_path.read_text().strip())
             starttime = process_starttime(pid)
             (run_dir / "process.json").write_text(json.dumps(

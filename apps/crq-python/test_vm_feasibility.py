@@ -1385,7 +1385,10 @@ class LifecycleTests(unittest.TestCase):
             run_dir.mkdir()
             run = {"run_id": "r1", "path": str(run_dir), "port": None}
             ports = iter([2222, 2223])
-            held = iter([True, False])
+            # The first True is the lost bind on 2222 that sends boot to the
+            # retry path; the next two are the wait loop seeing port 2223
+            # held by QEMU across two consecutive polls.
+            held = iter([True, True, True])
 
             class Process:
                 pid = 4321
@@ -1485,6 +1488,7 @@ class LifecycleTests(unittest.TestCase):
             with mock.patch.object(vm, "require_memory"), \
                  mock.patch.object(vm, "tool", return_value="/bin/true"), \
                  mock.patch.object(vm, "free_port", return_value=2224), \
+                 mock.patch.object(vm, "port_held", return_value=True), \
                  mock.patch.object(vm, "process_starttime", return_value="9"), \
                  mock.patch.object(vm.subprocess, "Popen", side_effect=popen):
                 vm.boot(run, vm.Recorder(run_dir), None, {"kvm_writable": True})
