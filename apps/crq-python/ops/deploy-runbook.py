@@ -811,6 +811,24 @@ class Run:
                 "recorded rollback config bytes. Choose a target with "
                 "rollback_config support. Nothing has been switched.")
 
+        # The drain loop passes deadline= and clock= to the TARGET
+        # controller's drain_check. A target that predates them would raise
+        # TypeError mid-drain; run()'s catch-all recovery would restart the
+        # triggers, release this run's hold marker and re-raise as Refused,
+        # but only after one avoidable stop/restart of the live triggers and
+        # with a confusing
+        # "unexpected keyword argument" message. Refuse before anything is
+        # switched. Like the checks above, this tests literal parameter
+        # names, so a **kwargs-only or undecorated-wrapper signature is
+        # refused (the safe direction).
+        drain_parameters = inspect.signature(
+            self.controller.drain_check).parameters
+        require("deadline" in drain_parameters
+                and "clock" in drain_parameters,
+                "the target revision's deploy-controller.drain_check cannot "
+                "bound the queue drain by deadline. Choose a target with "
+                "drain deadline support. Nothing has been switched.")
+
     # -- steps ---------------------------------------------------------
     def refuse_unfinished_controller_transactions(self):
         """Run the controller's unfinished-transaction guard before admission.
@@ -997,7 +1015,15 @@ class Run:
             polls = []
             deadline = self.clock() + self.args.drain_deadline_s
             while True:
-                result = self.controller.drain_check(self.effects, liveness)
+                # The deadline is enforced inside the scan, not only around
+                # it: the controller caps each probe to the time left and
+                # reports work it never observed before expiry as
+                # unresolved, so a poll whose probes all run to their own
+                # timeout cannot spend minutes past the deadline before
+                # this loop reads the clock again.
+                result = self.controller.drain_check(self.effects, liveness,
+                                                     deadline=deadline,
+                                                     clock=self.clock)
                 polls.append(result)
                 # A drained answer only counts while the deadline holds: an
                 # observation taken at or after expiry fails closed, even if

@@ -709,7 +709,8 @@ def preflight(effects: Effects, target: str, tag: str) -> dict:
 # -------------------------------------------------------------------- drain
 
 
-def drain_check(effects: Effects, liveness) -> dict:
+def drain_check(effects: Effects, liveness, deadline=None,
+                clock=time.monotonic) -> dict:
     """Exact owned-PID drain observation. The controller NEVER signals or
     kills a process; it observes liveness and refuses while any queue-owned
     review is alive or ambiguous.
@@ -717,6 +718,14 @@ def drain_check(effects: Effects, liveness) -> dict:
     ``liveness(rdir, item, r, has_exit)`` is the runner's own fail-closed
     probe (crq.run_liveness); supplying it keeps the controller's ownership
     semantics identical to the runner's.
+
+    ``deadline`` bounds the scan itself for callers that poll under a
+    deadline (the deploy runbook): an absolute ``clock`` reading, and each
+    recorded run's probe is given only the time that still remains, so a
+    probe that runs to its own timeout cannot push one poll minutes past
+    the deadline. A run not yet observed when time expires is reported
+    unresolved: never probed, and never a drained answer. Without a
+    ``deadline`` the scan is unchanged.
     """
     try:
         queue = read_queue(effects)
@@ -749,8 +758,21 @@ def drain_check(effects: Effects, liveness) -> dict:
             continue
         rdir = runs / run_id
         has_exit = (rdir / "exit.json").exists()
+        budget = {}
+        if deadline is not None:
+            left = deadline - clock()
+            if left <= 0:
+                # Fail closed without probing: an unobserved run proves
+                # nothing about its process, and probing it could spend
+                # another full probe timeout past the caller's deadline.
+                blocked.append({"item": item.get("id"), "state": "unresolved",
+                                "run": run_id,
+                                "reason": "drain deadline expired before its "
+                                          "liveness probe ran"})
+                continue
+            budget = {"timeout": left}
         try:
-            state = liveness(rdir, item, r, has_exit)
+            state = liveness(rdir, item, r, has_exit, **budget)
         except Exception as exc:  # probe failure is ambiguous, never an absence proof
             blocked.append({"item": item.get("id"), "state": "ambiguous",
                             "reason": "liveness probe failed: " + str(exc)[:120]})
@@ -2360,6 +2382,8 @@ def retained_deploy_records(effects: Effects, deployed: str) -> list[dict]:
     return current
 
 
+_RUNNER_PROBE_TIMEOUT_S = 30
+
 _RUNNER_PROBE = """import importlib.util, json, sys
 from pathlib import Path
 runner = Path(sys.argv[1])
@@ -2380,13 +2404,16 @@ def _runner_liveness(effects):
     # cached modules. -B preserves the helper's checkout cleanliness fence.
     runner = effects.root / "apps/crq-python/crq.py"
 
-    def probe(rdir, item, run, has_exit):
+    def probe(rdir, item, run, has_exit, timeout=_RUNNER_PROBE_TIMEOUT_S):
+        # An enforced drain deadline passes a smaller budget; this probe
+        # never waits longer than its own default either way.
         try:
             result = subprocess.run(
                 [sys.executable, "-I", "-B", "-c", _RUNNER_PROBE, str(runner)],
                 input=json.dumps({"rdir": str(rdir), "item": item,
                                   "run": run, "has_exit": has_exit}),
-                capture_output=True, text=True, timeout=30)
+                capture_output=True, text=True,
+                timeout=min(_RUNNER_PROBE_TIMEOUT_S, timeout))
             if result.returncode != 0:
                 return "ambiguous"
             state = json.loads(result.stdout)
