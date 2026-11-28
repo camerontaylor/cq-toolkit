@@ -74,6 +74,10 @@ OVERLAY_SIZE = "8G"
 MIN_AVAILABLE_KIB = 2 * 1024 * 1024
 SCOPE_MEMORY = "3G"
 SSH_KEY = "id_ed25519"
+# A launch whose SSH host forward cannot bind retries on a fresh port this
+# many times: ``free_port`` only proves a port was bindable until its probe
+# socket closes, so the port can be taken again before QEMU binds it.
+PORT_BIND_ATTEMPTS = 5
 REPORT_SCHEMA = 2
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 # A run id becomes a path component and part of a systemd unit name, where
@@ -104,6 +108,15 @@ class UsageRefusal(ValueError):
     Only this dedicated exception is a usage error (exit 2, doctrine I1).
     Every other ``ValueError`` -- e.g. ``verify_image`` rejecting a corrupted
     cached image -- is a thrown runtime error (exit 1).
+    """
+
+
+class PortBusy(RuntimeError):
+    """QEMU died because its SSH host forward could not bind the chosen port.
+
+    ``boot`` treats this one early-exit cause as retryable: it selects the
+    forwarded port at launch time, and another guest may have bound the port
+    between the probe and the spawn.
     """
 
 
@@ -281,6 +294,19 @@ def free_port(start: int = 2222, end: int = 2299) -> int:
                 continue
             return port
     raise ValueError("no free forwarded port in range")
+
+
+def host_forward_refused(log_path: pathlib.Path) -> bool:
+    """True when a QEMU log shows the SSH host forward failed to bind.
+
+    This is the one early-exit cause ``boot`` retries: the port looked free
+    when ``free_port`` probed it, but another guest bound it first.
+    """
+    try:
+        text = pathlib.Path(log_path).read_text(errors="replace")
+    except OSError:
+        return False
+    return "Could not set up host forwarding rule" in text
 
 
 def process_starttime(pid: int, proc: pathlib.Path = pathlib.Path("/proc")):
@@ -684,7 +710,10 @@ def prepare_run(state: pathlib.Path, image: dict, recorder: Recorder,
                   str(run / "overlay.qcow2"), OVERLAY_SIZE],
                  check=True, cwd=run)
     return {"run_id": run_id, "path": str(run), "image": image,
-            "port": free_port(), "started_at": utc_now()}
+            # No port is chosen here: free_port() closes its probe socket, so
+            # a port saved at prepare time is not provably free by launch.
+            # boot() selects and persists the port under the run lock.
+            "port": None, "started_at": utc_now()}
 
 
 def live_identity(run: dict) -> dict | None:
@@ -737,6 +766,16 @@ def run_scope_unit(run_dir: pathlib.Path, run_id: str) -> str:
 
 def boot(run: dict, recorder: Recorder, tools: pathlib.Path | None,
          stamp: dict) -> dict:
+    """Launch the run's guest; callers hold the run lock across this call.
+
+    The forwarded port is selected here at launch time, under that lock, not
+    at prepare time: ``free_port`` only proves a port was bindable until its
+    probe socket closes, so a port saved by ``prepare`` can already be owned
+    by another live guest by the time this launch binds it. Each attempt
+    therefore picks a fresh port, a launch whose SSH host forward cannot bind
+    is retried within a fixed budget, and the port bound by the successful
+    launch is persisted to run.json.
+    """
     require_memory(pathlib.Path("/proc/meminfo").read_text())
     if not stamp["kvm_writable"]:
         raise ValueError("/dev/kvm is not writable; no KVM acceleration")
@@ -752,58 +791,80 @@ def boot(run: dict, recorder: Recorder, tools: pathlib.Path | None,
             pass
     unit = run_scope_unit(run_dir, run["run_id"])
     scope_unit = unit + ".scope"
-    qemu = qemu_command(run_dir, run["port"])
-    qemu[0] = tool("qemu-system-x86_64", tools)
-    argv = bounded_scope_argv(qemu, unit)
-    log = (run_dir / "qemu.log").open("wb")
-    process = subprocess.Popen(argv, cwd=run_dir, stdout=log, stderr=subprocess.STDOUT,
-                               start_new_session=True)
-    try:
-        # The launch record is written inside the guarded block so a failure
-        # here cannot skip the cleanup below: the spawned child is terminated
-        # and reaped before the run lock is released, before it can start
-        # QEMU after this process exits.
-        recorder.append({"at": utc_now(), "argv": argv, "spawned_pid": process.pid,
-                         "scope_unit": scope_unit})
-        deadline = time.time() + 30
-        pid_path = run_dir / "qemu.pid"
-        while time.time() < deadline and not pid_path.exists():
-            if process.poll() is not None:
-                raise RuntimeError("QEMU exited before writing its pid file; see qemu.log")
-            time.sleep(0.25)
-        if not pid_path.exists():
-            raise RuntimeError("QEMU did not write a pid file")
-        pid = int(pid_path.read_text().strip())
-        starttime = process_starttime(pid)
-        (run_dir / "process.json").write_text(json.dumps(
-            {"pid": pid, "starttime": starttime, "scope_unit": scope_unit},
-            indent=2) + "\n")
-    except BaseException:
-        identity_ok = False
-        identity_path = run_dir / "process.json"
-        if identity_path.exists():
-            try:
-                identity = json.loads(identity_path.read_text())
-                pid = identity.get("pid")
-                identity_ok = (
-                    isinstance(pid, int)
-                    and identity.get("scope_unit") == scope_unit
-                    and process_matches(pid, identity.get("starttime"),
-                                        str(run_dir / "overlay.qcow2")))
-            except (OSError, ValueError):
-                identity_ok = False
-        if identity_ok:
-            subprocess.run(["systemctl", "--user", "stop", scope_unit],
-                           capture_output=True, text=True)
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-        raise
-    finally:
-        log.close()
+    qemu_binary = tool("qemu-system-x86_64", tools)
+    for attempt in range(PORT_BIND_ATTEMPTS):
+        run["port"] = free_port()
+        qemu = qemu_command(run_dir, run["port"])
+        qemu[0] = qemu_binary
+        argv = bounded_scope_argv(qemu, unit)
+        log = (run_dir / "qemu.log").open("wb")
+        process = subprocess.Popen(argv, cwd=run_dir, stdout=log,
+                                   stderr=subprocess.STDOUT,
+                                   start_new_session=True)
+        try:
+            # The launch record is written inside the guarded block so a failure
+            # here cannot skip the cleanup below: the spawned child is terminated
+            # and reaped before the run lock is released, before it can start
+            # QEMU after this process exits.
+            recorder.append({"at": utc_now(), "argv": argv, "spawned_pid": process.pid,
+                             "scope_unit": scope_unit})
+            deadline = time.time() + 30
+            pid_path = run_dir / "qemu.pid"
+            while time.time() < deadline and not pid_path.exists():
+                if process.poll() is not None:
+                    if host_forward_refused(run_dir / "qemu.log"):
+                        raise PortBusy("forwarded port %d is already bound; "
+                                       "see qemu.log" % run["port"])
+                    raise RuntimeError(
+                        "QEMU exited before writing its pid file; see qemu.log")
+                time.sleep(0.25)
+            if not pid_path.exists():
+                raise RuntimeError("QEMU did not write a pid file")
+            pid = int(pid_path.read_text().strip())
+            starttime = process_starttime(pid)
+            (run_dir / "process.json").write_text(json.dumps(
+                {"pid": pid, "starttime": starttime, "scope_unit": scope_unit},
+                indent=2) + "\n")
+        except PortBusy:
+            # The wrapper is already exiting; reap it like any failed launch,
+            # then take the next port while the run lock is still held.
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+            if attempt + 1 >= PORT_BIND_ATTEMPTS:
+                raise
+            continue
+        except BaseException:
+            identity_ok = False
+            identity_path = run_dir / "process.json"
+            if identity_path.exists():
+                try:
+                    identity = json.loads(identity_path.read_text())
+                    pid = identity.get("pid")
+                    identity_ok = (
+                        isinstance(pid, int)
+                        and identity.get("scope_unit") == scope_unit
+                        and process_matches(pid, identity.get("starttime"),
+                                            str(run_dir / "overlay.qcow2")))
+                except (OSError, ValueError):
+                    identity_ok = False
+            if identity_ok:
+                subprocess.run(["systemctl", "--user", "stop", scope_unit],
+                               capture_output=True, text=True)
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+            raise
+        finally:
+            log.close()
+        break
+    persist_run_port(run)
     return {"pid": pid, "starttime": starttime, "scope_unit": scope_unit,
             "spawned_pid": process.pid, "qemu": argv, "port": run["port"]}
 
@@ -1249,6 +1310,24 @@ def save_json(path: pathlib.Path, value) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
 
 
+def persist_run_port(run: dict) -> None:
+    """Record the port bound by the successful launch in run.json.
+
+    Metadata already in run.json is kept -- only the port changes. ``run`` is
+    updated in place by the caller as well, so the same invocation's later ssh
+    calls target the port the guest actually forwards.
+    """
+    meta_path = pathlib.Path(run["path"]) / "run.json"
+    try:
+        meta = json.loads(meta_path.read_text())
+    except (OSError, ValueError):
+        meta = None
+    if not isinstance(meta, dict):
+        meta = dict(run)
+    meta["port"] = run["port"]
+    save_json(meta_path, meta)
+
+
 # -------------------------------------------------------------------- cli
 
 
@@ -1333,9 +1412,6 @@ def _cleanup_diagnostic(args, prefix: str, cleanup_error: Exception,
 def cmd_boot(args) -> int:
     state = pathlib.Path(args.state_dir).expanduser().resolve()
     run = load_run(state, args.run_id, require_process=False)
-    if not run["port"]:
-        run["port"] = free_port()
-        save_json(pathlib.Path(run["path"]) / "run.json", run)
     recorder = Recorder(pathlib.Path(run["path"]))
     stamp = host_stamp()
     entered_boot = False
