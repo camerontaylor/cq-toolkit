@@ -356,9 +356,10 @@ def require_source(payload):
     return payload
 
 
-def wait_completions(minimum, label):
+def wait_completions(minimum, label, runtime=None):
     deadline = time.time() + 60
-    while len(read_completions(REPAIR_COMPLETIONS)) < minimum:
+    while len([item for item in read_completions(REPAIR_COMPLETIONS)
+               if runtime is None or item.get("runtime") == runtime]) < minimum:
         require(time.time() < deadline,
                 label + " produced no released-runtime completion in the bound")
         time.sleep(0.2)
@@ -459,8 +460,10 @@ def partial_activation_boundary(args):
             + json.dumps(cli.get("rc")))
     hook_marker = _hook_marker(spec["hook"], "activation " + case)
     if spec["hook"] != "start-after-service":
-        wait_completions(len(before["repair_completions"]) + 1,
-                         "activation " + case)
+        released_before = [item for item in before["repair_completions"]
+                           if item.get("runtime") == spec["runtime"]]
+        wait_completions(len(released_before) + 1, "activation " + case,
+                         spec["runtime"])
     after = partial_snapshot(directory)
     record = require_pending_record(after["records"], "activation_pending",
                                     spec["runtime"], spec["prior_runtime"],
