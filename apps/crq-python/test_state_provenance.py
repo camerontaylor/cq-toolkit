@@ -77,7 +77,7 @@ class ProvenanceFixtureTest(unittest.TestCase):
                     matches = [item for item in items if key in item]
                     self.assertTrue(matches, f"{kind} has no fixture item with {key}")
                     self.assertTrue(
-                        any(compatible(item[key], spec) for item in matches),
+                        all(compatible(item[key], spec) for item in matches),
                         f"{kind}.{key} fixture type does not match {spec}")
 
     def test_sidecars_cover_real_schema(self):
@@ -99,7 +99,7 @@ class ProvenanceFixtureTest(unittest.TestCase):
             with self.subTest(event_key=key):
                 values = keyed(self.events, key)
                 self.assertTrue(values)
-                self.assertTrue(any(compatible(value, spec) for value in values),
+                self.assertTrue(all(compatible(value, spec) for value in values),
                                 f"event {key} type does not match {spec}")
 
         for key, spec in self.manifest["work_keys"].items():
@@ -108,7 +108,7 @@ class ProvenanceFixtureTest(unittest.TestCase):
             with self.subTest(work_key=key):
                 values = keyed(self.work, key)
                 self.assertTrue(values)
-                self.assertTrue(any(compatible(value, spec) for value in values),
+                self.assertTrue(all(compatible(value, spec) for value in values),
                                 f"work {key} type does not match {spec}")
 
     def test_run_artifacts_cover_real_schema(self):

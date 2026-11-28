@@ -400,7 +400,7 @@
       ],
       "failures": 0,
       "last_error": null,
-      "success_at": null,
+      "success_at": "",
       "repair_runs": {},
       "dispatched": "2026-11-09T00:00:00Z",
       "gate_stalled_at": "2026-11-09T00:00:00Z",
