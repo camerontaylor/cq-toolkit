@@ -3406,6 +3406,89 @@ class PartialHarnessCheckTests(unittest.TestCase):
                                 for item in problems), problems)
 
 
+class DrainFixtureCleanupTests(unittest.TestCase):
+    """A fixture-launch failure inside a drain phase must still clean up."""
+
+    def setUp(self):
+        self.spawned = []
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.state = pathlib.Path(tmp.name)
+        (self.state / "runs").mkdir()
+        (self.state / "queue.json").write_text('{"items": []}\n')
+        real = guest.spawn_detached
+
+        def spawn(marker, seconds=600):
+            if marker == "crq-drain-unrelated":
+                raise RuntimeError("launch failed")
+            proc, state = real(marker, seconds)
+            self.spawned.append(proc)
+            return proc, state
+
+        def reap():
+            for proc in self.spawned:
+                if proc.poll() is None:
+                    proc.kill()
+                proc.wait()
+
+        self.addCleanup(reap)
+        stack = contextlib.ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(mock.patch.object(guest, "STATE", self.state))
+        stack.enter_context(mock.patch.object(
+            guest, "baseline", return_value={"state": {}}))
+        stack.enter_context(mock.patch.object(
+            guest, "load_adapter",
+            return_value=mock.Mock(GuestFixtureAdapter=mock.Mock())))
+        stack.enter_context(mock.patch.object(
+            guest, "spawn_detached", side_effect=spawn))
+
+    def _assert_clean(self):
+        self.assertEqual(sorted((self.state / "runs").iterdir()), [])
+        for proc in self.spawned:
+            self.assertIsNotNone(proc.poll(), "seed child was left running")
+
+    def _fails_with_launch_error(self, phase, args):
+        with self.assertRaisesRegex(RuntimeError, "launch failed"):
+            phase(args)
+        self._assert_clean()
+
+    def test_drain_refuse_alive_cleans_up_after_unrelated_launch_fails(self):
+        self._fails_with_launch_error(guest.drain_refuse_phase, mock.Mock(
+            seed="alive", runtime="python"))
+        self.assertEqual(len(self.spawned), 1)
+
+    def test_drain_refuse_ambiguous_cleans_up_after_launch_fails(self):
+        self._fails_with_launch_error(guest.drain_refuse_phase, mock.Mock(
+            seed="ambiguous", runtime="python"))
+
+    def test_drain_harvest_cleans_up_after_unrelated_launch_fails(self):
+        self._fails_with_launch_error(guest.drain_harvest_phase, mock.Mock())
+
+    def test_recover_drain_refuse_cleans_up_after_launch_fails(self):
+        # The phase refuses before the fixtures unless a retained drained
+        # intent exists, so assert the fixtures sit inside the try instead.
+        import ast
+        tree = ast.parse(GUEST_BYTES.decode())
+        func = next(n for n in ast.walk(tree)
+                    if isinstance(n, ast.FunctionDef)
+                    and n.name == "recover_drain_refuse_phase")
+        tries = [n for n in ast.walk(func) if isinstance(n, ast.Try)]
+        owner = next(t for t in tries if t.finalbody)
+        inside = {c.func.id for stmt in owner.body for c in ast.walk(stmt)
+                  if isinstance(c, ast.Call)
+                  and isinstance(c.func, ast.Name)}
+        self.assertLessEqual({"seed_drain_work", "spawn_detached"}, inside)
+
+    def test_seed_stops_alive_child_when_identity_write_fails(self):
+        with mock.patch.object(guest, "write_run_identity",
+                               side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                guest.seed_drain_work("alive")
+        self.assertEqual(len(self.spawned), 1)
+        self.assertIsNotNone(self.spawned[0].poll())
+
+
 class FinishCleanupTests(unittest.TestCase):
     def test_restore_runs_after_a_process_stop_failure(self):
         calls = []

@@ -318,8 +318,14 @@ def seed_drain_work(kind):
     proc = None
     if kind == "alive":
         proc, state = spawn_detached(marker)
-        identity = write_run_identity(run_id, proc.pid,
-                                      starttime=state.get("starttime"))
+        try:
+            identity = write_run_identity(run_id, proc.pid,
+                                          starttime=state.get("starttime"))
+        except BaseException:
+            # The caller has no handle on the child until this returns, so a
+            # failed identity write must not strand the live process.
+            stop_process(proc)
+            raise
         run = {"run_id": run_id, "pid": proc.pid}
     elif kind == "ambiguous":
         # The queue records a run but the ownership evidence is incomplete:
