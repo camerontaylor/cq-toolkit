@@ -575,6 +575,14 @@ class InventoryTests(unittest.TestCase):
             self.assertTrue(entry["timer_wants"])
             self.assertIn(entry["service"], entry["blobs"])
 
+    def test_whitespace_form_exec_start_template_is_accepted(self):
+        path = self.template("crq-tick.service")
+        text = path.read_text()
+        self.assertIn("\nExecStart=", text)
+        path.write_text(text.replace("\nExecStart=", "\nExecStart =", 1))
+        sha = self.commit()
+        self.assertIn("crq-tick.service", adapter_mod.declared_inventory(self.root, sha))
+
     def test_declared_inventory_parses_schedules(self):
         inventory = adapter_mod.declared_inventory(self.root, self.sha)
         self.assertEqual(inventory["crq-tick.service"]["timer_bound_seconds"],
@@ -789,6 +797,21 @@ class SavedServiceTypeTests(AdapterFixture):
     def test_explicit_oneshot_is_kept(self):
         self.assertEqual(self._type("[Service]\nType = oneshot\nExecStart=/bin/x\n"),
                          "oneshot")
+
+
+class InstalledExecStartTests(AdapterFixture):
+    def _runtime(self, body):
+        path = self.base / "installed.service"
+        path.write_text(body)
+        return self.adapter._runtime_from_unit(path)
+
+    def test_whitespace_form_exec_start_is_counted_once(self):
+        # An unrecognized shape proves the directive was found and parsed,
+        # rather than refused as a missing ExecStart.
+        with self.assertRaisesRegex(dc.Refused, "not the expected shape"):
+            self._runtime("[Service]\nExecStart =/usr/bin/env\n")
+        with self.assertRaisesRegex(dc.Refused, "exactly one ExecStart"):
+            self._runtime("[Service]\nExecStart =/a\nExecStart  = /b\n")
 
 
 class AdapterTests(AdapterFixture):

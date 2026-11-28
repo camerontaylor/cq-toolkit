@@ -448,41 +448,61 @@ def unit_command(unit, runtime, home=None):
             + ' ' + UNIT_COMMANDS[unit])
 
 
+def _exec_start_logical(lines):
+    """Yield ``(start, end, logical)`` for each effective ExecStart directive.
+
+    Physical lines ending in an odd run of backslashes (an even run is
+    escaped) join into one logical line, as systemd reads them, so a lone
+    ``\\`` line followed by ``ExecStart=/old`` is one directive that starts
+    at the ``\\`` line. Comment lines (``#`` or ``;``) are skipped whether or
+    not a join is pending, so a comment's trailing backslash never continues.
+    ``end`` is exclusive; ``logical`` is the joined text, joined with a space
+    as systemd does.
+    """
+    def continues(body):
+        return (len(body) - len(body.rstrip('\\'))) % 2 == 1
+    start = None
+    logical = ''
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith(('#', ';')):
+            continue
+        if start is None:
+            start = i
+            logical = ''
+        body = line.rstrip('\r\n')
+        if continues(body):
+            logical += body[:-1] + ' '
+            continue
+        logical += body
+        head, sep, _ = logical.lstrip().partition('=')
+        if sep and head.strip() == 'ExecStart':
+            yield start, i + 1, logical
+        start = None
+    if start is not None:
+        head, sep, _ = logical.lstrip().partition('=')
+        if sep and head.strip() == 'ExecStart':
+            yield start, len(lines), logical
+
+
 def exec_start_directives(lines):
     """Spans of physical lines forming each effective ExecStart directive.
 
     systemd skips leading whitespace and comment lines and allows whitespace
     around the assignment ``=``, so ``ExecStart =`` names the same directive
-    as ``ExecStart=``. Physical lines ending in an odd run of backslashes
-    (an even run is escaped) join into one logical directive, and comment
-    lines, whether or not a join is pending, neither end a join, start one
-    (a comment's trailing backslash is not a continuation) nor start a directive; replacing only
-    the first physical line would leave a stale fragment of the old command.
+    as ``ExecStart=``; the directive is classified on its joined logical
+    line, so a lone backslash line before it still counts. Replacing only the
+    first physical line would leave a stale fragment of the old command.
     Each span is the half-open range ``[start, end)`` of physical lines, so
     one parser serves validation (the count), replacement (the span) and
     ``exec_start`` reporting (the directive's first line).
     """
-    def continues(line):
-        body = line.rstrip('\r\n')
-        return (len(body) - len(body.rstrip('\\'))) % 2 == 1
-    spans = []
-    start = None
-    pending = False
-    is_exec = False
-    for i, line in enumerate(lines):
-        if line.lstrip().startswith(('#', ';')):
-            continue
-        begins = not pending
-        pending = continues(line)
-        if begins:
-            start = i
-            head, sep, _ = line.lstrip().partition('=')
-            is_exec = bool(sep) and head.strip() == 'ExecStart'
-        if not pending and is_exec:
-            spans.append((start, i + 1))
-    if pending and is_exec:
-        spans.append((start, len(lines)))
-    return spans
+    return [(start, end) for start, end, _ in _exec_start_logical(lines)]
+
+
+def exec_start_arguments(text):
+    """Argument text after ``=`` of each effective ExecStart in ``text``."""
+    return [logical.lstrip().partition('=')[2].strip()
+            for _, _, logical in _exec_start_logical(text.splitlines(keepends=True))]
 
 
 def render_service_text(template_name, template_text, runner_root, command=None):

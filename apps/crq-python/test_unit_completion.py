@@ -878,6 +878,16 @@ class ParserTests(unittest.TestCase):
                 ["/usr/bin/env", "python3",
                  "/checkout/apps/crq-python/crq.py", "tick"])
 
+    def test_exec_start_whitespace_form_is_parsed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / UNIT
+            path.write_text("[Service]\nExecStart =/usr/bin/env python3 /x\n")
+            self.assertEqual(completion.parse_exec_start_from_unit(path),
+                             ["/usr/bin/env", "python3", "/x"])
+            path.write_text("[Service]\nExecStart =/a\nExecStart=/b\n")
+            with self.assertRaises(completion.CompletionRefused):
+                completion.parse_exec_start_from_unit(path)
+
     def test_journal_json_parses_records(self):
         records = completion.parse_journal_json(
             json.dumps({"_BOOT_ID": BOOT}) + "\n", max_records=2)

@@ -313,6 +313,21 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
                         'u', '[Service]\n' + head + '/a\n' + head + '/b\n',
                         '/r', 'NEW')
 
+    def test_lone_backslash_line_joins_the_following_exec_start(self):
+        def render(body):
+            return host.render_service_text('u', '[Service]\n' + body, '/r', 'NEW')
+        self.assertEqual(
+            render('\\\nExecStart=/old\nRestart=always\n'),
+            '[Service]\nExecStart=NEW\nRestart=always\n')
+        self.assertEqual(
+            render('\\\n  ExecStart = /old \\\n  --x\nRestart=always\n'),
+            '[Service]\nExecStart=NEW\nRestart=always\n')
+        with self.assertRaisesRegex(ValueError, 'exactly one ExecStart'):
+            render('ExecStart=/a\n\\\nExecStart=/b\n')
+        self.assertEqual(
+            host.exec_start_arguments('[Service]\n\\\nExecStart =/old  --x \\\n  --y\n'),
+            ['/old  --x    --y'])
+
     def test_single_unit_render_matches_render_units_for_all_services(self):
         sha = 'a' * 40
         artifact = self._node_artifact(sha)
