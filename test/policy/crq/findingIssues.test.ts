@@ -19,7 +19,12 @@ import {
   type GhCallOptions,
   type GhResult,
 } from '../../../src/policy/crq/findingIssues.js';
-import { JsonNumber, JsonObject, type JsonValue } from '../../../src/policy/crq/jsonValue.js';
+import {
+  JsonNumber,
+  JsonObject,
+  parseJsonValue,
+  type JsonValue,
+} from '../../../src/policy/crq/jsonValue.js';
 import { sha256Hex } from '../../../src/policy/crq/pythonJson.js';
 import { pythonLength } from '../../../src/policy/crq/repairBinding.js';
 import {
@@ -294,28 +299,29 @@ describe('full in-title search page without an exact title', () => {
       candidate.family === 'file_issue' && candidate.name === 'create-passes-body-stdin',
   );
 
-  const fullPage = (size: number): GhStep => ({
-    kind: 'success',
-    returncode: 0,
-    stdout: JSON.stringify(
+  const fullPage = (size: number): string =>
+    JSON.stringify(
       Array.from({ length: size }, (_, index) => ({
         number: index + 1,
         title: `near match ${index}`,
         url: `https://github.com/camerontaylor/infra/issues/${index + 1}`,
       })),
-    ),
-    stderr: '',
-  });
+    );
 
-  async function run(step: GhStep): Promise<{ outcome: Outcome; calls: readonly GhCall[] }> {
+  async function run(listStdout: string): Promise<{ outcome: Outcome; calls: readonly GhCall[] }> {
     if (base === undefined) throw new Error('create-passes-body-stdin vector missing');
-    const gh = new ScriptedGh([]);
-    (gh as unknown as { script: GhStep[] }).script.push(step, {
-      kind: 'success',
-      returncode: 0,
-      stdout: 'https://github.com/camerontaylor/infra/issues/99\n',
-      stderr: '',
-    });
+    const script = parseJsonValue(
+      JSON.stringify([
+        { returncode: 0, stdout: listStdout, stderr: '' },
+        {
+          returncode: 0,
+          stdout: 'https://github.com/camerontaylor/infra/issues/99\n',
+          stderr: '',
+        },
+      ]),
+    );
+    if (!Array.isArray(script)) throw new Error('gh script is not an array');
+    const gh = new ScriptedGh(script);
     const outcome = await capture(() =>
       fileFindingIssue({
         repoConfig: inputValue(base, 'repo_cfg'),
