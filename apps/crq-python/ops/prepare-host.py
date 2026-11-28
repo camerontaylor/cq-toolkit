@@ -731,10 +731,11 @@ def render_plists(root, output, overlay_path):
     for source in (root / 'apps/crq-python/ops').glob('com.crq.*.plist'):
         try:
             value = replace(plistlib.loads(source.read_bytes()))
-        except (ExpatError, plistlib.InvalidFileException) as exc:
+        except ExpatError as exc:
             # Truncated or otherwise malformed XML raises ExpatError, which is
             # not a ValueError; convert it so --json preview reports one JSON
             # error through the main handler instead of a traceback.
+            # plistlib.InvalidFileException is already a ValueError.
             raise ValueError('malformed launchd template: ' + source.name) from exc
         atomic_bytes(output / source.name, plistlib.dumps(value))
 
