@@ -578,12 +578,31 @@ def tool(name: str, directory: pathlib.Path | None) -> str:
 # ------------------------------------------------------------- lifecycle
 
 
-def discard(part: pathlib.Path | str) -> None:
-    """Best-effort removal of a temporary file; never masks the error in flight."""
+_MACHINE_MODE = False  # set by main(): --json keeps stderr empty (doctrine I1)
+
+
+def discard(part: pathlib.Path | str, exc: BaseException | None = None) -> None:
+    """Best-effort removal of a temporary file; never masks the error in flight.
+
+    An unlink failure becomes a note on ``exc`` -- the primary error in flight
+    -- instead of a direct stderr print, so machine mode (``--json``) keeps
+    stderr empty: ``main`` serializes the note into the one error artifact and
+    narrates it only outside machine mode. With no exception to carry it (or
+    one that refuses notes), the warning goes to stderr, but never in machine
+    mode, where it is dropped rather than break the one-artifact contract.
+    """
     try:
         pathlib.Path(part).unlink(missing_ok=True)
-    except OSError as exc:
-        print(f"warning: could not remove {part}: {exc}", file=sys.stderr)
+    except OSError as cleanup_error:
+        message = "warning: could not remove %s: %s" % (part, cleanup_error)
+        if exc is not None and exc is not cleanup_error:
+            try:
+                exc.add_note(message)
+                return
+            except Exception:  # noqa: BLE001 - cleanup must never replace exc
+                pass
+        if not _MACHINE_MODE:
+            print(message, file=sys.stderr)
 
 
 def download(url: str, destination: pathlib.Path, timeout: float = 120) -> str:
@@ -599,8 +618,8 @@ def download(url: str, destination: pathlib.Path, timeout: float = 120) -> str:
                 handle.write(chunk)
             handle.flush()
             os.fsync(handle.fileno())
-    except BaseException:
-        discard(part)
+    except BaseException as exc:
+        discard(part, exc)
         raise
     return str(part)
 
@@ -613,8 +632,8 @@ def fetch_sums(sums_path: pathlib.Path, recorder: Recorder) -> None:
                          "rc": 0, "bytes": pathlib.Path(part).stat().st_size,
                          "seconds": round(time.time() - started, 3)})
         pathlib.Path(part).replace(sums_path)
-    except BaseException:
-        discard(part)
+    except BaseException as exc:
+        discard(part, exc)
         raise
 
 
@@ -654,8 +673,8 @@ def _fetch_image_locked(images: pathlib.Path, recorder: Recorder) -> dict:
     try:
         actual = verify_image(pathlib.Path(part), expected)
         pathlib.Path(part).replace(image_path)
-    except BaseException:
-        discard(part)
+    except BaseException as exc:
+        discard(part, exc)
         raise
     recorder.append({"at": utc_now(), "argv": ["download", IMAGE_URL + IMAGE_NAME],
                      "rc": 0, "bytes": image_path.stat().st_size,
@@ -1762,6 +1781,8 @@ def main(argv=None) -> int:
     # Machine mode is needed before the parse, because a usage error is the
     # one failure that never produces a namespace to read --json from.
     parser.json_mode = "--json" in argv
+    global _MACHINE_MODE
+    _MACHINE_MODE = parser.json_mode
     parser.add_argument("--state-dir", default=str(DEFAULT_STATE))
     parser.add_argument("--tools", type=pathlib.Path,
                         help="directory holding qemu, qemu-img and cloud-localds")

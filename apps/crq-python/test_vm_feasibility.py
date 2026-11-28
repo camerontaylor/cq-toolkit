@@ -422,6 +422,97 @@ class DownloadTests(unittest.TestCase):
             self.assertEqual(list(pathlib.Path(tmp).iterdir()), [])
 
 
+class DiscardWarningTests(unittest.TestCase):
+    """An unlink failure during cleanup must not leak to stderr in --json."""
+
+    def setUp(self):
+        # main() sets the module flag; keep tests order-independent.
+        self.addCleanup(setattr, vm, "_MACHINE_MODE", vm._MACHINE_MODE)
+        vm._MACHINE_MODE = False
+
+    class _Broken:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self, size):
+            raise OSError("connection reset")
+
+    def _fetch(self, argv_prefix):
+        import contextlib
+        import io
+        out, err = io.StringIO(), io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(vm.urllib.request, "urlopen",
+                                  return_value=self._Broken()), \
+                mock.patch.object(pathlib.Path, "unlink",
+                                  side_effect=OSError("read-only")), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = vm.main(["--state-dir", tmp] + argv_prefix + ["fetch"])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_json_mode_keeps_stderr_empty_and_carries_warning(self):
+        code, out, err = self._fetch(["--json"])
+        self.assertEqual(code, 1)
+        self.assertEqual(err, "")
+        message = json.loads(out)["error"]["message"]
+        self.assertTrue(message.startswith("connection reset"))
+        self.assertIn("warning: could not remove", message)
+
+    def test_plain_mode_narrates_warning_and_keeps_primary_error(self):
+        code, out, err = self._fetch([])
+        self.assertEqual(code, 1)
+        self.assertIn("warning: could not remove", err)
+        self.assertTrue(json.loads(out)["error"]["message"]
+                        .startswith("connection reset"))
+
+    def test_unusable_add_note_never_replaces_primary_error(self):
+        class NoNotes(OSError):
+            def add_note(self, note):
+                raise TypeError("no notes")
+
+        primary = NoNotes("primary")
+        with mock.patch.object(pathlib.Path, "unlink",
+                               side_effect=OSError("read-only")):
+            vm.discard("/x/part", primary)  # must not raise
+
+    def test_main_sets_machine_mode_for_the_fallback_path(self):
+        import contextlib
+        import io
+
+        def command(args):
+            vm.discard("/x/part")  # no exception in flight: fallback path
+            return 0
+
+        for argv, expect_warning in ((["--json", "fetch"], False), (["fetch"], True)):
+            err = io.StringIO()
+            with mock.patch.object(vm, "cmd_fetch", command), \
+                    mock.patch.object(pathlib.Path, "unlink",
+                                      side_effect=OSError("read-only")), \
+                    contextlib.redirect_stderr(err):
+                self.assertEqual(vm.main(argv), 0)
+            if expect_warning:
+                self.assertIn("warning: could not remove", err.getvalue())
+            else:
+                self.assertEqual(err.getvalue(), "")
+
+    def test_fallback_is_silent_in_machine_mode(self):
+        import contextlib
+        import io
+        for machine, expect in ((True, ""), (False, "warning: could not remove")):
+            err = io.StringIO()
+            with mock.patch.object(vm, "_MACHINE_MODE", machine), \
+                    mock.patch.object(pathlib.Path, "unlink",
+                                      side_effect=OSError("read-only")), \
+                    contextlib.redirect_stderr(err):
+                vm.discard("/x/part")
+            self.assertIn(expect, err.getvalue())
+            if not expect:
+                self.assertEqual(err.getvalue(), "")
+
+
 class FetchImageTests(unittest.TestCase):
     def _download(self, digest, data, calls, *, fail_image=False):
         def fake(url, destination, timeout=120):
