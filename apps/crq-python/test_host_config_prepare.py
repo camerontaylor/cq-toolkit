@@ -126,7 +126,13 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
         self.assertTrue((self.runner / 'state/runner-disabled').is_file())
         self.assertTrue((self.base / 'installed/crq-tick.service').is_file())
         self.assertIn(['systemctl', '--user', 'daemon-reload'], calls)
-        self.assertFalse(any('start' in argv or 'enable' in argv for argv in calls))
+        # daemon-reload is the only mutating systemctl operation prepare may
+        # run: 'restart' starts an inactive unit yet matches neither token,
+        # so the guard is an operation allowlist, not a token search, and it
+        # keeps the read-only listing and state probes allowed.
+        self.assertTrue(all(argv[2] in {'list-unit-files', 'list-units',
+                                        'list-jobs', 'show', 'daemon-reload'}
+                            for argv in calls if argv[0] == 'systemctl'))
 
     def test_prepare_refuses_stale_units_outside_the_rendered_set_before_install(self):
         self.command('tag', '-a', 'crq-runner/20261016-8', self.before, '-m', 'owner fixture approval')
