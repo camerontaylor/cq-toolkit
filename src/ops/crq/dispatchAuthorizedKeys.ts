@@ -100,8 +100,15 @@ function checkCommand(
   // (or the whole command, when the prefix is missing) is checked as written.
   const prefix = `cd ${roots.deployRoot} && /usr/bin/env `;
   const hasPrefix = command.startsWith(prefix);
-  if (SHELL_META.test(hasPrefix ? command.slice(prefix.length) : command)) {
+  const body = hasPrefix ? command.slice(prefix.length) : command;
+  if (SHELL_META.test(body)) {
     problems.push('command contains shell metacharacters or expansion (no $SSH_ORIGINAL_COMMAND)');
+  }
+  // The split below only understands single spaces, so reject shell quoting
+  // and every other whitespace first: `A='b C=d'` would otherwise pass as the
+  // two assignments `A='b` and `C=d'` that the shell never makes.
+  if (/['"]|[^\S ]/.test(body)) {
+    problems.push('command must not contain quotes or whitespace other than single spaces');
   }
   if (!hasPrefix) {
     problems.push(
