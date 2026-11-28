@@ -1095,8 +1095,9 @@ _SCHEMA_TYPES = {"object": dict, "array": list, "string": str, "integer": int,
 
 def schema_problem(value, rule: dict, at: str = "") -> str | None:
     """Evaluate the checked-in schema vocabulary exactly as
-    review_ledger._schema does (fail closed on any other keyword), returning
-    the first violation with its location instead of raising."""
+    review_ledger._schema does (fail closed on any other keyword or type
+    name), returning the first violation with its location instead of
+    raising."""
     where = at or "receipt"
     if set(rule) - _SCHEMA_KEYWORDS:
         return where + ": unsupported schema keyword"
@@ -1104,8 +1105,11 @@ def schema_problem(value, rule: dict, at: str = "") -> str | None:
         matches = sum(schema_problem(value, branch, at) is None for branch in rule["oneOf"])
         return None if matches == 1 else where + ": does not match exactly one variant"
     expected = rule.get("type")
-    if expected and type(value) not in [_SCHEMA_TYPES[t] for t in (
-            expected if isinstance(expected, list) else [expected])]:
+    names = expected if isinstance(expected, list) else [expected]
+    if expected and any(not isinstance(t, str) or t not in _SCHEMA_TYPES
+                        for t in names):
+        return where + ": unsupported schema type"
+    if expected and type(value) not in [_SCHEMA_TYPES[t] for t in names]:
         return where + ": type mismatch"
     if "const" in rule and value != rule["const"] or "enum" in rule and value not in rule["enum"]:
         return where + ": value mismatch"
