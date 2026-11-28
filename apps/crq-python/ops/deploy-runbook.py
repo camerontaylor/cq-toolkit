@@ -811,6 +811,18 @@ class Run:
                 "recorded rollback config bytes. Choose a target with "
                 "rollback_config support. Nothing has been switched.")
 
+        # The drain loop passes deadline= and clock= to the TARGET
+        # controller's drain_check. A target that predates them would raise
+        # TypeError mid-drain, which is not a FailStop and so bypasses the
+        # expiry hold handling: refuse before anything is switched.
+        drain_parameters = inspect.signature(
+            self.controller.drain_check).parameters
+        require("deadline" in drain_parameters
+                and "clock" in drain_parameters,
+                "the target revision's deploy-controller.drain_check cannot "
+                "bound the queue drain by deadline. Choose a target with "
+                "drain deadline support. Nothing has been switched.")
+
     # -- steps ---------------------------------------------------------
     def refuse_unfinished_controller_transactions(self):
         """Run the controller's unfinished-transaction guard before admission.

@@ -512,7 +512,7 @@ class DeployTests(DeployFixture, unittest.TestCase):
 
         run = self.build(drain_interval_s=600)
         run.drain_fn = None
-        with mock.patch.object(dc, "drain_check", side_effect=settles_late):
+        with mock.patch.object(dc, "drain_check", new=settles_late):
             with self.assertRaises(rb.RecoveryRequired) as caught:
                 run.run()
         self.assertIn("drain expired", str(caught.exception))
@@ -566,7 +566,7 @@ class DeployTests(DeployFixture, unittest.TestCase):
         run.drain_fn = None
         run.clock = stepped_clock
         run.sleep = strict_sleep
-        with mock.patch.object(dc, "drain_check", side_effect=arming_check):
+        with mock.patch.object(dc, "drain_check", new=arming_check):
             with self.assertRaises(rb.RecoveryRequired) as caught:
                 run.run()
         self.assertIn("drain expired", str(caught.exception))
@@ -605,7 +605,7 @@ class DeployTests(DeployFixture, unittest.TestCase):
 
         run = self.build()
         run.drain_fn = None
-        with mock.patch.object(dc, "drain_check", side_effect=spying_check):
+        with mock.patch.object(dc, "drain_check", new=spying_check):
             document = run.run()
         self.assertEqual(document["outcome"], "completed")
         self.assertEqual(seen, [{"deadline": 10.0, "clock": self.clock}])
@@ -804,6 +804,40 @@ class DeployTests(DeployFixture, unittest.TestCase):
         self.assertFalse(self.marker().exists())
         self.assertEqual(self.head(), self.prior)
         self.assertEqual(self.units.stopped, [])
+
+    def test_target_controller_without_drain_deadline_support_refuses_early(self):
+        # The drain loop passes deadline= and clock= to the target's
+        # drain_check; a target that lacks either must be refused before
+        # anything is switched, not fail with a TypeError mid-drain.
+        def lacks_both(effects, liveness):
+            return {"drained": True, "blocked": []}
+
+        def lacks_clock(effects, liveness, deadline=None):
+            return {"drained": True, "blocked": []}
+
+        def lacks_deadline(effects, liveness, clock=None):
+            return {"drained": True, "blocked": []}
+
+        for name, stub in (("neither", lacks_both), ("no clock", lacks_clock),
+                           ("no deadline", lacks_deadline)):
+            with self.subTest(name), \
+                    mock.patch.object(dc, "drain_check", new=stub):
+                run = self.build()
+                with self.assertRaisesRegex(
+                        rb.Refused, "drain deadline support.*Nothing has "
+                                    "been switched"):
+                    run.run()
+                self.assertFalse(self.marker().exists())
+                self.assertEqual(self.head(), self.prior)
+                self.assertEqual(self.units.stopped, [])
+
+    def test_target_controller_with_drain_deadline_support_is_accepted(self):
+        def compatible(effects, liveness, deadline=None, clock=None):
+            return {"drained": True, "blocked": []}
+
+        with mock.patch.object(dc, "drain_check", new=compatible):
+            document = self.build().run()
+        self.assertEqual(document["outcome"], "completed")
 
     def test_historical_target_helper_that_requires_a_tag_refuses_early(self):
         class OldHelper:
