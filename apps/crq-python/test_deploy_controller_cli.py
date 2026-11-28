@@ -66,6 +66,17 @@ class CliTests(ControllerFixture):
     def test_helper_digest_mismatch_refuses_before_import_lock_or_preflight(self):
         self.write_state("queue.json", {"items": [], "starts": []})
         lock = self.runner / "state" / dc.LOCK_NAME
+        # Every assertion below would still pass if the controller imported
+        # the helper first and rejected its digest afterwards, so make the
+        # import itself observable: a module-level tail in the fixture copy
+        # leaves a marker exactly when the helper's bytes are executed. Each
+        # mismatch must pass the loader's digest gate with zero imports; the
+        # matching-digest test stays the uninstrumented success control.
+        marker = self.base / "helper-imported.marker"
+        helper = self.runner / "ops/prepare-host.py"
+        helper.write_text(helper.read_text()
+                          + "\nimport pathlib\npathlib.Path("
+                          + repr(str(marker)) + ").write_text('imported')\n")
         for expected in ("0" * 64, "ABC", "0" * 63):
             with self.subTest(expected=expected):
                 # A bad --sha would refuse in preflight; the identity check
@@ -80,6 +91,7 @@ class CliTests(ControllerFixture):
                 self.assertEqual(error["kind"], "refused")
                 self.assertEqual(error["subcommand"], "switch")
                 self.assertEqual(error["exitCode"], 2)
+                self.assertFalse(marker.exists())
                 self.assertFalse(lock.exists())
                 self.assertEqual(list(self.record_dir.iterdir()), [])
                 self.assertEqual(self.command("rev-parse", "HEAD").strip(), self.before)
