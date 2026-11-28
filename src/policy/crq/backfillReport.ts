@@ -478,9 +478,11 @@ export async function summary(options: {
     }
     let completed = 0;
     for (const day of observed) {
-      const count = opt(day, 'completed_partitions');
+      // Numerator and denominator share the T1 population (Python oracle: the
+      // same daily record field the harvest writer fills for T1 items).
+      const count = opt(day, 'completed_T1_partitions');
       completed +=
-        count === undefined || count === null ? 0 : pythonInt(count, 'completed_partitions');
+        count === undefined || count === null ? 0 : pythonInt(count, 'completed_T1_partitions');
     }
     const candidates = need(ranked, 'candidates', 'ranked inventory');
     if (!Array.isArray(candidates)) fail('ranked candidates must be an array');

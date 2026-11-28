@@ -186,7 +186,9 @@ export async function harvestBackfillFailure(
 }
 
 /** Shared harvest tail: state event, one-time capacity row, one attempt record.
- * Python increments `completed_partitions` when the item reached publication-pending. */
+ * Python increments `completed_partitions` when the item reached publication-pending,
+ * and `completed_T1_partitions` additionally when its tier (`tier_importance`, the
+ * partition's min path tier — inventory.rank's candidate rule) is T1. */
 export async function finishHarvest(
   result: { readonly queue: JsonObject; readonly item: JsonObject },
   index: number,
@@ -213,15 +215,29 @@ export async function finishHarvest(
         ? new JsonObject([
             ['spare_admissions', JsonNumber.int(0)],
             ['completed_partitions', JsonNumber.int(0)],
+            ['completed_T1_partitions', JsonNumber.int(0)],
           ])
         : obj(capacity.get(day), 'daily capacity day');
     const done = row.get('completed_partitions');
     if (!(done instanceof JsonNumber) || done.kind !== 'int' || done.integer === null)
       throw new LedgerTypeError('completed_partitions must be an integer');
-    const counted =
-      result.item.get('state') === 'publication-pending'
-        ? withObjectKeys(row, [['completed_partitions', JsonNumber.int(Number(done.integer) + 1)]])
-        : row;
+    const t1 = row.get('completed_T1_partitions');
+    const t1Count =
+      t1 instanceof JsonNumber && t1.kind === 'int' && t1.integer !== null
+        ? Number(t1.integer)
+        : 0;
+    const pending = result.item.get('state') === 'publication-pending';
+    let counted = row;
+    if (pending)
+      counted = withObjectKeys(counted, [
+        ['completed_partitions', JsonNumber.int(Number(done.integer) + 1)],
+      ]);
+    counted = withObjectKeys(counted, [
+      [
+        'completed_T1_partitions',
+        JsonNumber.int(t1Count + (pending && result.item.get('tier_importance') === 'T1' ? 1 : 0)),
+      ],
+    ]);
     queue = withObjectKeys(queue, [
       ['backfill_capacity_runs', [...capacityRuns, runId]],
       ['backfill_daily_capacity', withObjectKeys(capacity, [[day, counted]])],

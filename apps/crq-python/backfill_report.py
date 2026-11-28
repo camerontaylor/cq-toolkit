@@ -171,7 +171,9 @@ def summary(repo, ranked, queue, original=None, *, findings_root=None):
         end = ledger.timestamp(ranked.get("evaluated_at", original["pinned_at"])).date()
         observed_days = max(1, (end - start).days + 1)
         observed = {date: day for date, day in daily.items() if start.isoformat() <= date <= end.isoformat()}
-        completed = sum(day.get("completed_partitions", 0) for day in observed.values())
+        # Numerator and denominator must share the T1 population: all-tier
+        # completions say nothing about the pace of the remaining T1 work.
+        completed = sum(day.get("completed_T1_partitions", 0) for day in observed.values())
         remaining_partitions = sum(c["tier"] == "T1" for c in ranked.get("candidates", []))
         baseline_result["remaining_eligible_T1_partitions"] = remaining_partitions
         baseline_result["estimated_days_at_observed_capacity"] = ((remaining_partitions * observed_days + completed - 1) // completed) if completed and len(observed) == observed_days else None

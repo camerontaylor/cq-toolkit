@@ -1236,8 +1236,8 @@ def backfill_report_vectors() -> Dict[str, Any]:
     baseline_queue = {
         "items": [{"kind": "backfill", "state": "pending"}],
         "backfill_daily_capacity": {
-            "2026-11-08": {"completed_partitions": 2},
-            "2026-11-09": {"completed_partitions": 2},
+            "2026-11-08": {"completed_partitions": 2, "completed_T1_partitions": 1},
+            "2026-11-09": {"completed_partitions": 2, "completed_T1_partitions": 1},
         },
     }
     baseline_case_two = _capture(

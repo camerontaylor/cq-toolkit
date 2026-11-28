@@ -360,10 +360,12 @@
           ],
           "backfill_daily_capacity": {
             "2026-11-08": {
-              "completed_partitions": 2
+              "completed_partitions": 2,
+              "completed_T1_partitions": 1
             },
             "2026-11-09": {
-              "completed_partitions": 2
+              "completed_partitions": 2,
+              "completed_T1_partitions": 1
             }
           }
         },
@@ -616,7 +618,7 @@
               }
             ],
             "remaining_eligible_T1_partitions": 2,
-            "estimated_days_at_observed_capacity": 1,
+            "estimated_days_at_observed_capacity": 2,
             "capacity_estimate_limit": "eligible partitions only; missing daily observations prevent an estimate; held work and unresolved objects remain separately visible",
             "target_status": "pending"
           },
@@ -635,10 +637,12 @@
           "spare_quota_admissions": [],
           "daily_capacity": {
             "2026-11-08": {
-              "completed_partitions": 2
+              "completed_partitions": 2,
+              "completed_T1_partitions": 1
             },
             "2026-11-09": {
-              "completed_partitions": 2
+              "completed_partitions": 2,
+              "completed_T1_partitions": 1
             }
           },
           "idle_with_coverage_candidate": 0,
