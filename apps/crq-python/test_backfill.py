@@ -140,7 +140,7 @@ class OperatorTest(unittest.TestCase):
             self.assertFalse(saved)
 
     def test_operator_command_reports_busy_lock_as_error(self):
-        import io, sys
+        import io, json, sys
         fake = SimpleNamespace(with_lock=lambda *a, **kw: None)
         out = io.StringIO()
         with mock.patch.dict(sys.modules, {"crq": fake}), \
@@ -148,7 +148,7 @@ class OperatorTest(unittest.TestCase):
              mock.patch("sys.stdout", out), self.assertRaises(SystemExit) as raised:
             backfill.main()
         self.assertEqual(raised.exception.code, 3)
-        self.assertIn("queue lock busy", out.getvalue())
+        self.assertIn("queue lock busy", json.loads(out.getvalue())["error"])
 
     def test_legacy_quarantine_release_binds_scope_history_and_ownership(self):
         with tempfile.TemporaryDirectory() as td:
