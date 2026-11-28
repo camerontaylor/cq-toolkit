@@ -354,7 +354,7 @@ def validate_provenance(value):
 
 def record_path(value):
     at = timestamp(value["occurred_at"])
-    return f"records/{at:%Y/%m}/{value['id']}.json"
+    return f"records/{at.year:04d}/{at.month:02d}/{value['id']}.json"
 
 
 def validate_sequence(values):
