@@ -4,7 +4,15 @@
  * mid-resolution).  Before the fix the first such candidate ended the search
  * and the launcher resolved to `undefined` although a later entry was fine.
  */
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, realpathSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  symlinkSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+  realpathSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
@@ -71,5 +79,13 @@ describe('resolveLauncher PATH search', () => {
     dirs.push(only);
     mkdirSync(join(only, 'tool'), { mode: 0o755 });
     expect(resolveLauncher('tool', { PATH: only })).toBeUndefined();
+  });
+
+  test('still binds a symlink to a regular file, canonicalised', () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'cq-launch-g-')));
+    dirs.push(dir);
+    const real = exe(dir, 'real-tool');
+    symlinkSync(real, join(dir, 'tool'));
+    expect(resolveLauncher('tool', { PATH: dir })).toBe(real);
   });
 });
