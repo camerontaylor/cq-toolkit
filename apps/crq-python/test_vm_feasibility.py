@@ -1982,6 +1982,29 @@ class PlanTests(unittest.TestCase):
         with self.assertRaises(vm.UsageRefusal):
             vm.cmd_plan(args)
 
+    def test_every_state_subcommand_refuses_comma_state_dir(self):
+        # Each subcommand resolves --state-dir itself, so reverting the
+        # refusal at any single call site must fail here.
+        import contextlib
+        import io
+        subcommands = (["plan"], ["fetch"], ["prepare"], ["boot"],
+                       ["phase", "install"], ["restart-manager"], ["reboot"],
+                       ["run"], ["destroy"])
+        with tempfile.TemporaryDirectory() as temporary:
+            state = pathlib.Path(temporary) / "probe,local"
+            for command in subcommands:
+                with self.subTest(command=command[0]):
+                    out, err = io.StringIO(), io.StringIO()
+                    with contextlib.redirect_stdout(out), \
+                            contextlib.redirect_stderr(err):
+                        code = vm.main(["--json", "--state-dir", str(state),
+                                        "--source-commit", "0" * 40, *command])
+                    self.assertEqual(code, 2)
+                    artifact = json.loads(out.getvalue())
+                    self.assertEqual(artifact["error"]["kind"], "usage")
+                    self.assertIn("comma", artifact["error"]["message"])
+                    self.assertFalse(state.exists())
+
     def test_json_mode_serializes_operating_system_failures(self):
         import contextlib
         import io
