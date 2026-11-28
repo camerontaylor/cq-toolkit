@@ -1187,10 +1187,14 @@ def production_adapter(effects, overlay, *, unit, runtime, artifact_root=None,
         except controller.Refused as exc:
             raise LiveBindingRefused(
                 "deployment HEAD is unavailable: " + str(exc)[:300]) from exc
-    systemd = systemd or SubprocessSystemd(unit_dir=layout.unit_dir)
-    journal_source = journal_source or completion.SystemdJournalSource(user=True)
-    identity = identity or ProcessIdentity()
-    queue_drain = queue_drain or (lambda: controller.runner_queue_drain(effects))
+    if systemd is None:
+        systemd = SubprocessSystemd(unit_dir=layout.unit_dir)
+    if journal_source is None:
+        journal_source = completion.SystemdJournalSource(user=True)
+    if identity is None:
+        identity = ProcessIdentity()
+    if queue_drain is None:
+        queue_drain = (lambda: controller.runner_queue_drain(effects))
     options.setdefault("error_type", controller.Refused)
     return factory.compose(
         root=effects.root, unit=unit, runtime=runtime,
