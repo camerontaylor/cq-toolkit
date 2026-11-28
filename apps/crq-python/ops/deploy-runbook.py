@@ -1761,6 +1761,19 @@ def main(argv=None, run_factory=Run) -> int:
         child.subcommand = name
     args = parser.parse_args(argv)
     parser.subcommand = args.operation
+    # A negative timing argument is a usage error, never a mid-run failure:
+    # a negative --health-interval-s would otherwise surface as
+    # time.sleep(-1) in the post-switch second observation and roll back an
+    # otherwise healthy deploy. Zero stays valid (--health-interval-s 0
+    # means no delay before the second observation; a zero deadline simply
+    # expires immediately). This answers as the I1 usage artifact with exit
+    # code 2, before Run() is constructed and anything touches the host.
+    if args.operation == "deploy" and min(args.service_drain_deadline_s,
+                                          args.drain_interval_s,
+                                          args.drain_deadline_s,
+                                          args.health_timeout_s,
+                                          args.health_interval_s) < 0:
+        parser.error("deploy timing arguments must be nonnegative")
     try:
         if args.operation == "status":
             return cmd_status(args)

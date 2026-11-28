@@ -1431,6 +1431,48 @@ class DeployTests(DeployFixture, unittest.TestCase):
         self.assertEqual(document["error"]["subcommand"], "status")
         self.assertEqual(document["error"]["exitCode"], 2)
 
+    def test_negative_timing_arguments_are_a_usage_error_before_the_run(self):
+        # A negative delay must fail as usage before Run() exists: a negative
+        # --health-interval-s would otherwise surface as time.sleep(-1) in the
+        # post-switch second observation and roll back an otherwise healthy
+        # deploy. Zero stays valid (no delay before the second observation).
+        factory_runs = []
+
+        class Recording:
+            def __init__(self, args):
+                factory_runs.append(args)
+
+            def run(self):
+                return {"outcome": "completed"}
+
+        with contextlib.redirect_stdout(io.StringIO()) as output, \
+                contextlib.redirect_stderr(io.StringIO()) as errors:
+            with self.assertRaises(SystemExit) as caught:
+                rb.main(["deploy", "--root", str(self.root),
+                         "--overlay", str(self.overlay_path),
+                         "--record-dir", str(self.record_dir),
+                         "--health-interval-s", "-1"],
+                        run_factory=Recording)
+        self.assertEqual(caught.exception.code, 2)
+        self.assertEqual(factory_runs, [])
+        document = json.loads(output.getvalue())
+        self.assertEqual(document["error"]["kind"], "usage")
+        self.assertEqual(document["error"]["subcommand"], "deploy")
+        self.assertEqual(document["error"]["message"],
+                         "deploy timing arguments must be nonnegative")
+        self.assertEqual(document["error"]["exitCode"], 2)
+        self.assertIn("usage:", errors.getvalue())
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            code = rb.main(["deploy", "--root", str(self.root),
+                            "--overlay", str(self.overlay_path),
+                            "--record-dir", str(self.record_dir),
+                            "--health-interval-s", "0"],
+                           run_factory=Recording)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(factory_runs), 1)
+        self.assertEqual(json.loads(output.getvalue())["outcome"],
+                         "completed")
+
     def test_machine_mode_usage_errors_keep_stderr_empty(self):
         with contextlib.redirect_stdout(io.StringIO()) as output, \
                 contextlib.redirect_stderr(io.StringIO()) as errors:
