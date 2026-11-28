@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from xml.parsers.expat import ExpatError
 
 CONFIG = 'apps/crq-python/config.json'
 POLICY_FLOOR = 'f748fd43e75505f4e89098a4ffe28fa2a179a50c'  # import C
@@ -728,7 +729,14 @@ def render_plists(root, output, overlay_path):
             return {k: replace(v) for k, v in value.items()}
         return value
     for source in (root / 'apps/crq-python/ops').glob('com.crq.*.plist'):
-        value = replace(plistlib.loads(source.read_bytes()))
+        try:
+            value = replace(plistlib.loads(source.read_bytes()))
+        except ExpatError as exc:
+            # Truncated or otherwise malformed XML raises ExpatError, which is
+            # not a ValueError; convert it so --json preview reports one JSON
+            # error through the main handler instead of a traceback.
+            # plistlib.InvalidFileException is already a ValueError.
+            raise ValueError('malformed launchd template: ' + source.name) from exc
         atomic_bytes(output / source.name, plistlib.dumps(value))
 
 

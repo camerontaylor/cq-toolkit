@@ -237,6 +237,24 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
                 self.assertEqual(sorted(p.name for p in output.iterdir()), [child])
                 self.assertFalse((self.base / 'records').exists())
 
+    def test_malformed_launchd_template_is_one_json_error_not_a_traceback(self):
+        # A truncated plist raises ExpatError, which is not a ValueError; it must
+        # be converted so main() reports one JSON error instead of a traceback.
+        name = sorted(p.name for p in (self.runner / 'ops').glob('com.crq.*.plist'))[0]
+        broken = self.runner / 'ops' / name
+        broken.write_bytes(broken.read_bytes()[:40])
+        with self.assertRaisesRegex(ValueError, 'malformed launchd template: ' + name):
+            host.render_plists(self.root, self.base / 'direct-launchd', self.overlay_path)
+        output = self.base / 'preview-malformed'
+        code, out, err = self.run_main(
+            ['--json', '--overlay', str(self.overlay_path), 'preview', '--output', str(output)])
+        self.assertEqual(code, 1)
+        self.assertEqual(err, '')
+        error = json.loads(out)['error']
+        self.assertEqual((error['kind'], error['subcommand'], error['exitCode']),
+                         ('failed', 'preview', 1))
+        self.assertIn('malformed launchd template: ' + name, error['message'])
+
     def test_prepare_rejects_worktree_drift_before_installing_units(self):
         self.command('checkout', '-q', '--detach', self.target)
         directory = self.runner / 'ops/systemd'
