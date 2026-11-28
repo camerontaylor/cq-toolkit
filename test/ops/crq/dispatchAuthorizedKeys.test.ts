@@ -128,6 +128,26 @@ describe('dispatch authorized_keys line check', () => {
       'command contains shell metacharacters or expansion (no $SSH_ORIGINAL_COMMAND)',
     ],
     [
+      'single-quoted value the shell keeps as one assignment',
+      line(
+        queueCommand().replace(
+          'CRQ_QUEUE_PRINCIPAL=dev CRQ_QUEUE_POLICY=/srv/crq/policy.json',
+          "CRQ_QUEUE_PRINCIPAL='dev CRQ_QUEUE_POLICY=/srv/crq/policy.json'",
+        ),
+      ),
+      'command must not contain quotes or whitespace other than single spaces',
+    ],
+    [
+      'double-quoted value',
+      line(queueCommand().replace('CRQ_QUEUE_PRINCIPAL=dev', 'CRQ_QUEUE_PRINCIPAL="dev"')),
+      'command must not contain quotes or whitespace other than single spaces',
+    ],
+    [
+      'tab between assignments',
+      line(queueCommand().replace(' CRQ_QUEUE_POLICY', '\tCRQ_QUEUE_POLICY')),
+      'command must not contain quotes or whitespace other than single spaces',
+    ],
+    [
       'bad expiry-time value',
       line(queueCommand(), 'restrict,expiry-time="not-a-date"'),
       'expiry-time must be YYYYMMDD[HHMM[SS]] with an optional Z or UTC suffix',
