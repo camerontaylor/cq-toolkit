@@ -1,5 +1,6 @@
 """Operator commands require fresh exact evidence and never dispatch reviews."""
 from pathlib import Path
+import fcntl
 import tempfile
 import threading
 import copy
@@ -314,7 +315,7 @@ class OperatorTest(unittest.TestCase):
                     output.write_bytes(initial)
                 entered = threading.Event()
                 release = threading.Event()
-                attempted = threading.Event()
+                contended = threading.Event()
                 newer_entered = threading.Event()
                 failures = []
                 held = {}
@@ -345,7 +346,23 @@ class OperatorTest(unittest.TestCase):
                 real_locked = ledger.locked
                 def locked(path):
                     if threading.current_thread().name == "newer" and str(path).endswith(".collect-history.lock"):
-                        attempted.set()
+                        # Probe contention before the second worker enters its
+                        # output lock: the first collector is parked inside
+                        # collect_sources, so a non-blocking acquisition of the
+                        # very path it is about to take must fail. Signalling
+                        # only after the probe confirms that contention keeps
+                        # the blocked-second-worker checks below from passing
+                        # on an implementation whose two output paths lock
+                        # separately or stall the worker elsewhere.
+                        with Path(path).open("a+b") as probe:
+                            try:
+                                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            except BlockingIOError:
+                                pass  # held by the first collector: contention confirmed
+                            else:
+                                failures.append(AssertionError(
+                                    "second worker's output lock was acquirable while the first collector held it"))
+                        contended.set()
                     return real_locked(path)
                 def run(c):
                     try:
@@ -363,7 +380,7 @@ class OperatorTest(unittest.TestCase):
                     try:
                         self.assertTrue(entered.wait(5))
                         second.start()
-                        self.assertTrue(attempted.wait(5))
+                        self.assertTrue(contended.wait(5))
                         self.assertFalse(newer_entered.wait(0.1))
                         self.assertEqual(snapshots, ["older"])
                         # Another output can finish while the first collector
