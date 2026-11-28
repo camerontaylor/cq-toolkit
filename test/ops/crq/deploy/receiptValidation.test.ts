@@ -371,7 +371,9 @@ describe('schemaProblem vocabulary', () => {
     expect(p(1.5, { type: 'integer' })).toBe('receipt: type mismatch');
     expect(p(1, { type: ['string', 'integer'] })).toBeNull();
     expect(p(null, { type: 'null' })).toBeNull();
-    expect(() => p(1, { type: 'number' })).toThrow();
+    expect(p(1, { type: 'number' })).toBe('receipt: unsupported schema type');
+    expect(p(1, { type: ['integer', 'number'] })).toBe('receipt: unsupported schema type');
+    expect(p(1, { type: [1] })).toBe('receipt: unsupported schema type');
   });
   test('const and enum use Python equality', () => {
     expect(p(1, { const: 1.0 })).toBeNull();

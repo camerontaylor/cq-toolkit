@@ -1,5 +1,7 @@
 """Locked build/staging route tests; no real pnpm, network or host mutation."""
+import contextlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -398,6 +400,67 @@ class BuildRunnerTests(unittest.TestCase):
         with self.assertRaisesRegex(build_runner.BuildError, 'outside the source checkout'):
             build_runner.build(self.repo, SHA, self.repo / 'stage',
                                self.base / 'out/runner.tar.gz', run=run)
+
+    def test_main_rejects_report_inside_checkout_before_the_build(self):
+        argv = ['build-runner', '--repo', str(self.repo), '--sha', SHA,
+                '--staging', str(self.base / 'stage'),
+                '--output', str(self.base / 'out/runner.tar.gz'),
+                '--report', str(self.repo / 'pnpm-lock.yaml')]
+        stderr = io.StringIO()
+        with mock.patch.object(sys, 'argv', argv), \
+                contextlib.redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as exited:
+                build_runner.main()
+        self.assertEqual(exited.exception.code, 1)
+        self.assertIn('outside the source checkout', stderr.getvalue())
+        self.assertEqual((self.repo / 'pnpm-lock.yaml').read_text(),
+                         'lockfileVersion: 9.0\n')
+
+    def test_main_writes_an_external_report_after_a_successful_build(self):
+        report_path = self.base / 'reports/build-report.json'
+        fake_report = {'archive': 'archive.tar.gz', 'archive_sha256': 'e' * 64,
+                       'source_sha': SHA, 'content_sha256': 'f' * 64,
+                       'file_count': 1, 'provenance_path': 'x.provenance.json',
+                       'observed': None, 'runner': None}
+        argv = ['build-runner', '--repo', str(self.repo), '--sha', SHA,
+                '--staging', str(self.base / 'stage'),
+                '--output', str(self.base / 'out/runner.tar.gz'), '--json',
+                '--report', str(report_path)]
+        with mock.patch.object(sys, 'argv', argv), \
+                mock.patch.object(build_runner, 'build',
+                                  return_value=fake_report) as fake_build, \
+                contextlib.redirect_stdout(io.StringIO()):
+            build_runner.main()
+        fake_build.assert_called_once()
+        self.assertEqual(json.loads(report_path.read_text())['source_sha'], SHA)
+
+    def test_main_writes_report_through_the_validated_resolved_path(self):
+        external = self.base / 'external-dist'
+        external.mkdir()
+        (self.repo / 'dist').symlink_to(external)
+        fake_report = {'archive': 'a.tar.gz', 'archive_sha256': 'e' * 64,
+                       'source_sha': SHA, 'content_sha256': 'f' * 64,
+                       'file_count': 1, 'provenance_path': 'x.provenance.json',
+                       'observed': None, 'runner': None}
+
+        def replace_symlink(*_args, **_kwargs):
+            (self.repo / 'dist').unlink()
+            (self.repo / 'dist').mkdir()
+            return fake_report
+
+        argv = ['build-runner', '--repo', str(self.repo), '--sha', SHA,
+                '--staging', str(self.base / 'stage'),
+                '--output', str(self.base / 'out/runner.tar.gz'), '--json',
+                '--report', str(self.repo / 'dist/build-report.json')]
+        with mock.patch.object(sys, 'argv', argv), \
+                mock.patch.object(build_runner, 'build',
+                                  side_effect=replace_symlink), \
+                contextlib.redirect_stdout(io.StringIO()):
+            build_runner.main()
+        self.assertEqual(
+            json.loads((external / 'build-report.json').read_text())['source_sha'],
+            SHA)
+        self.assertFalse((self.repo / 'dist/build-report.json').exists())
 
     def test_build_rejects_dirty_tree_after_build(self):
         staging = self.base / 'stage'

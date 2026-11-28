@@ -452,8 +452,14 @@ def main():
     parser.add_argument('--report', type=Path)
     args = parser.parse_args()
     try:
+        report_path = None
         if args.report is not None:
+            # Write through this validated, symlink-resolved path: the build
+            # may replace a symlinked checkout path (e.g. dist) afterwards.
             report_path = args.report.resolve()
+            if report_path.is_relative_to(args.repo.resolve()):
+                raise BuildError('report path must be outside the source '
+                                 'checkout: ' + str(report_path))
             output_path = args.output.resolve()
             artifact_paths = {
                 output_path,
@@ -467,9 +473,9 @@ def main():
                        node=args.node, pnpm=args.pnpm,
                        keep_staging=args.keep_staging)
         data = json.dumps(report, sort_keys=True, indent=2) + '\n'
-        if args.report is not None:
-            args.report.parent.mkdir(parents=True, exist_ok=True)
-            args.report.write_text(data)
+        if report_path is not None:
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            report_path.write_text(data)
     except (BuildError, OSError, ValueError, subprocess.TimeoutExpired,
             tarfile.TarError) as exc:
         if machine:

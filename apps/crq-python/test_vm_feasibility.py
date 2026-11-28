@@ -1774,7 +1774,8 @@ class EvidenceTests(unittest.TestCase):
     def test_queued_jobs_must_settle_before_sampling_runs(self):
         phases = self._phases()
         phases["activation"]["queued_jobs_after_release"] = {
-            "settled": False, "jobs": ["96 crq-queued-fixture.service start running"]}
+            "settled": False, "query_ok": True, "rc": 0,
+            "jobs": ["96 crq-queued-fixture.service start running"]}
         manager = {"before": self._snapshot(10, "i1", "boot-1"),
                    "after": self._snapshot(11, "i2", "boot-1"),
                    "after_phase": self._refusals()}

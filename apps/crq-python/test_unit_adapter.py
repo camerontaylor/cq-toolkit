@@ -605,6 +605,39 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(
             inventory["crq-watchdog.service"]["service_timeout_seconds"], 300)
 
+    def test_remain_after_exit_defaults_to_false_and_key_is_present(self):
+        inventory = adapter_mod.declared_inventory(self.root, self.sha)
+        for entry in inventory.values():
+            self.assertIs(entry["service_remain_after_exit"], False)
+
+    def _remain(self, line):
+        path = self.template("crq-tick.service")
+        text = path.read_text()
+        path.write_text(text.replace("[Service]\n", "[Service]\n" + line, 1))
+        sha = self.commit()
+        return adapter_mod.declared_inventory(
+            self.root, sha)["crq-tick.service"]["service_remain_after_exit"]
+
+    def test_remain_after_exit_spellings_parse(self):
+        for spelling in ("yes", "YES", "True", "on", "1"):
+            with self.subTest(spelling=spelling):
+                self.setUp()
+                self.assertIs(self._remain("RemainAfterExit=%s\n" % spelling),
+                              True)
+        for spelling in ("no", "FALSE", "off", "0"):
+            with self.subTest(spelling=spelling):
+                self.setUp()
+                self.assertIs(self._remain("RemainAfterExit=%s\n" % spelling),
+                              False)
+
+    def test_remain_after_exit_unsupported_value_refuses(self):
+        with self.assertRaisesRegex(ValueError, "unsupported RemainAfterExit"):
+            self._remain("RemainAfterExit=maybe\n")
+
+    def test_remain_after_exit_duplicate_refuses(self):
+        with self.assertRaisesRegex(ValueError, "multiple RemainAfterExit"):
+            self._remain("RemainAfterExit=no\nRemainAfterExit=yes\n")
+
     def test_undeclared_template_refuses(self):
         (self.template("crq-extra.service")).write_text(
             "[Service]\nExecStart=/bin/true\n")
@@ -894,6 +927,40 @@ class AdapterTests(AdapterFixture):
                 "simple service completion has no declared execution bound"):
             self.adapter.preflight("crq-repair.service", NODE_RUNTIME)
         self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_preflight_refuses_pinned_remain_after_exit(self):
+        adapter = self.make_adapter()
+        real = adapter._inventory
+
+        def remaining():
+            inventory = real()
+            inventory["crq-tick.service"]["service_remain_after_exit"] = True
+            return inventory
+        adapter._inventory = remaining
+        before = _tree(self.unit_dir)
+        with self.assertRaisesRegex(dc.Refused,
+                                    "remains active after the first completion"):
+            adapter.preflight("crq-tick.service", NODE_RUNTIME)
+        self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_preflight_refuses_saved_remain_after_exit(self):
+        service = self.unit_dir / "crq-tick.service"
+        text = service.read_text()
+        _write(service, text.replace(
+            "Type=oneshot", "Type=oneshot\nRemainAfterExit=yes").encode(), 0o600)
+        before = _tree(self.unit_dir)
+        with self.assertRaisesRegex(dc.Refused,
+                                    "saved service remains active"):
+            self.adapter.preflight("crq-tick.service", NODE_RUNTIME)
+        self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_preflight_refuses_saved_unsupported_remain_after_exit(self):
+        service = self.unit_dir / "crq-tick.service"
+        text = service.read_text()
+        _write(service, text.replace(
+            "Type=oneshot", "Type=oneshot\nRemainAfterExit=maybe").encode(), 0o600)
+        with self.assertRaisesRegex(dc.Refused, "unsupported RemainAfterExit"):
+            self.adapter.preflight("crq-tick.service", NODE_RUNTIME)
 
     def test_preflight_refuses_capability_port_failure(self):
         self.capability.fail = "commands"
@@ -1619,6 +1686,14 @@ class AdapterTests(AdapterFixture):
                 recovery.restore_activation("crq-tick.service", snapshot)
                 self.assertEqual(self.fake.active["crq-tick.service"], "active")
 
+    def test_unicode_blank_between_magnitude_and_unit_is_not_a_duration(self):
+        # systemd rejects NBSP between magnitude and unit and keeps the earlier value.
+        recovery, snapshot = self._recovery_with_timeout_line(
+            "TimeoutStartSec=20min\nTimeoutStartSec=1\u00a0min")
+        self.fake.service_start_delay = 700
+        recovery.restore_activation("crq-tick.service", snapshot)
+        self.assertEqual(self.fake.active["crq-tick.service"], "active")
+
     def test_last_timeout_assignment_wins_across_both_keys(self):
         for lines in ("TimeoutStartSec=5min\nTimeoutStartSec=20min",
                       "TimeoutStartSec=1min\nTimeoutSec=20min",
@@ -1731,6 +1806,12 @@ class AdapterTests(AdapterFixture):
         self.assertEqual(adapter_mod._duration_seconds("1h 30min"), 5400)
         self.assertIsNone(adapter_mod._duration_seconds("5min bogus"))
         self.assertIsNone(adapter_mod._duration_seconds(""))
+
+    def test_blank_between_magnitude_and_unit_is_accepted(self):
+        self.assertEqual(adapter_mod._duration_seconds("5min"), 300)
+        self.assertEqual(adapter_mod._duration_seconds("5 min"), 300)
+        self.assertEqual(adapter_mod._duration_seconds("5 min 20s"), 320)
+        self.assertIsNone(adapter_mod._duration_seconds("5 mins"))
 
     def test_forward_and_recovery_for_both_runtimes(self):
         cases = [

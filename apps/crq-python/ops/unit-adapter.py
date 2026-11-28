@@ -64,8 +64,10 @@ DURATION_UNITS = {
     "years": 31557600, "year": 31557600, "y": 31557600,
 }
 # Longest spelling first so ``min`` never matches as ``m`` and ``ms`` never as ``m``.
+# Blanks may sit between a magnitude and its unit: systemd parses both
+# ``TimeoutStartSec=5 min`` and ``TimeoutStartSec=5min`` as five minutes.
 DURATION_RE = re.compile(
-    r"(?P<value>\d+(?:\.\d+)?)(?P<unit>"
+    r"(?P<value>\d+(?:\.\d+)?)[ \t]*(?P<unit>"
     + "|".join(sorted(map(re.escape, DURATION_UNITS), key=len, reverse=True))
     + ")?")
 UNIT_FILE_STATES = {"enabled", "disabled", "static", "masked", "alias",
@@ -312,8 +314,9 @@ def _section_assignments(text: str, section: str, keys: tuple[str, ...]) -> list
 
 def _duration_seconds(text: str, zero_ok: bool = False) -> int | None:
     # systemd time spans join components with optional whitespace
-    # ("5min 20s", "20min30s"); every component must parse.
-    value = text.strip()
+    # ("5min 20s", "20min30s") and allow blanks between a magnitude and its
+    # unit ("5 min", "5min"); every component must parse.
+    value = text.strip(SYSTEMD_BLANKS)
     if not value:
         return None
     # systemd parses time spans in microseconds, truncating each component's
@@ -325,7 +328,7 @@ def _duration_seconds(text: str, zero_ok: bool = False) -> int | None:
         if match is None:
             return None
         position = match.end()
-        while position < len(value) and value[position].isspace():
+        while position < len(value) and value[position] in SYSTEMD_BLANKS:
             position += 1
         factor = DURATION_UNITS[match.group("unit") or "s"]
         try:
@@ -429,6 +432,26 @@ def _single_value(values: list[str], name: str, default=None):
     return values[0] if values else default
 
 
+def _remain_after_exit(service_text: str) -> bool:
+    """The ``RemainAfterExit`` boolean a service file selects (default False).
+
+    systemd parses booleans case-insensitively across these spellings; an
+    absent assignment keeps the ``RemainAfterExit=no`` default. A duplicate or
+    unsupported value raises ``ValueError``.
+    """
+    remain = _single_value(
+        _section_values(service_text, "Service", "RemainAfterExit"),
+        "RemainAfterExit")
+    if remain is None:
+        return False
+    value = remain.lower()
+    if value in ("yes", "true", "on", "1"):
+        return True
+    if value in ("no", "false", "off", "0"):
+        return False
+    raise ValueError("has an unsupported RemainAfterExit")
+
+
 def declared_inventory(root: Path, source_sha: str) -> dict:
     """The declared six-unit inventory at one pinned commit.
 
@@ -493,6 +516,10 @@ def declared_inventory(root: Path, source_sha: str) -> dict:
             service_timeout = None
         else:
             service_timeout = 90
+        try:
+            service_remain_after_exit = _remain_after_exit(service_text)
+        except ValueError as exc:
+            raise ValueError("service template " + str(exc) + ": " + unit)
         stem = unit[:-len(".service")]
         timer = stem + ".timer"
         path_unit = stem + ".path"
@@ -544,6 +571,7 @@ def declared_inventory(root: Path, source_sha: str) -> dict:
             "timer_wants": timer_wants,
             "path_wants": path_wants,
             "service_type": service_type,
+            "service_remain_after_exit": service_remain_after_exit,
             "service_timeout_seconds": service_timeout,
             "timer_bound_seconds": timer_bound,
             "timer_repeat_seconds": timer_repeat,
@@ -1232,6 +1260,28 @@ class ProductionUnitAdapter:
             self.refuse("saved service Type is unsupported: " + service_type)
         return service_type
 
+    def _saved_remain_after_exit(self, path):
+        """Refuse a saved service that stays active after its first completion.
+
+        ``restore_activation`` starts the saved bytes, so ``RemainAfterExit``
+        must be checked on them as well as on the pinned template; otherwise
+        the second completion never arrives and the refusal comes only after
+        the switch has masked the service.
+        """
+        try:
+            text = Path(path).read_text()
+        except OSError as exc:
+            self.refuse("saved service is unreadable: " + str(exc)[:160])
+        try:
+            remains = _remain_after_exit(text)
+        except ValueError as exc:
+            self.refuse("saved service " + str(exc))
+        if remains:
+            self.refuse("saved service remains active after the first "
+                        "completion; the restored timer does not restart an "
+                        "active service, so no second distinct completion is "
+                        "available")
+
     def _observe_activators(self, unit, inventory):
         paths = self._unit_paths(unit, inventory)
         observed = {}
@@ -1295,6 +1345,7 @@ class ProductionUnitAdapter:
         # Restore will need the saved Type; refuse now rather than after the
         # switch has masked the service and stopped its activators.
         self._saved_service_type(paths["service"])
+        self._saved_remain_after_exit(paths["service"])
         observed = self._observe_activators(unit, inventory)
         completion_window = self._completion_budget(unit, inventory, observed)
         try:
@@ -1342,10 +1393,12 @@ class ProductionUnitAdapter:
         The controller requires two strictly advancing completions after one
         ``start``. The first is produced by the started service; the second is
         produced by the restored timer. An inactive timer cannot produce it
-        without spawning unrecorded work. A calendar schedule whose worst-case
-        interval exceeds the fixed supported maximum is refused before
-        mutation. A repeat-after-active/inactive timer instead derives its
-        finite maximum from its own declared bound.
+        without spawning unrecorded work. A target service that stays active
+        after the first completion (``RemainAfterExit=yes``) is not restarted
+        by the restored timer either, so it is refused. A calendar schedule
+        whose worst-case interval exceeds the fixed supported maximum is
+        refused before mutation. A repeat-after-active/inactive timer instead
+        derives its finite maximum from its own declared bound.
         """
         timer = inventory[unit]["timer"]
         if timer is None:
@@ -1359,6 +1412,11 @@ class ProductionUnitAdapter:
         if inventory[unit]["service_type"] == "simple":
             self.refuse("simple service completion has no declared execution "
                         "bound; preflight refuses this topology")
+        if inventory[unit]["service_remain_after_exit"]:
+            self.refuse("service remains active after the first completion; "
+                        "the restored timer does not restart an active "
+                        "service, so no second distinct completion is "
+                        "available")
         service_timeout = inventory[unit]["service_timeout_seconds"]
         if type(service_timeout) is not int or service_timeout <= 0:
             self.refuse("declared service start timeout is not bounded")
