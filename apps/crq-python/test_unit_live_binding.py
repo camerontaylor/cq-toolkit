@@ -1374,6 +1374,23 @@ class LayoutTests(ControllerFixture):
             layout.lock_identity()
 
 
+class ConfigHomeFallbackTests(ControllerFixture):
+    """The units digest and the live layout resolve one config directory."""
+
+    def test_empty_and_relative_xdg_fall_back_to_home_config(self):
+        home = self.base / "home"
+        units = home / ".config/systemd/user"
+        units.mkdir(parents=True)
+        (units / "crq-tick.timer").write_text("[Timer]\n")
+        for value in ("", "relative/xdg"):
+            with self.subTest(xdg=value), mock.patch.dict(
+                    os.environ, {"XDG_CONFIG_HOME": value, "HOME": str(home)}):
+                digests = self.effects.unit_digests()
+                self.assertEqual(list(digests), ["crq-tick.timer"])
+                layout = live.HostLayout.from_overlay(self.root, self.overlay)
+                self.assertEqual(layout.unit_dir, units)
+
+
 class ProductionAdapterTests(FactoryFixture):
     def setUp(self):
         super().setUp()
