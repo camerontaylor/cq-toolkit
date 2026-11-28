@@ -1,3 +1,4 @@
+import { reviewDigest } from '../../../src/ops/review/internal/reviewOperation.js';
 import { describe, expect, it } from 'vitest';
 import { mkdtemp, mkdir, readFile, writeFile, symlink } from 'node:fs/promises';
 import { writeFileSync } from 'node:fs';
@@ -41,7 +42,7 @@ describe('completed cycle adapter', () => {
               id: 'local-1',
               kind: 'local-review',
               state: 'pending',
-              identity: digest,
+              identity: reviewDigest(identity),
               identity_inputs: identity,
               profile,
               generation: 1,
@@ -129,7 +130,7 @@ describe('completed cycle adapter', () => {
               id: 'local-1',
               kind: 'local-review',
               state: 'pending',
-              identity: digest,
+              identity: reviewDigest(identity),
               identity_inputs: identity,
               profile,
               generation: 1,
@@ -227,7 +228,7 @@ describe('completed cycle adapter', () => {
             id: 'local-1',
             kind: 'local-review',
             state: 'pending',
-            identity: digest,
+            identity: reviewDigest(identity),
             identity_inputs: identity,
             profile,
             generation: 1,

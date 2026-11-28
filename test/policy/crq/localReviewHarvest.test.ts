@@ -2,7 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileLocalHarvestEffects } from '../../../src/adapters/crq/localReviewHarvest.js';
+import {
+  fileLocalHarvestEffects,
+  validateLocalReviewReceipt,
+} from '../../../src/adapters/crq/localReviewHarvest.js';
+import { reviewDigest } from '../../../src/ops/review/internal/reviewOperation.js';
 import { fileLocalExitHarvestEffects } from '../../../src/adapters/crq/localReviewExit.js';
 import { harvestLocalReviewExit } from '../../../src/ops/crq/internal/localReviewExit.js';
 import { fileLocalReviewPublishEffects } from '../../../src/adapters/crq/localReviewPublish.js';
@@ -49,7 +53,7 @@ describe('local review completion', () => {
             {
               id: 'local-1',
               kind: 'local-review',
-              identity: digest,
+              identity: reviewDigest(identity),
               identity_inputs: identity,
               profile,
               run: { run_id: 'run-1' },
@@ -144,7 +148,7 @@ describe('local review completion', () => {
             {
               id: 'local-1',
               kind: 'local-review',
-              identity: digest,
+              identity: reviewDigest(identity),
               identity_inputs: identity,
               profile,
               run: { run_id: 'run-1' },
@@ -236,7 +240,7 @@ describe('local review completion', () => {
             {
               id: 'local-1',
               kind: 'local-review',
-              identity: digest,
+              identity: reviewDigest(identity),
               identity_inputs: identity,
               profile,
               run: { run_id: 'run-1' },
@@ -394,6 +398,42 @@ describe('local review completion', () => {
     ).rejects.toThrow('disk');
     expect(saved).toBe(false);
     expect(item.get('state')).toBeUndefined();
+  });
+  it('rejects a receipt whose identity is not the digest of its identity_inputs', () => {
+    const oid = 'a'.repeat(40);
+    const inputs = {
+      v: 1,
+      repo: 'camerontaylor/cq-toolkit',
+      base_commit: oid,
+      base_tree: oid,
+      head_commit: oid,
+      head_tree: oid,
+      scope: 'full-diff',
+      projection: 'full-diff',
+      config_digest: 'b'.repeat(64),
+      profile: { adapter: 'coderabbit-cli', revision: 'v1' },
+    };
+    const receipt = (identity: string) =>
+      doc(
+        JSON.stringify({
+          v: 1,
+          kind: 'local-review-full-diff',
+          identity,
+          identity_inputs: inputs,
+          profile: { adapter: 'coderabbit-cli', revision: 'v1', flags: [] },
+          run_id: 'run-1',
+          outcome: 'clean',
+          scope_adequate: true,
+          findings: [],
+          report: '',
+          observed: {},
+          independent_acceptance: false,
+        }),
+      );
+    expect(() => validateLocalReviewReceipt(receipt(reviewDigest(inputs)))).not.toThrow();
+    expect(() => validateLocalReviewReceipt(receipt('b'.repeat(64)))).toThrow(
+      'receipt identity mismatch',
+    );
   });
   it('records an absent exit and never grants adequacy to interrupted runs', async () => {
     const queue = doc(

@@ -38,9 +38,9 @@ export interface DispatchRoots {
 /** Shell metacharacters and expansion, including the `&` and `&&` separators. */
 const SHELL_META = /[$`;&|<>\n\r(){}*?!#~\\]/;
 const KEY_TYPE = /^(?:ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp\d+|sk-ssh-ed25519@openssh\.com)$/;
-/** OpenSSH `expiry-time` values: absolute YYYYMMDD[HHMM[SS]], relative like +52w1d, or forever. */
+/** OpenSSH `expiry-time` values: absolute YYYYMMDD[HHMM[SS]][Z] (Z = UTC), relative like +52w1d, or forever. */
 const EXPIRY_TIME =
-  /^(?:forever|[+-](?:\d+[smhdwy])+|\d{4}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])(?:(?:[01]\d|2[0-3])[0-5]\d(?:[0-5]\d)?)?)$/;
+  /^(?:forever|[+-](?:\d+[smhdwy])+|\d{4}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])(?:(?:[01]\d|2[0-3])[0-5]\d(?:[0-5]\d)?)?Z?)$/;
 
 /** Split `a,b="c,d",e` at commas outside double quotes; null when a quote is unbalanced. */
 function splitOptions(text: string): string[] | null {
@@ -186,6 +186,7 @@ export function checkDispatchAuthorizedKeysLine(
     problems.push('a public key (type and blob) must follow the options');
 
   let command: string | null = null;
+  let commandSeen = false;
   let restrict = false;
   for (const part of parts) {
     const eq = part.indexOf('=');
@@ -196,6 +197,10 @@ export function checkDispatchAuthorizedKeysLine(
     }
     if (name === 'restrict') restrict = true;
     if (name === 'command') {
+      // OpenSSH rejects a second `command` clause outright, so such a line
+      // can never authenticate even when the final command checks out.
+      if (commandSeen) problems.push('at most one command option is allowed');
+      commandSeen = true;
       const raw = part.slice(eq + 1);
       if (!/^".*"$/.test(raw)) problems.push('command must be a double-quoted string');
       else command = raw.slice(1, -1);

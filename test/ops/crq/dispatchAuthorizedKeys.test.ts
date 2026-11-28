@@ -35,6 +35,17 @@ describe('dispatch authorized_keys line check', () => {
     expect(result).toEqual({ ok: true, identity: 'queue', problems: [] });
   });
 
+  it.each(['20301231Z', '203012312359Z', '20301231235959Z', '20301231'])(
+    'accepts expiry-time %s',
+    (value) => {
+      const result = checkDispatchAuthorizedKeysLine(
+        line(queueCommand(), `restrict,expiry-time="${value}"`),
+        ROOTS,
+      );
+      expect(result).toEqual({ ok: true, identity: 'queue', problems: [] });
+    },
+  );
+
   it.each([
     ['missing restrict', `command="${queueCommand()}" ${KEY}`, 'restrict is required'],
     ['permissive option', line(queueCommand(), 'restrict,pty'), 'option not allowed: pty'],
@@ -119,6 +130,11 @@ describe('dispatch authorized_keys line check', () => {
       'unquoted from',
       line(queueCommand(), 'restrict,from=*.example.com'),
       'from must be a double-quoted pattern list',
+    ],
+    [
+      'second command option',
+      `restrict,command="false",command="${queueCommand()}" ${KEY}`,
+      'at most one command option is allowed',
     ],
   ])('refuses %s', (_name, input, problem) => {
     const result = checkDispatchAuthorizedKeysLine(input, ROOTS);
