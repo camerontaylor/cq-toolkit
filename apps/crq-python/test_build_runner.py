@@ -434,6 +434,34 @@ class BuildRunnerTests(unittest.TestCase):
         fake_build.assert_called_once()
         self.assertEqual(json.loads(report_path.read_text())['source_sha'], SHA)
 
+    def test_main_writes_report_through_the_validated_resolved_path(self):
+        external = self.base / 'external-dist'
+        external.mkdir()
+        (self.repo / 'dist').symlink_to(external)
+        fake_report = {'archive': 'a.tar.gz', 'archive_sha256': 'e' * 64,
+                       'source_sha': SHA, 'content_sha256': 'f' * 64,
+                       'file_count': 1, 'provenance_path': 'x.provenance.json',
+                       'observed': None, 'runner': None}
+
+        def replace_symlink(*_args, **_kwargs):
+            (self.repo / 'dist').unlink()
+            (self.repo / 'dist').mkdir()
+            return fake_report
+
+        argv = ['build-runner', '--repo', str(self.repo), '--sha', SHA,
+                '--staging', str(self.base / 'stage'),
+                '--output', str(self.base / 'out/runner.tar.gz'), '--json',
+                '--report', str(self.repo / 'dist/build-report.json')]
+        with mock.patch.object(sys, 'argv', argv), \
+                mock.patch.object(build_runner, 'build',
+                                  side_effect=replace_symlink), \
+                contextlib.redirect_stdout(io.StringIO()):
+            build_runner.main()
+        self.assertEqual(
+            json.loads((external / 'build-report.json').read_text())['source_sha'],
+            SHA)
+        self.assertFalse((self.repo / 'dist/build-report.json').exists())
+
     def test_build_rejects_dirty_tree_after_build(self):
         staging = self.base / 'stage'
         output = self.base / 'out/runner.tar.gz'
