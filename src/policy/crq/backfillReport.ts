@@ -474,15 +474,20 @@ export async function summary(options: {
     const endIso = isoDay(endDay);
     const observed: Array<JsonRecordLike> = [];
     for (const [date, value] of recordEntries(daily)) {
-      if (startIso <= date && date <= endIso) observed.push(asDoc(value, `daily capacity ${date}`));
+      if (startIso <= date && date <= endIso) {
+        const day = asDoc(value, `daily capacity ${date}`);
+        // Legacy records (no completed_T1_partitions) are missing observations, not zero-T1 days.
+        if (recordHas(day, 'completed_T1_partitions')) observed.push(day);
+      }
     }
     let completed = 0;
     for (const day of observed) {
       // Numerator and denominator share the T1 population (Python oracle: the
       // same daily record field the harvest writer fills for T1 items).
-      const count = opt(day, 'completed_T1_partitions');
-      completed +=
-        count === undefined || count === null ? 0 : pythonInt(count, 'completed_T1_partitions');
+      completed += pythonInt(
+        need(day, 'completed_T1_partitions', 'daily capacity'),
+        'completed_T1_partitions',
+      );
     }
     const candidates = need(ranked, 'candidates', 'ranked inventory');
     if (!Array.isArray(candidates)) fail('ranked candidates must be an array');

@@ -223,9 +223,7 @@ export async function finishHarvest(
       throw new LedgerTypeError('completed_partitions must be an integer');
     const t1 = row.get('completed_T1_partitions');
     const t1Count =
-      t1 instanceof JsonNumber && t1.kind === 'int' && t1.integer !== null
-        ? Number(t1.integer)
-        : 0;
+      t1 instanceof JsonNumber && t1.kind === 'int' && t1.integer !== null ? Number(t1.integer) : 0;
     const pending = result.item.get('state') === 'publication-pending';
     let counted = row;
     if (pending)

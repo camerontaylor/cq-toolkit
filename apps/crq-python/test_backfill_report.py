@@ -239,7 +239,25 @@ class ReportTest(unittest.TestCase):
             self.assertIsNone(reporting.summary(f.repo, ranked, {"items": [], "backfill_daily_capacity": days}, original)["baseline"]["estimated_days_at_observed_capacity"])
             for day in days.values():
                 day["completed_T1_partitions"] = 1
-            self.assertEqual(reporting.summary(f.repo, ranked, {"items": [], "backfill_daily_capacity": days}, original)["baseline"]["estimated_days_at_observed_capacity"], 14)
+            # 1 remaining T1 at 1 T1 completion/day over 14 observed days: ceil(1*14/14) == 1 day.
+            self.assertEqual(reporting.summary(f.repo, ranked, {"items": [], "backfill_daily_capacity": days}, original)["baseline"]["estimated_days_at_observed_capacity"], 1)
+
+    def test_legacy_capacity_rows_are_missing_observations_not_zero_T1_days(self):
+        with tempfile.TemporaryDirectory() as td:
+            f = Fixture(Path(td) / "repo")
+            target = f.commit({"a": b"one\n"})
+            ranked = {"target": target, "manifest_id": "m", "candidates": [{"tier": "T1"}], "required": [], "evidence_gaps": [], "paths": [], "evaluated_at": "2026-10-14T00:00:00Z"}
+            original = reporting.baseline(f.repo, ranked, "p", "l", "2026-10-01T00:00:00Z")
+            estimate = lambda d: reporting.summary(f.repo, ranked, {"items": [], "backfill_daily_capacity": d}, original)["baseline"]["estimated_days_at_observed_capacity"]
+            legacy = {f"2026-10-{day:02d}": {"completed_partitions": 1} for day in range(1, 15)}
+            self.assertIsNone(estimate(legacy))
+            # Mixed: 13 legacy days plus one T1 completion must not read as 14 days.
+            mixed = dict(legacy); mixed["2026-10-14"] = {"completed_partitions": 1, "completed_T1_partitions": 1}
+            self.assertIsNone(estimate(mixed))
+            # Explicit zero-T1 days are real observations and still count.
+            zeros = {d: {"completed_partitions": 1, "completed_T1_partitions": 0} for d in legacy}
+            zeros["2026-10-14"]["completed_T1_partitions"] = 1
+            self.assertEqual(estimate(zeros), 14)
 
     def test_removed_lines_are_not_reviewed_and_new_lines_remain_debt(self):
         with tempfile.TemporaryDirectory() as td:
