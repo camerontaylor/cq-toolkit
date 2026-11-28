@@ -71,11 +71,14 @@ so a full 256-record tail stays inside the cap without dropping evidence.
 emits `list-jobs --no-legend`. `cgroup_pids(unit)` reads `MainPID` and
 `ControlGroup` and then `/sys/fs/cgroup<ControlGroup>/cgroup.procs`.
 
-Cgroup containment is strict: the control group must be absolute, have no
-empty, `.` or `..` component, resolve to a path strictly below the cgroup root,
-and not pass through a symlink. A missing `cgroup.procs` is empty only when
-`MainPID` is zero; otherwise it refuses. PID lines must be positive integers and
-are deduplicated under a bound.
+Cgroup containment is checked on the resolved path, not by banning symlink
+components: the control group must be absolute, empty components are dropped
+rather than rejected, a `.` or `..` component refuses, the path is resolved
+under the cgroup root and must land strictly below it (a symlink that resolves
+outside the root refuses), and the final `cgroup.procs` must not itself be a
+symlink. A missing `cgroup.procs` is empty only when `MainPID` is zero;
+otherwise it refuses. PID lines must be positive integers and are deduplicated
+under a bound.
 
 ## Discovery scope
 
