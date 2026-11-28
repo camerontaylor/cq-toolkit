@@ -997,7 +997,15 @@ class Run:
             polls = []
             deadline = self.clock() + self.args.drain_deadline_s
             while True:
-                result = self.controller.drain_check(self.effects, liveness)
+                # The deadline is enforced inside the scan, not only around
+                # it: the controller caps each probe to the time left and
+                # reports work it never observed before expiry as
+                # unresolved, so a poll whose probes all run to their own
+                # timeout cannot spend minutes past the deadline before
+                # this loop reads the clock again.
+                result = self.controller.drain_check(self.effects, liveness,
+                                                     deadline=deadline,
+                                                     clock=self.clock)
                 polls.append(result)
                 # A drained answer only counts while the deadline holds: an
                 # observation taken at or after expiry fails closed, even if

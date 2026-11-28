@@ -164,3 +164,69 @@ class DrainTests(ControllerFixture):
         result = dc.drain_check(self.effects, lambda *a: "harvest")
         self.assertFalse(result["drained"])
         self.assertEqual(result["blocked"][0]["state"], "ambiguous")
+
+    def test_no_deadline_keeps_the_unchanged_probe_call(self):
+        # Callers without a deadline scan exactly as before: no timeout
+        # argument reaches the probe.
+        self.write_state("queue.json", {"items": [
+            {"id": "pr1", "run": {"run_id": "a" * 32}}]})
+        probe = mock.Mock(return_value="harvest")
+        self.assertTrue(dc.drain_check(self.effects, probe)["drained"])
+        probe.assert_called_once_with(
+            self.runner / "state/runs" / ("a" * 32),
+            {"id": "pr1", "run": {"run_id": "a" * 32}},
+            {"run_id": "a" * 32}, False)
+
+    def test_enforced_deadline_passes_the_remaining_budget_to_probes(self):
+        self.write_state("queue.json", {"items": [
+            {"id": "pr1", "run": {"run_id": "a" * 32}}]})
+        probe = mock.Mock(return_value="harvest")
+        result = dc.drain_check(self.effects, probe,
+                                deadline=160.0, clock=lambda: 100.0)
+        self.assertTrue(result["drained"])
+        probe.assert_called_once_with(
+            self.runner / "state/runs" / ("a" * 32),
+            {"id": "pr1", "run": {"run_id": "a" * 32}},
+            {"run_id": "a" * 32}, False, timeout=60.0)
+
+    def test_enforced_deadline_caps_each_probe_to_the_time_left(self):
+        # The runbook's drain deadline must bound the scan itself: a probe
+        # is given only the time that remains, and once it is gone the
+        # unobserved runs are reported unresolved instead of probed, so one
+        # poll can never spend several 30s probe timeouts past the
+        # deadline before its caller checks the clock again.
+        self.write_state("queue.json", {"items": [
+            {"id": "pr1", "run": {"run_id": "a" * 32}},
+            {"id": "pr2", "run": {"run_id": "b" * 32}}]})
+        now = [100.0]
+        budgets = []
+
+        def liveness(rdir, item, r, has_exit, timeout=30):
+            budgets.append((item["id"], timeout))
+            now[0] += 12.0  # this probe outlived the time it was given
+            return "harvest"
+
+        result = dc.drain_check(self.effects, liveness,
+                                deadline=110.0, clock=lambda: now[0])
+        self.assertFalse(result["drained"])
+        # The first probe was capped at exactly the remaining 10s.
+        self.assertEqual(budgets, [("pr1", 10.0)])
+        # The deadline expired before pr2's probe: it is unresolved, and
+        # the scan never observed it.
+        self.assertEqual(result["blocked"], [
+            {"item": "pr2", "state": "unresolved", "run": "b" * 32,
+             "reason": "drain deadline expired before its liveness probe "
+                       "ran"}])
+
+    def test_enforced_deadline_expires_before_any_probe_reports_unresolved(self):
+        self.write_state("queue.json", {"items": [
+            {"id": "pr1", "run": {"run_id": "a" * 32}}]})
+        probe = mock.Mock(side_effect=AssertionError("probe ran past expiry"))
+        result = dc.drain_check(self.effects, probe,
+                                deadline=100.0, clock=lambda: 100.0)
+        self.assertFalse(result["drained"])
+        probe.assert_not_called()
+        self.assertEqual(result["blocked"], [
+            {"item": "pr1", "state": "unresolved", "run": "a" * 32,
+             "reason": "drain deadline expired before its liveness probe "
+                       "ran"}])

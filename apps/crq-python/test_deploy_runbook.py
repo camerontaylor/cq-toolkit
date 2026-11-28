@@ -505,7 +505,7 @@ class DeployTests(DeployFixture, unittest.TestCase):
             '{"items": [{"id": "q1", "run": {"run_id": 7}}], "starts": []}\n')
         real_check = dc.drain_check
 
-        def settles_late(effects, liveness):
+        def settles_late(effects, liveness, deadline=None, clock=None):
             if self.clock() >= 10:
                 return {"drained": True, "blocked": []}
             return real_check(effects, liveness)
@@ -553,7 +553,7 @@ class DeployTests(DeployFixture, unittest.TestCase):
             armed.append(armed[0])
             return armed[0] + 5.0
 
-        def arming_check(effects, liveness):
+        def arming_check(effects, liveness, deadline=None, clock=None):
             if not armed:
                 armed.append(self.now[0])
             return real_check(effects, liveness)
@@ -586,6 +586,29 @@ class DeployTests(DeployFixture, unittest.TestCase):
         record = json.loads(
             (Path(run.run_dir) / "drain.json").read_text())
         self.assertTrue(record["drained"])
+
+    def test_drain_poll_enforces_deadline_inside_the_scan(self):
+        # The deadline must bound the scan itself, not only the loop around
+        # it: six recorded runs whose probes each run to their 30s timeout
+        # would otherwise spend ~180s inside one poll before this loop
+        # checked its clock. The poll carries the absolute deadline and the
+        # run clock into drain_check, which caps each probe to the time
+        # left and reports work it never observed as unresolved.
+        (self.runner / "state/queue.json").write_text(
+            '{"items": [], "starts": []}\n')
+        real_check = dc.drain_check
+        seen = []
+
+        def spying_check(effects, liveness, deadline=None, clock=None):
+            seen.append({"deadline": deadline, "clock": clock})
+            return real_check(effects, liveness)
+
+        run = self.build()
+        run.drain_fn = None
+        with mock.patch.object(dc, "drain_check", side_effect=spying_check):
+            document = run.run()
+        self.assertEqual(document["outcome"], "completed")
+        self.assertEqual(seen, [{"deadline": 10.0, "clock": self.clock}])
 
     def test_incompatible_queue_refuses_before_hold(self):
         state = self.runner / "state/queue.json"
