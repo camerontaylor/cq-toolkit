@@ -280,7 +280,9 @@ def require_fence(cli, label, expected_count=None):
     command = observation.get("command") if isinstance(observation, dict) else None
     require(isinstance(command, dict)
             and command.get("argv") == ["systemctl", "--user", "list-jobs",
-                                       "--no-legend", "--no-pager"]
+                                       "--no-legend", "--no-pager",
+                                       REPAIR_UNIT, REPAIR_TIMER,
+                                       REPAIR_PATH_UNIT]
             and type(command.get("rc")) is int and command.get("rc") == 0
             and command.get("timeout") is False
             and isinstance(command.get("stdout"), str)

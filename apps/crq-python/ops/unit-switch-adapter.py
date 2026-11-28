@@ -150,12 +150,16 @@ class GuestFixtureAdapter:
         try:
             result = subprocess.run(argv, capture_output=True, text=True,
                                     timeout=timeout)
+            stdout = result.stdout or ""
             return {"argv": list(argv), "rc": result.returncode,
-                    "stdout": result.stdout[-8000:],
+                    "stdout": stdout[-8000:],
+                    "stdout_truncated": len(stdout) > 8000,
                     "stderr": result.stderr[-8000:], "timeout": False}
         except subprocess.TimeoutExpired as exc:
+            stdout = _text_output(exc.stdout)
             return {"argv": list(argv), "rc": None, "timeout": True,
-                    "stdout": _text_output(exc.stdout)[-8000:],
+                    "stdout": stdout[-8000:],
+                    "stdout_truncated": len(stdout) > 8000,
                     "stderr": _text_output(exc.stderr)[-8000:]}
 
     def run_command(self, argv, timeout=60):
@@ -198,13 +202,25 @@ class GuestFixtureAdapter:
                 self.refuse("unit observation omitted " + prop + " for " + unit)
         return values
 
-    def _jobs(self, timeout=30):
+    def _jobs(self, names=None, timeout=30):
+        """Observe systemd jobs, filtered to the owned units when named.
+
+        The query itself is scoped so an unrelated busy queue cannot push
+        owned job rows out of the retained output, and truncated output is
+        refused instead of being mistaken for a proof of absence.
+        """
         self.last_jobs_observation = None
-        result = self.run_command(["systemctl", "--user", "list-jobs",
-                                   "--no-legend", "--no-pager"],
-                                  timeout=timeout)
+        argv = ["systemctl", "--user", "list-jobs",
+                "--no-legend", "--no-pager"]
+        if names:
+            argv.extend(names)
+        result = self.run_command(argv, timeout=timeout)
         if result.get("timeout") or result.get("rc") != 0:
             self.refuse("systemctl list-jobs failed; job absence is unknown")
+        if result.get("stdout_truncated") is not False:
+            # A runner that does not report completeness cannot prove absence.
+            self.refuse("systemctl list-jobs output was truncated or its "
+                        "completeness is unreported; job absence is unknown")
         stdout = result.get("stdout")
         if not isinstance(stdout, str):
             self.refuse("systemctl list-jobs returned no text")
@@ -214,7 +230,7 @@ class GuestFixtureAdapter:
         return self.last_jobs_observation["lines"]
 
     def _jobs_for(self, names, timeout=30):
-        return [line for line in self._jobs(timeout=timeout)
+        return [line for line in self._jobs(names, timeout=timeout)
                 if any(re.search(r"(?:^|\s)" + re.escape(name) + r"(?:\s|$)", line)
                        for name in names)]
 
