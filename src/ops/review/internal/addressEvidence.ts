@@ -346,6 +346,8 @@ async function terminalGit(
     input?: Buffer;
     index?: string;
     count?: { launches: number; deadline: number };
+    /** Runs on process success, before the post-command authority check. */
+    record?: () => void;
   } = {},
 ): Promise<Buffer> {
   await (options.cleanup
@@ -516,6 +518,9 @@ async function terminalGit(
     });
     child.stdin!.end(options.input);
   });
+  // A process success is a real created effect even when the post-command
+  // authority check below rejects: record it before that check can throw.
+  options.record?.();
   await (options.cleanup
     ? validateAddressTerminalAuthority(token)
     : validateEvidenceAuthority(token, options.count !== undefined));
@@ -831,11 +836,39 @@ export async function settleAddressTerminalEvidence(
   for (const attempt of attempts) {
     const session = await terminalSession(token, attempt.root, true);
     const count = { launches: 0, deadline };
+    // One builder for both paths, so a ref recorded at process-success time is
+    // identical to the one recorded once the pin resolves normally.
+    const retain = (branch: string, sha: string): AddressFailedAttempt => ({
+      branch,
+      sha,
+      finding: attempt.finding,
+      unit: `review/${attempt.slug}`,
+      outcome: 'escalated-to-human',
+      model: attempt.model,
+      file: attempt.file,
+      parent: attempt.parent,
+      executionHead: attempt.executionHead,
+      ordinal: Number(branch.slice(branch.lastIndexOf('/a') + 2)),
+      tier: attempt.tier,
+      gate: 'budget',
+      reason: 'parent cancelled',
+    });
     const git = (args: string[], index?: string, input?: Buffer) =>
       terminalGit(token, session, attempt.root, args, {
         count,
         ...(index ? { index } : {}),
         ...(input ? { input } : {}),
+        // A successful `update-ref` is a created ref even when the post-command
+        // authority check then rejects: record it before that check so the
+        // lifecycle reports it, while the authority check still precedes every
+        // restoration write below.
+        ...(args[0] === 'update-ref' && args[1]?.startsWith('refs/heads/')
+          ? {
+              record: () => {
+                attempt.retained ??= retain(args[1]!.slice('refs/heads/'.length), args[2]!);
+              },
+            }
+          : {}),
       });
     // The worktree representation of a tracked symlink follows core.symlinks;
     // read it at most once per attempt (unset means Git's default, true).
@@ -1013,20 +1046,7 @@ export async function settleAddressTerminalEvidence(
       },
     );
     // Record the real create effect before any later verification/restore failure.
-    attempt.retained = {
-      ...pinned,
-      finding: attempt.finding,
-      unit: `review/${attempt.slug}`,
-      outcome: 'escalated-to-human',
-      model: attempt.model,
-      file: attempt.file,
-      parent: attempt.parent,
-      executionHead: attempt.executionHead,
-      ordinal: Number(pinned.branch.slice(pinned.branch.lastIndexOf('/a') + 2)),
-      tier: attempt.tier,
-      gate: 'budget',
-      reason: 'parent cancelled',
-    };
+    attempt.retained = retain(pinned.branch, pinned.sha);
     if (
       (await git(['rev-parse', '--verify', `refs/heads/${pinned.branch}`])).toString().trim() !==
         pinned.sha ||
