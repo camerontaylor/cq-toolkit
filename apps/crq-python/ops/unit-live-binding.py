@@ -613,10 +613,10 @@ class SubprocessSystemd:
                         or stat.S_ISLNK(entry_info.st_mode)):
                     return ("declared drop-in entry is not a regular file or "
                             "symlink: " + str(entry))
-                if seen == len(declared_names):
-                    # Directory entry names are unique, so every declared
-                    # name is now present and nothing else can follow.
-                    break
+                # No early exit once every declared name is seen: an
+                # undeclared entry may still follow. Names are unique, so
+                # more than len(declared_names) entries implies an undeclared
+                # one, which returns above; the walk is therefore bounded.
             if seen != len(declared_names):
                 return ("declared drop-in directory does not contain exactly "
                         "the declared entries: " + str(path))

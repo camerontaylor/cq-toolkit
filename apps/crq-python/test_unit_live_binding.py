@@ -472,6 +472,44 @@ class DiscoveryTests(PortFixture):
         self.assertEqual(evidence["supported"], False)
         self.assertIn("declared entries", " ".join(evidence["foreign"]))
 
+    def test_co_installed_declared_then_undeclared_dropin_is_unsupported(self):
+        target = self.base / ".local/infra/systemd/crq-messaging.conf"
+        target.parent.mkdir(parents=True)
+        target.write_text(
+            "[Service]\nEnvironmentFile=%h/.local/state/paseo/env\n")
+        declared = self.declare()
+        watchdog_service = self.write(
+            "crq-watchdog.service", "[Service]\nExecStart=/bin/true\n")
+        dropin = self.unit_dir / "crq-watchdog.service.d"
+        dropin.mkdir()
+        (dropin / "20-paseo-env.conf").symlink_to(target)
+        (dropin / "override.conf").write_text("[Service]\nNice=5\n")
+        real_iterdir = Path.iterdir
+
+        def declared_first(path):
+            # Force the declared entry ahead of the undeclared one.
+            return iter(sorted(real_iterdir(path),
+                               key=lambda e: e.name != "20-paseo-env.conf"))
+
+        with mock.patch.object(Path, "iterdir", declared_first):
+            evidence = self.discover(declared)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("declared entries", " ".join(evidence["foreign"]))
+        self.assertIn(str(dropin), " ".join(evidence["foreign"]))
+
+    def test_enablement_directory_scan_bound_is_incomplete(self):
+        declared = self.declare()
+        wants = self.unit_dir / "timers.target.wants"
+        wants.mkdir(exist_ok=True)
+        for index in range(3):
+            (wants / ("other%d.timer" % index)).write_text("[Timer]\n")
+        with mock.patch.object(live, "MAX_SCAN_ENTRIES", 1):
+            evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], False)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("enablement directory exceeds the dependency scan bound",
+                      evidence["error"])
+
     def test_type_wide_inherited_dropin_directory_is_unsupported(self):
         declared = self.declare()
         override = self.unit_dir / "service.d"
