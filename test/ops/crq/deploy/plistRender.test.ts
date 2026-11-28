@@ -24,6 +24,7 @@ function fx(inputs: Record<string, string>) {
       atomicWrite: async (n: string, d: Uint8Array) => void writes.push([n, text(d)]),
       overlayPath: () => '/o/ov.json',
       home: () => '/h',
+      xdgStateHome: () => '/s',
     },
   };
 }
