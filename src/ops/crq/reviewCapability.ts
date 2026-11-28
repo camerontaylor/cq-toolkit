@@ -847,6 +847,7 @@ async function oversizeQuarantine(
     'publication',
     configured ? 'spooled' : (next.get('publication') ?? 'disabled'),
   );
+  if (configured) await effects.requestPublication();
   return next;
 }
 
