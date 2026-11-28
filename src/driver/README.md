@@ -375,8 +375,12 @@ the ACP vendor process, and every harness `run` child. All use the shared
 network-egress/TLS config (`NODE_EXTRA_CA_CERTS`, `SSL_CERT_*`, proxy
 vars), Windows equivalents) from the entry process env. By default it
 excludes `GH_TOKEN`, `*_API_KEY`, `*_SECRET`, `AWS_*`, `NPM_TOKEN`,
-`SSH_AUTH_SOCK`, and `NODE_OPTIONS`/`NODE_PATH` — and nothing `CQ_*` ever
-reaches a worker (the sandbox policy knobs are launcher-side only). Per-
+`SSH_AUTH_SOCK`, and `NODE_OPTIONS`/`NODE_PATH` — and no inherited `CQ_*`
+variable reaches a worker (the sandbox policy knobs are launcher-side only).
+The explicit exception is session correlation: when an invocation carries
+`correlation`, `applyCorrelationEnv` (`src/driver/correlation-env.ts`) stamps
+`CQ_WORK_ID`, `CQ_RUN_ID`, and the other correlation names into the child
+environment. Per-
 route endpoint/auth vars are composed explicitly into the substrate
 child's environment and always win over the allowlist; these credential
 overrides are not passed to harness `run` children. A deployment extends
