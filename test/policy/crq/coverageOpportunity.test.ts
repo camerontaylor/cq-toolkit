@@ -116,3 +116,28 @@ describe('coverage opportunity record', () => {
     }
   });
 });
+
+describe('coverage opportunity pruning', () => {
+  it('drops observations at or before at-24h, matching Python', () => {
+    const start = {
+      schema_version: 1,
+      paths: {},
+      runs: {},
+      observations: {
+        '2026-11-19T01:02:03Z': { started: true },
+        '2026-11-19T01:02:04Z': { started: false },
+        '2026-11-18T00:00:00Z': { started: true },
+      },
+    };
+    let ledger = doc(start);
+    for (const observation of OBSERVATIONS) ledger = recordOpportunity(ledger, observation);
+    expect(text(ledger)).toBe(oracle(start));
+  });
+
+  it('raises, like Python, on an unparseable or naive existing key', () => {
+    for (const key of ['not-a-time', '2026-11-20T00:00:00']) {
+      const ledger = doc({ observations: { [key]: {} } });
+      expect(() => recordOpportunity(ledger, OBSERVATIONS[0]!)).toThrow();
+    }
+  });
+});
