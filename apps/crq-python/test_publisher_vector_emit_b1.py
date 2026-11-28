@@ -126,7 +126,7 @@ class PublisherVectorTest(unittest.TestCase):
         value = document()
         case = next(case for case in _family(value, "publish")["cases"]
                     if case["name"] == "record-over-limit-utf8")
-        record = case["input"]["pending"][0]
+        record = case["input"]["direct"][0]
         canonical = ledger.canonical(record)
         self.assertGreater(len(canonical), 1024 * 1024)
         self.assertLess(len(canonical.decode("utf-8").encode("utf-16-le")) // 2, 1024 * 1024)

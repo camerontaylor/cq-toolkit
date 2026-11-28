@@ -3506,7 +3506,8 @@
           "source": "review_ledger.GitLedger.publish",
           "input": {
             "ledger": [],
-            "pending": [
+            "pending": [],
+            "direct": [
               {
                 "schema": "cq.review-ledger/v1",
                 "event_type": "job-state",
@@ -3526,7 +3527,6 @@
                 "id": "ed039d06c084d57986b7eea61af17804e07d0b8e71cb898cd7df569545b4608a"
               }
             ],
-            "direct": [],
             "acked": [],
             "failures": 0,
             "accept_then_fail": false,
@@ -4079,7 +4079,9 @@
                   "reason": "fixture transition"
                 },
                 "id": "1cdebeb74d7ccd3615196fd5ebcf7db726bcdf0a0923b7cc548e02d67ec74f44"
-              },
+              }
+            ],
+            "direct": [
               {
                 "schema": "cq.review-ledger/v1",
                 "event_type": "job-state",
@@ -4099,7 +4101,6 @@
                 "id": "ed039d06c084d57986b7eea61af17804e07d0b8e71cb898cd7df569545b4608a"
               }
             ],
-            "direct": [],
             "acked": [],
             "failures": 0,
             "accept_then_fail": false,
