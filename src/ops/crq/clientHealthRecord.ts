@@ -212,7 +212,8 @@ async function advisory(box: QueueBox, effects: ClientHealthEffects, log: string
   const repo = effects.repo;
 
   let number: JsonValue = box.health().get('issue_number') ?? null;
-  // The bounded lookup proves the advisory absent only when it is not truncated:
+  // The lookup is a plain (non-search-index) listing so a just-created advisory is
+  // visible to the confirming call. It proves the advisory absent only when it is not truncated:
   // a full page says nothing about issues past the cap, so a truncated result is
   // never treated as "no advisory".
   let lookupTruncated = false;
@@ -224,8 +225,6 @@ async function advisory(box: QueueBox, effects: ClientHealthEffects, log: string
       repo,
       '--state',
       'all',
-      '--search',
-      `"${HEALTH_TITLE}" in:title`,
       '--limit',
       String(ADVISORY_LOOKUP_LIMIT),
       '--json',

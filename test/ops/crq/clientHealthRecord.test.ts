@@ -182,8 +182,6 @@ describe('recordClientHealth: opening the advisory issue', () => {
       'o/r',
       '--state',
       'all',
-      '--search',
-      `"${HEALTH_TITLE}" in:title`,
       '--limit',
       '100',
       '--json',
@@ -255,6 +253,17 @@ describe('recordClientHealth: opening the advisory issue', () => {
       'health advisory: opening marker unresolved; confirming list found no issue, marker cleared',
     ]);
     expect(healthOf(result.queue)).toMatchObject({ opening: false, issue_number: null });
+  });
+
+  it('adopts the ambiguously created issue from a non-search listing without a second create', async () => {
+    const h = harness((args) =>
+      args[0] === 'issue' ? [{ number: 77, title: HEALTH_TITLE, body: HEALTH_MARKER }] : {},
+    );
+    const start = queueOf({ incomplete_ticks: 5, opening: true });
+    const result = await recordClientHealth(start, true, h.effects);
+    expect(h.calls[0]).not.toContain('--search');
+    expect(h.calls.some((c) => c[0] === 'api' && c[1] === 'repos/o/r/issues')).toBe(false);
+    expect(healthOf(result.queue)).toMatchObject({ opening: false, issue_number: 77 });
   });
 
   it('retains a stale opening marker when the bounded search is truncated', async () => {
