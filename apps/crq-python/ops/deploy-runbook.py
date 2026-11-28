@@ -813,8 +813,13 @@ class Run:
 
         # The drain loop passes deadline= and clock= to the TARGET
         # controller's drain_check. A target that predates them would raise
-        # TypeError mid-drain, which is not a FailStop and so bypasses the
-        # expiry hold handling: refuse before anything is switched.
+        # TypeError mid-drain; run()'s catch-all recovery would restore the
+        # hold and triggers and re-raise as Refused, but only after one
+        # avoidable stop/restart of the live triggers and with a confusing
+        # "unexpected keyword argument" message. Refuse before anything is
+        # switched. Like the checks above, this tests literal parameter
+        # names, so a **kwargs-only or undecorated-wrapper signature is
+        # refused (the safe direction).
         drain_parameters = inspect.signature(
             self.controller.drain_check).parameters
         require("deadline" in drain_parameters
