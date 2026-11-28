@@ -24,6 +24,7 @@
       ],
       "backfill_daily_capacity": {
        "2026-11-20": {
+        "completed_T1_partitions": 0,
         "completed_partitions": 0,
         "spare_admissions": 1
        }
@@ -93,6 +94,7 @@
        ],
        "backfill_daily_capacity": {
         "2026-11-20": {
+         "completed_T1_partitions": 0,
          "completed_partitions": 0,
          "spare_admissions": 1
         }
@@ -307,6 +309,7 @@
       ],
       "backfill_daily_capacity": {
        "2026-11-20": {
+        "completed_T1_partitions": 0,
         "completed_partitions": 0,
         "spare_admissions": 1
        }
@@ -381,6 +384,7 @@
        ],
        "backfill_daily_capacity": {
         "2026-11-20": {
+         "completed_T1_partitions": 0,
          "completed_partitions": 0,
          "spare_admissions": 1
         }
@@ -535,6 +539,7 @@
       ],
       "backfill_daily_capacity": {
        "2026-11-20": {
+        "completed_T1_partitions": 0,
         "completed_partitions": 0,
         "spare_admissions": 1
        }
@@ -608,6 +613,7 @@
        ],
        "backfill_daily_capacity": {
         "2026-11-20": {
+         "completed_T1_partitions": 0,
          "completed_partitions": 0,
          "spare_admissions": 1
         }
@@ -698,6 +704,7 @@
       ],
       "backfill_daily_capacity": {
        "2026-11-20": {
+        "completed_T1_partitions": 0,
         "completed_partitions": 0,
         "spare_admissions": 1
        }
@@ -767,6 +774,7 @@
        ],
        "backfill_daily_capacity": {
         "2026-11-20": {
+         "completed_T1_partitions": 0,
          "completed_partitions": 0,
          "spare_admissions": 1
         }
@@ -861,6 +869,7 @@
       ],
       "backfill_daily_capacity": {
        "2026-11-20": {
+        "completed_T1_partitions": 0,
         "completed_partitions": 0,
         "spare_admissions": 1
        }
@@ -935,6 +944,7 @@
        ],
        "backfill_daily_capacity": {
         "2026-11-20": {
+         "completed_T1_partitions": 0,
          "completed_partitions": 0,
          "spare_admissions": 1
         }
@@ -1097,6 +1107,7 @@
       ],
       "backfill_daily_capacity": {
        "2026-11-20": {
+        "completed_T1_partitions": 0,
         "completed_partitions": 0,
         "spare_admissions": 1
        }
@@ -1171,6 +1182,7 @@
        ],
        "backfill_daily_capacity": {
         "2026-11-20": {
+         "completed_T1_partitions": 0,
          "completed_partitions": 0,
          "spare_admissions": 1
         }
@@ -1262,6 +1274,7 @@
       ],
       "backfill_daily_capacity": {
        "2026-11-20": {
+        "completed_T1_partitions": 0,
         "completed_partitions": 0,
         "spare_admissions": 1
        }
@@ -1331,6 +1344,7 @@
        ],
        "backfill_daily_capacity": {
         "2026-11-20": {
+         "completed_T1_partitions": 0,
          "completed_partitions": 0,
          "spare_admissions": 1
         }
@@ -1489,6 +1503,7 @@
       ],
       "backfill_daily_capacity": {
        "2026-11-20": {
+        "completed_T1_partitions": 0,
         "completed_partitions": 0,
         "spare_admissions": 1
        }
@@ -1563,6 +1578,7 @@
        ],
        "backfill_daily_capacity": {
         "2026-11-20": {
+         "completed_T1_partitions": 0,
          "completed_partitions": 0,
          "spare_admissions": 1
         }
@@ -1797,6 +1813,7 @@
       ],
       "backfill_daily_capacity": {
        "2026-11-20": {
+        "completed_T1_partitions": 0,
         "completed_partitions": 0,
         "spare_admissions": 1
        }
@@ -1871,6 +1888,7 @@
        ],
        "backfill_daily_capacity": {
         "2026-11-20": {
+         "completed_T1_partitions": 0,
          "completed_partitions": 0,
          "spare_admissions": 1
         }
@@ -1962,6 +1980,7 @@
       ],
       "backfill_daily_capacity": {
        "2026-11-20": {
+        "completed_T1_partitions": 0,
         "completed_partitions": 0,
         "spare_admissions": 1
        }
@@ -2036,6 +2055,7 @@
        ],
        "backfill_daily_capacity": {
         "2026-11-20": {
+         "completed_T1_partitions": 0,
          "completed_partitions": 0,
          "spare_admissions": 1
         }
@@ -2127,6 +2147,7 @@
       ],
       "backfill_daily_capacity": {
        "2026-11-20": {
+        "completed_T1_partitions": 0,
         "completed_partitions": 0,
         "spare_admissions": 1
        }
@@ -2201,6 +2222,7 @@
        ],
        "backfill_daily_capacity": {
         "2026-11-20": {
+         "completed_T1_partitions": 0,
          "completed_partitions": 0,
          "spare_admissions": 1
         }
@@ -2292,6 +2314,7 @@
       ],
       "backfill_daily_capacity": {
        "2026-11-20": {
+        "completed_T1_partitions": 0,
         "completed_partitions": 0,
         "spare_admissions": 1
        }
@@ -2366,6 +2389,7 @@
        ],
        "backfill_daily_capacity": {
         "2026-11-20": {
+         "completed_T1_partitions": 0,
          "completed_partitions": 0,
          "spare_admissions": 1
         }
@@ -2457,6 +2481,7 @@
       ],
       "backfill_daily_capacity": {
        "2026-11-20": {
+        "completed_T1_partitions": 0,
         "completed_partitions": 0,
         "spare_admissions": 1
        }
@@ -2531,6 +2556,7 @@
        ],
        "backfill_daily_capacity": {
         "2026-11-20": {
+         "completed_T1_partitions": 0,
          "completed_partitions": 0,
          "spare_admissions": 1
         }
@@ -2627,6 +2653,7 @@
       ],
       "backfill_daily_capacity": {
        "2026-11-20": {
+        "completed_T1_partitions": 0,
         "completed_partitions": 0,
         "spare_admissions": 1
        }
@@ -2701,6 +2728,7 @@
        ],
        "backfill_daily_capacity": {
         "2026-11-20": {
+         "completed_T1_partitions": 0,
          "completed_partitions": 0,
          "spare_admissions": 1
         }
@@ -2792,6 +2820,7 @@
       ],
       "backfill_daily_capacity": {
        "2026-11-20": {
+        "completed_T1_partitions": 0,
         "completed_partitions": 0,
         "spare_admissions": 1
        }
@@ -2866,6 +2895,7 @@
        ],
        "backfill_daily_capacity": {
         "2026-11-20": {
+         "completed_T1_partitions": 0,
          "completed_partitions": 0,
          "spare_admissions": 1
         }
@@ -2957,6 +2987,7 @@
       ],
       "backfill_daily_capacity": {
        "2026-11-20": {
+        "completed_T1_partitions": 0,
         "completed_partitions": 0,
         "spare_admissions": 1
        }
@@ -3031,6 +3062,7 @@
        ],
        "backfill_daily_capacity": {
         "2026-11-20": {
+         "completed_T1_partitions": 0,
          "completed_partitions": 0,
          "spare_admissions": 1
         }
@@ -3474,6 +3506,7 @@
       ],
       "backfill_daily_capacity": {
        "2026-11-20": {
+        "completed_T1_partitions": 0,
         "completed_partitions": 0,
         "spare_admissions": 1
        }
@@ -3543,6 +3576,7 @@
        ],
        "backfill_daily_capacity": {
         "2026-11-20": {
+         "completed_T1_partitions": 0,
          "completed_partitions": 0,
          "spare_admissions": 1
         }
@@ -3989,6 +4023,7 @@
       ],
       "backfill_daily_capacity": {
        "2026-11-20": {
+        "completed_T1_partitions": 0,
         "completed_partitions": 0,
         "spare_admissions": 1
        }
@@ -4063,6 +4098,7 @@
        ],
        "backfill_daily_capacity": {
         "2026-11-20": {
+         "completed_T1_partitions": 0,
          "completed_partitions": 0,
          "spare_admissions": 1
         }
@@ -4241,6 +4277,7 @@
       ],
       "backfill_daily_capacity": {
        "2026-11-20": {
+        "completed_T1_partitions": 0,
         "completed_partitions": 0,
         "spare_admissions": 1
        }
@@ -4313,6 +4350,7 @@
        ],
        "backfill_daily_capacity": {
         "2026-11-20": {
+         "completed_T1_partitions": 0,
          "completed_partitions": 0,
          "spare_admissions": 1
         }
@@ -4405,6 +4443,7 @@
       ],
       "backfill_daily_capacity": {
        "2026-11-20": {
+        "completed_T1_partitions": 0,
         "completed_partitions": 0,
         "spare_admissions": 1
        }
@@ -4477,6 +4516,7 @@
        ],
        "backfill_daily_capacity": {
         "2026-11-20": {
+         "completed_T1_partitions": 0,
          "completed_partitions": 0,
          "spare_admissions": 1
         }
@@ -4571,6 +4611,7 @@
       ],
       "backfill_daily_capacity": {
        "2026-11-20": {
+        "completed_T1_partitions": 0,
         "completed_partitions": 0,
         "spare_admissions": 1
        }
@@ -4659,6 +4700,7 @@
        ],
        "backfill_daily_capacity": {
         "2026-11-20": {
+         "completed_T1_partitions": 0,
          "completed_partitions": 0,
          "spare_admissions": 1
         }
@@ -4783,6 +4825,7 @@
       ],
       "backfill_daily_capacity": {
        "2026-11-20": {
+        "completed_T1_partitions": 0,
         "completed_partitions": 0,
         "spare_admissions": 1
        }
@@ -4864,6 +4907,7 @@
        ],
        "backfill_daily_capacity": {
         "2026-11-20": {
+         "completed_T1_partitions": 0,
          "completed_partitions": 0,
          "spare_admissions": 1
         }
@@ -4974,6 +5018,7 @@
       ],
       "backfill_daily_capacity": {
        "2026-11-20": {
+        "completed_T1_partitions": 0,
         "completed_partitions": 0,
         "spare_admissions": 1
        }
@@ -5051,6 +5096,7 @@
        ],
        "backfill_daily_capacity": {
         "2026-11-20": {
+         "completed_T1_partitions": 0,
          "completed_partitions": 0,
          "spare_admissions": 1
         }
@@ -5153,6 +5199,7 @@
       ],
       "backfill_daily_capacity": {
        "2026-11-20": {
+        "completed_T1_partitions": 0,
         "completed_partitions": 0,
         "spare_admissions": 1
        }
@@ -5232,6 +5279,7 @@
        ],
        "backfill_daily_capacity": {
         "2026-11-20": {
+         "completed_T1_partitions": 0,
          "completed_partitions": 0,
          "spare_admissions": 1
         }
@@ -5540,6 +5588,7 @@
       ],
       "backfill_daily_capacity": {
        "2026-11-20": {
+        "completed_T1_partitions": 0,
         "completed_partitions": 0,
         "spare_admissions": 1
        }
@@ -5616,6 +5665,7 @@
        ],
        "backfill_daily_capacity": {
         "2026-11-20": {
+         "completed_T1_partitions": 0,
          "completed_partitions": 0,
          "spare_admissions": 1
         }
@@ -5716,6 +5766,7 @@
       ],
       "backfill_daily_capacity": {
        "2026-11-20": {
+        "completed_T1_partitions": 0,
         "completed_partitions": 0,
         "spare_admissions": 1
        }
@@ -5795,6 +5846,7 @@
        ],
        "backfill_daily_capacity": {
         "2026-11-20": {
+         "completed_T1_partitions": 0,
          "completed_partitions": 0,
          "spare_admissions": 1
         }
@@ -5901,6 +5953,7 @@
       ],
       "backfill_daily_capacity": {
        "2026-11-20": {
+        "completed_T1_partitions": 0,
         "completed_partitions": 0,
         "spare_admissions": 1
        }
@@ -5968,6 +6021,7 @@
        ],
        "backfill_daily_capacity": {
         "2026-11-20": {
+         "completed_T1_partitions": 0,
          "completed_partitions": 0,
          "spare_admissions": 1
         }
@@ -6051,6 +6105,7 @@
       ],
       "backfill_daily_capacity": {
        "2026-11-20": {
+        "completed_T1_partitions": 0,
         "completed_partitions": 0,
         "spare_admissions": 1
        }
@@ -6120,6 +6175,7 @@
        ],
        "backfill_daily_capacity": {
         "2026-11-20": {
+         "completed_T1_partitions": 0,
          "completed_partitions": 0,
          "spare_admissions": 1
         }
@@ -6206,6 +6262,7 @@
       ],
       "backfill_daily_capacity": {
        "2026-11-20": {
+        "completed_T1_partitions": 0,
         "completed_partitions": 0,
         "spare_admissions": 1
        }
@@ -6273,6 +6330,7 @@
        ],
        "backfill_daily_capacity": {
         "2026-11-20": {
+         "completed_T1_partitions": 0,
          "completed_partitions": 0,
          "spare_admissions": 1
         }
@@ -6356,6 +6414,7 @@
       ],
       "backfill_daily_capacity": {
        "2026-11-20": {
+        "completed_T1_partitions": 0,
         "completed_partitions": 0,
         "spare_admissions": 1
        }
@@ -6432,6 +6491,7 @@
        ],
        "backfill_daily_capacity": {
         "2026-11-20": {
+         "completed_T1_partitions": 0,
          "completed_partitions": 0,
          "spare_admissions": 1
         }
@@ -6532,6 +6592,7 @@
       ],
       "backfill_daily_capacity": {
        "2026-11-20": {
+        "completed_T1_partitions": 0,
         "completed_partitions": 0,
         "spare_admissions": 1
        }
@@ -6604,6 +6665,7 @@
        ],
        "backfill_daily_capacity": {
         "2026-11-20": {
+         "completed_T1_partitions": 0,
          "completed_partitions": 0,
          "spare_admissions": 1
         }
@@ -6858,6 +6920,7 @@
         "spare_admissions": 4
        },
        "2026-11-20": {
+        "completed_T1_partitions": 0,
         "completed_partitions": 0,
         "spare_admissions": 1
        }
@@ -6931,6 +6994,7 @@
          "spare_admissions": 4
         },
         "2026-11-20": {
+         "completed_T1_partitions": 0,
          "completed_partitions": 0,
          "spare_admissions": 1
         }
@@ -7023,6 +7087,7 @@
       ],
       "backfill_daily_capacity": {
        "2026-11-20": {
+        "completed_T1_partitions": 0,
         "completed_partitions": 0,
         "spare_admissions": 1
        }
@@ -7100,6 +7165,7 @@
        ],
        "backfill_daily_capacity": {
         "2026-11-20": {
+         "completed_T1_partitions": 0,
          "completed_partitions": 0,
          "spare_admissions": 1
         }
@@ -7196,6 +7262,7 @@
       ],
       "backfill_daily_capacity": {
        "2026-11-20": {
+        "completed_T1_partitions": 0,
         "completed_partitions": 0,
         "spare_admissions": 1
        }
@@ -7270,6 +7337,7 @@
        ],
        "backfill_daily_capacity": {
         "2026-11-20": {
+         "completed_T1_partitions": 0,
          "completed_partitions": 0,
          "spare_admissions": 1
         }
@@ -7428,6 +7496,7 @@
       ],
       "backfill_daily_capacity": {
        "2026-11-20": {
+        "completed_T1_partitions": 0,
         "completed_partitions": 0,
         "spare_admissions": 1
        }
@@ -7501,6 +7570,7 @@
        ],
        "backfill_daily_capacity": {
         "2026-11-20": {
+         "completed_T1_partitions": 0,
          "completed_partitions": 0,
          "spare_admissions": 1
         }
@@ -7594,6 +7664,7 @@
       ],
       "backfill_daily_capacity": {
        "2026-11-20": {
+        "completed_T1_partitions": 0,
         "completed_partitions": 0,
         "spare_admissions": 1
        }
@@ -7664,6 +7735,7 @@
        ],
        "backfill_daily_capacity": {
         "2026-11-20": {
+         "completed_T1_partitions": 0,
          "completed_partitions": 0,
          "spare_admissions": 1
         }
@@ -7757,6 +7829,7 @@
       ],
       "backfill_daily_capacity": {
        "2026-11-20": {
+        "completed_T1_partitions": 0,
         "completed_partitions": 0,
         "spare_admissions": 1
        }
@@ -7830,6 +7903,7 @@
        ],
        "backfill_daily_capacity": {
         "2026-11-20": {
+         "completed_T1_partitions": 0,
          "completed_partitions": 0,
          "spare_admissions": 1
         }
@@ -7925,6 +7999,7 @@
       ],
       "backfill_daily_capacity": {
        "2026-11-20": {
+        "completed_T1_partitions": 0,
         "completed_partitions": 0,
         "spare_admissions": 1
        }
@@ -7997,6 +8072,7 @@
        ],
        "backfill_daily_capacity": {
         "2026-11-20": {
+         "completed_T1_partitions": 0,
          "completed_partitions": 0,
          "spare_admissions": 1
         }
@@ -8348,6 +8424,7 @@
       ],
       "backfill_daily_capacity": {
        "2026-11-20": {
+        "completed_T1_partitions": 0,
         "completed_partitions": 0,
         "spare_admissions": 1
        }
@@ -8425,6 +8502,7 @@
        ],
        "backfill_daily_capacity": {
         "2026-11-20": {
+         "completed_T1_partitions": 0,
          "completed_partitions": 0,
          "spare_admissions": 1
         }

@@ -235,6 +235,7 @@ export async function rank4Gate(
         new JsonObject([
           ['spare_admissions', JsonNumber.int(0)],
           ['completed_partitions', JsonNumber.int(0)],
+          ['completed_T1_partitions', JsonNumber.int(0)],
         ]),
       ),
       'daily capacity',
