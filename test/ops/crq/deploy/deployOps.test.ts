@@ -513,12 +513,15 @@ describe('switchCheckout against a real repository', () => {
     run('config', 'commit.gpgsign', 'false');
     execFileSync('mkdir', ['-p', join(root, 'apps/crq-python')]);
     writeFileSync(join(root, CFG), 'prior-committed\n');
+    writeFileSync(join(root, '.gitignore'), 'host-local.txt\n');
     run('add', '.');
     run('commit', '-q', '-m', 'prior');
     const prior = run('rev-parse', 'HEAD');
     writeFileSync(join(root, CFG), 'target-committed\n');
     writeFileSync(join(root, 'target-source.txt'), 'only at target\n');
+    writeFileSync(join(root, 'host-local.txt'), 'tracked at target\n');
     run('add', '.');
+    run('add', '-f', 'host-local.txt');
     run('commit', '-q', '-m', 'target');
     const target = run('rev-parse', 'HEAD');
     run('checkout', '-q', 'main');
@@ -607,6 +610,17 @@ describe('switchCheckout against a real repository', () => {
     // The failed checkout wrote target source into the tree: the config was not reinstalled.
     expect(existsSync(join(r.root, 'target-source.txt'))).toBe(true);
     expect(live(r.root)).not.toBe(LIVE);
+  });
+
+  test('an ignored host-local file at a path the target tracks aborts the switch and survives', async () => {
+    const r = repo();
+    writeFileSync(join(r.root, 'host-local.txt'), 'host edits\n');
+    const err = await r.sw().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CalledProcessError);
+    expect(readFileSync(join(r.root, 'host-local.txt'), 'utf8')).toBe('host edits\n');
+    expect(r.run('rev-parse', 'HEAD')).toBe(r.prior);
+    expect(r.run('symbolic-ref', 'HEAD')).toBe('refs/heads/main');
+    expect(live(r.root)).toBe(LIVE);
   });
 
   test('a failed switch reattaches the original branch while it still names the saved commit', async () => {
