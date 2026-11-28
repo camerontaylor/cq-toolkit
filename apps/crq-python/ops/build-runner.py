@@ -454,6 +454,9 @@ def main():
     try:
         if args.report is not None:
             report_path = args.report.resolve()
+            if report_path.is_relative_to(args.repo.resolve()):
+                raise BuildError('report path must be outside the source '
+                                 'checkout: ' + str(report_path))
             output_path = args.output.resolve()
             artifact_paths = {
                 output_path,
