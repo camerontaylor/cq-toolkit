@@ -700,11 +700,8 @@ def render_service(root, unit, runtime='python', sha='HEAD', artifact_root=None)
         artifact_root = (Path(artifact_root) if artifact_root is not None
                          else Path.home() / '.local/opt' / ('crq-' + runtime[5:]))
         artifact = artifact_identity(artifact_root, runtime)
-    rendered_lines = rendered.splitlines(keepends=True)
-    spans = exec_start_directives(rendered_lines)
-    exec_start = None
-    if spans:
-        exec_start = rendered_lines[spans[0][0]].partition('=')[2].strip()
+    arguments = exec_start_arguments(rendered)
+    exec_start = arguments[0] if arguments else None
     return {
         'unit': unit,
         'runtime': runtime,

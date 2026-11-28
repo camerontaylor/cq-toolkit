@@ -814,6 +814,26 @@ class InstalledExecStartTests(AdapterFixture):
             self._runtime("[Service]\nExecStart =/a\nExecStart  = /b\n")
 
 
+class LogicalExecStartReportTests(AdapterFixture):
+    def test_lone_backslash_template_reports_a_deployable_exec_start(self):
+        path = (self.root / "apps/crq-python/ops/systemd/crq-tick.service")
+        text = path.read_text()
+        self.assertIn("\nExecStart=", text)
+        path.write_text(text.replace("\nExecStart=", "\n\\\nExecStart=", 1))
+        def git(*args):
+            return subprocess.run(["git", "-C", str(self.root), *args],
+                                  check=True, capture_output=True,
+                                  text=True).stdout
+        git("add", "-A")
+        git("-c", "user.email=f@example.invalid", "-c", "user.name=F",
+            "commit", "-qm", "lone backslash")
+        sha = git("rev-parse", "HEAD").strip()
+        rendered = host.render_service(
+            self.root, "crq-tick.service", "python", sha=sha)
+        self.assertTrue(rendered["exec_start"])
+        self.adapter._check_python_entry(rendered)
+
+
 class AdapterTests(AdapterFixture):
     def test_preflight_refuses_same_runtime(self):
         with self.assertRaisesRegex(dc.Refused, "already selects"):
