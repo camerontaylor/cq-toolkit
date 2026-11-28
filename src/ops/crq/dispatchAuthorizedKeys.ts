@@ -38,6 +38,9 @@ export interface DispatchRoots {
 /** Shell metacharacters and expansion, including the `&` and `&&` separators. */
 const SHELL_META = /[$`;&|<>\n\r(){}*?!#~\\]/;
 const KEY_TYPE = /^(?:ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp\d+|sk-ssh-ed25519@openssh\.com)$/;
+/** OpenSSH `expiry-time` values: absolute YYYYMMDD[HHMM[SS]], relative like +52w1d, or forever. */
+const EXPIRY_TIME =
+  /^(?:forever|[+-](?:\d+[smhdwy])+|\d{4}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])(?:(?:[01]\d|2[0-3])[0-5]\d(?:[0-5]\d)?)?)$/;
 
 /** Split `a,b="c,d",e` at commas outside double quotes; null when a quote is unbalanced. */
 function splitOptions(text: string): string[] | null {
@@ -196,6 +199,18 @@ export function checkDispatchAuthorizedKeysLine(
       const raw = part.slice(eq + 1);
       if (!/^".*"$/.test(raw)) problems.push('command must be a double-quoted string');
       else command = raw.slice(1, -1);
+    }
+    // OpenSSH rejects these options unless the value is a quoted string, and it
+    // parses the `expiry-time` value, so a bad date would stop the key working.
+    if (name === 'from' && !/^".+"$/.test(part.slice(eq + 1)))
+      problems.push('from must be a double-quoted pattern list');
+    if (name === 'expiry-time') {
+      const raw = part.slice(eq + 1);
+      if (!/^".*"$/.test(raw)) problems.push('expiry-time must be a double-quoted string');
+      else if (!EXPIRY_TIME.test(raw.slice(1, -1)))
+        problems.push(
+          'expiry-time must be YYYYMMDD[HHMM[SS]], a relative time like +52w1d, or forever',
+        );
     }
   }
   if (!restrict) problems.push('restrict is required');

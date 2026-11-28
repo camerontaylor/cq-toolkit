@@ -27,6 +27,14 @@ describe('dispatch authorized_keys line check', () => {
     expect(result).toEqual({ ok: true, identity: 'author', problems: [] });
   });
 
+  it('accepts valid optional from and expiry-time options', () => {
+    const result = checkDispatchAuthorizedKeysLine(
+      line(queueCommand(), 'restrict,from="*.example.com",expiry-time="+52w1d"'),
+      ROOTS,
+    );
+    expect(result).toEqual({ ok: true, identity: 'queue', problems: [] });
+  });
+
   it.each([
     ['missing restrict', `command="${queueCommand()}" ${KEY}`, 'restrict is required'],
     ['permissive option', line(queueCommand(), 'restrict,pty'), 'option not allowed: pty'],
@@ -96,6 +104,21 @@ describe('dispatch authorized_keys line check', () => {
       'chained && after the command',
       line(`${queueCommand()} && sh`),
       'command contains shell metacharacters or expansion (no $SSH_ORIGINAL_COMMAND)',
+    ],
+    [
+      'bad expiry-time value',
+      line(queueCommand(), 'restrict,expiry-time="not-a-date"'),
+      'expiry-time must be YYYYMMDD[HHMM[SS]], a relative time like +52w1d, or forever',
+    ],
+    [
+      'unquoted expiry-time',
+      line(queueCommand(), 'restrict,expiry-time=+52w1d'),
+      'expiry-time must be a double-quoted string',
+    ],
+    [
+      'unquoted from',
+      line(queueCommand(), 'restrict,from=*.example.com'),
+      'from must be a double-quoted pattern list',
     ],
   ])('refuses %s', (_name, input, problem) => {
     const result = checkDispatchAuthorizedKeysLine(input, ROOTS);
