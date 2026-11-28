@@ -211,7 +211,11 @@ def _prepare_host():
             "crq_prepare_host_completion",
             Path(__file__).with_name("prepare-host.py"))
         module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        try:
+            spec.loader.exec_module(module)
+        except (OSError, SyntaxError, ValueError, ImportError) as exc:
+            raise CompletionRefused("prepare-host is not loadable: "
+                                    + str(exc)[:160]) from exc
         _PREPARE = module
     return _PREPARE
 
