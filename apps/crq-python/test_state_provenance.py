@@ -298,6 +298,19 @@ class ProvenanceExtractorTest(unittest.TestCase):
             self.assertEqual(
                 queue_out["item_states_by_kind"]["open"], ["other"])
 
+    def test_unhashable_item_kind_is_counted_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = self.source_tree(root)
+            queue = json.loads((root / "queue.json").read_text())
+            queue["items"] = [{"id": "A", "kind": ["open"]}]
+            (root / "queue.json").write_text(json.dumps(queue))
+            result = self.run_extractor(
+                [item for pair in args.items() for item in pair])
+            self.assertEqual(result.returncode, 0, result.stderr)
+            queue_out = json.loads(result.stdout)["queue"]
+            self.assertNotEqual(queue_out["unknown_kind_count"], 0)
+
     def test_assert_safe_refuses_private_markers(self):
         for text in ("x /home/alice y", "ctaylor", "ghp_" + "a" * 30):
             with self.subTest(text=text[:10]):
