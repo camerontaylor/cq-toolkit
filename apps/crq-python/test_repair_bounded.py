@@ -170,8 +170,7 @@ class BoundedRepairTest(unittest.TestCase):
         repair_tick.scan_fix_instructions(self.c, text, SOURCE, self.root / 'instructions-scan.json')
         patch = self.c.secret_scan_diff.call_args.args[0]
         encoded = patch.split('@@ -0,0 +1,3 @@\n', 1)[1]
-        self.assertEqual('\n'.join(line[1:] for line in encoded[:-1].split('\n')),
-                         '\n'.join(text.splitlines()))
+        self.assertEqual(encoded[:-1].split('\n'), ['+' + line for line in text.splitlines()])
         repair_tick.scan_fix_instructions(self.c, 'fix it\rSECRET', SOURCE, self.root / 'instructions-scan.json')
         self.assertIn('@@ -0,0 +1,2 @@\n+fix it\n+SECRET\n', self.c.secret_scan_diff.call_args.args[0])
 
