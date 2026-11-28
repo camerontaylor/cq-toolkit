@@ -1,11 +1,18 @@
-import { describe, expect, test } from 'vitest';
+import { readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 import { makeGhRunner } from '../../../src/adapters/forge-github/gh.js';
 import {
   addressFailureFeedback,
   pinAddressFailure,
   type AddressFailedAttempt,
 } from '../../../src/ops/review/internal/addressEvidence.js';
+import { withAddressOwnership } from '../../../src/ops/review/internal/addressCheckoutOwnership.js';
+import * as ownershipModule from '../../../src/ops/review/internal/addressCheckoutOwnership.js';
 import { makeTestRepo } from '../dev/repo.js';
+import { fixture, terminalInput, terminalReport } from './addressManyWorktree.helpers.js';
+
+afterEach(() => vi.restoreAllMocks());
 
 describe('review.address immutable failure feedback guards', () => {
   test.each(['parent', 'unowned', 'binary', 'replacement', 'size', 'provenance', 'patch'] as const)(
@@ -86,4 +93,59 @@ describe('review.address immutable failure feedback guards', () => {
       }
     },
   );
+});
+
+describe('terminal settle authority rejection after a created ref', () => {
+  test('a settle ref created just before the authority check rejects is still reported and the source stays intact', async () => {
+    const f = await fixture();
+    const parent = new AbortController();
+    const report = terminalReport(join(f.root, 'authority-after-ref.json'));
+    try {
+      // Real seam: the lifecycle's own identity check, faulted once the settle ref exists.
+      const proto = ownershipModule.AddressCheckoutOwnership.prototype as unknown as {
+        assertIdentity(): Promise<void>;
+      };
+      const original = proto.assertIdentity;
+      let faulted = false;
+      vi.spyOn(proto, 'assertIdentity').mockImplementation(async function (this: unknown) {
+        await original.call(this);
+        // Authority stays expired from the moment the settle ref exists.
+        if (
+          faulted ||
+          f.repo.git('for-each-ref', '--format=%(refname)', 'refs/heads/').includes('/a1')
+        ) {
+          faulted = true;
+          throw new Error('injected authority fault');
+        }
+      });
+      await withAddressOwnership(
+        {
+          repoRoot: f.repo.root,
+          git: f.run,
+          source: 'local',
+          production: false,
+          signal: parent.signal,
+        },
+        async (lease) => {
+          await ownershipModule.bindAddressTerminalReport(lease, report);
+          const binding = ownershipModule.addressTerminalWorkerBinding(lease);
+          const attempt = await ownershipModule.recordAddressTerminalAttempt(
+            binding,
+            terminalInput(f.repo),
+          );
+          await writeFile(join(f.repo.root, 'src/a.ts'), 'CANCELLED OWN FILE\n');
+          parent.abort();
+          ownershipModule.deferAddressTerminalAttempt(binding, attempt);
+          return ownershipModule.addressCancelledResult(lease);
+        },
+      ).catch(() => undefined);
+      expect(faulted).toBe(true);
+      expect(report.failed).toHaveLength(1);
+      expect(f.repo.git('show', `${report.failed[0]!.sha}:src/a.ts`)).toBe('CANCELLED OWN FILE\n');
+      // The authority check precedes every restoration write, so none ran.
+      expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('CANCELLED OWN FILE\n');
+    } finally {
+      await f.repo.cleanup();
+    }
+  });
 });
