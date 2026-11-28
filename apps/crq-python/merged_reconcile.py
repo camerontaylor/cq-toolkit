@@ -110,7 +110,15 @@ def normalize_page_budget(budget: Any) -> int:
 
 
 def _cursor(value):
-    return value is None or (isinstance(value, str) and 0 < len(value.encode()) <= MAX_CURSOR_BYTES)
+    if value is None:
+        return True
+    if not isinstance(value, str):
+        return False
+    try:
+        encoded = value.encode()
+    except UnicodeEncodeError:
+        return False
+    return 0 < len(encoded) <= MAX_CURSOR_BYTES
 
 
 def record_identity(page_record: Any) -> Dict[str, Any]:
