@@ -1268,6 +1268,8 @@ def load_run(state: pathlib.Path, run_id: str | None, *,
     if (run / "run.json").exists():
         try:
             meta = json.loads((run / "run.json").read_text())
+            if not isinstance(meta, dict):
+                raise ValueError("run metadata is not a JSON object")
         except (OSError, ValueError) as exc:
             raise ValueError("unreadable run metadata: " + str(run / "run.json")) from exc
     return {"run_id": run.name, "path": str(run), "port": meta.get("port")}
