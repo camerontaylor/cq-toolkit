@@ -767,15 +767,20 @@ def boot(run: dict, recorder: Recorder, tools: pathlib.Path | None,
     # closes its probe socket before returning, so two runs prepared together
     # can both store 2222, the first VM to bind wins, and every retry of the
     # loser would read the same unusable port from run.json. The choice is
-    # made here under the run lock, and a launch that lost the bind race
-    # retries on a fresh port without touching the port the winning VM holds.
+    # made here under the run lock. A launch that failed while something still
+    # holds its port is retried, at most PORT_ATTEMPTS launches in total
+    # (every launch counts, even one that reuses a port). port_held() cannot
+    # tell a lost bind from an unrelated QEMU failure, so qemu.log keeps the
+    # first launch's output and each retry writes qemu.log.<n>.
     chosen = run["port"]
     attempted: set[int] = set()
+    launches = 0
     while True:
         port = run["port"]
         if port is None or port in attempted:
             port = free_port()
         attempted.add(port)
+        launches += 1
         run["port"] = port
         # A stopped run must leave no pid file or identity behind for this
         # launch to misread: drop the stale files so the wait below and the
@@ -790,7 +795,8 @@ def boot(run: dict, recorder: Recorder, tools: pathlib.Path | None,
         qemu = qemu_command(run_dir, port)
         qemu[0] = tool("qemu-system-x86_64", tools)
         argv = bounded_scope_argv(qemu, unit)
-        log = (run_dir / "qemu.log").open("wb")
+        log_name = "qemu.log" if launches == 1 else "qemu.log.%d" % (launches - 1)
+        log = (run_dir / log_name).open("wb")
         process = subprocess.Popen(argv, cwd=run_dir, stdout=log, stderr=subprocess.STDOUT,
                                    start_new_session=True)
         try:
@@ -814,7 +820,7 @@ def boot(run: dict, recorder: Recorder, tools: pathlib.Path | None,
                 {"pid": pid, "starttime": starttime, "scope_unit": scope_unit},
                 indent=2) + "\n")
             break
-        except BaseException:
+        except BaseException as failure:
             identity_ok = False
             identity_path = run_dir / "process.json"
             if identity_path.exists():
@@ -837,8 +843,14 @@ def boot(run: dict, recorder: Recorder, tools: pathlib.Path | None,
                     process.wait(timeout=10)
                 except subprocess.TimeoutExpired:
                     process.kill()
-            if len(attempted) < PORT_ATTEMPTS and port_held(port):
+            if launches < PORT_ATTEMPTS and port_held(port):
                 continue
+            if launches > 1 and isinstance(failure, Exception):
+                raise RuntimeError(
+                    "QEMU did not start after %d launches (ports tried: %s); "
+                    "see qemu.log and qemu.log.N" % (
+                        launches, ", ".join(str(p) for p in sorted(attempted)))
+                ) from failure
             raise
         finally:
             log.close()
