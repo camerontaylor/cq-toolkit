@@ -38,9 +38,13 @@ export interface DispatchRoots {
 /** Shell metacharacters and expansion, including the `&` and `&&` separators. */
 const SHELL_META = /[$`;&|<>\n\r(){}*?!#~\\]/;
 const KEY_TYPE = /^(?:ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp\d+|sk-ssh-ed25519@openssh\.com)$/;
-/** OpenSSH `expiry-time` values: absolute YYYYMMDD[HHMM[SS]][Z] (Z = UTC), relative like +52w1d, or forever. */
+/**
+ * OpenSSH `expiry-time` values: absolute YYYYMMDD[HHMM[SS]] with an optional
+ * case-insensitive `Z` or `UTC` suffix. OpenSSH rejects `forever` and relative
+ * times here (parse_absolute_time); seconds 60 and 61 pass its strptime.
+ */
 const EXPIRY_TIME =
-  /^(?:forever|[+-](?:\d+[smhdwy])+|\d{4}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])(?:(?:[01]\d|2[0-3])[0-5]\d(?:[0-5]\d)?)?Z?)$/;
+  /^\d{4}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])(?:(?:[01]\d|2[0-3])[0-5]\d(?:[0-5]\d|6[01])?)?(?:z|utc)?$/i;
 
 /** Split `a,b="c,d",e` at commas outside double quotes; null when a quote is unbalanced. */
 function splitOptions(text: string): string[] | null {
@@ -213,9 +217,7 @@ export function checkDispatchAuthorizedKeysLine(
       const raw = part.slice(eq + 1);
       if (!/^".*"$/.test(raw)) problems.push('expiry-time must be a double-quoted string');
       else if (!EXPIRY_TIME.test(raw.slice(1, -1)))
-        problems.push(
-          'expiry-time must be YYYYMMDD[HHMM[SS]], a relative time like +52w1d, or forever',
-        );
+        problems.push('expiry-time must be YYYYMMDD[HHMM[SS]] with an optional Z or UTC suffix');
     }
   }
   if (!restrict) problems.push('restrict is required');

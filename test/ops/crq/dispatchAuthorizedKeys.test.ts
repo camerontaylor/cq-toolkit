@@ -29,22 +29,30 @@ describe('dispatch authorized_keys line check', () => {
 
   it('accepts valid optional from and expiry-time options', () => {
     const result = checkDispatchAuthorizedKeysLine(
-      line(queueCommand(), 'restrict,from="*.example.com",expiry-time="+52w1d"'),
+      line(queueCommand(), 'restrict,from="*.example.com",expiry-time="20301231235959Z"'),
       ROOTS,
     );
     expect(result).toEqual({ ok: true, identity: 'queue', problems: [] });
   });
 
-  it.each(['20301231Z', '203012312359Z', '20301231235959Z', '20301231'])(
-    'accepts expiry-time %s',
-    (value) => {
-      const result = checkDispatchAuthorizedKeysLine(
-        line(queueCommand(), `restrict,expiry-time="${value}"`),
-        ROOTS,
-      );
-      expect(result).toEqual({ ok: true, identity: 'queue', problems: [] });
-    },
-  );
+  it.each([
+    '20301231Z',
+    '203012312359Z',
+    '20301231235959Z',
+    '20301231',
+    '20301231z',
+    '20301231UTC',
+    '20301231utc',
+    '203012312359utc',
+    '20301231235960',
+    '20301231235961',
+  ])('accepts expiry-time %s', (value) => {
+    const result = checkDispatchAuthorizedKeysLine(
+      line(queueCommand(), `restrict,expiry-time="${value}"`),
+      ROOTS,
+    );
+    expect(result).toEqual({ ok: true, identity: 'queue', problems: [] });
+  });
 
   it.each([
     ['missing restrict', `command="${queueCommand()}" ${KEY}`, 'restrict is required'],
@@ -119,8 +127,13 @@ describe('dispatch authorized_keys line check', () => {
     [
       'bad expiry-time value',
       line(queueCommand(), 'restrict,expiry-time="not-a-date"'),
-      'expiry-time must be YYYYMMDD[HHMM[SS]], a relative time like +52w1d, or forever',
+      'expiry-time must be YYYYMMDD[HHMM[SS]] with an optional Z or UTC suffix',
     ],
+    ...['forever', '+52w1d', '-1d', '20301232', '20301231Zz', '202012312360'].map((v) => [
+      `expiry-time ${v} that OpenSSH rejects`,
+      line(queueCommand(), `restrict,expiry-time="${v}"`),
+      'expiry-time must be YYYYMMDD[HHMM[SS]] with an optional Z or UTC suffix',
+    ]),
     [
       'unquoted expiry-time',
       line(queueCommand(), 'restrict,expiry-time=+52w1d'),
