@@ -534,6 +534,40 @@ function itemsOf(queue: JsonObject): readonly JsonValue[] {
 }
 
 /**
+ * One merge pass's source-key index over the retained outbox. `Outbox.retained`
+ * reads and parses every retained record, so scanning it per newly
+ * acknowledged item made each merge item an O(retained) sequential read under
+ * `tick.lock`. The index is built once, on the first lookup, and events
+ * spooled during the pass join it. Every pass (including a retry after a
+ * failed queue write) constructs a fresh index and rebuilds from disk, so
+ * records retained before the failed write remain reusable.
+ */
+class RetainedBySourceKey {
+  private byKey: Map<string, JsonObject> | null = null;
+  constructor(private readonly outbox: Outbox) {}
+
+  /** The first retained record with this source key, or undefined. */
+  async find(sourceKey: string): Promise<JsonObject | undefined> {
+    let byKey = this.byKey;
+    if (byKey === null) {
+      byKey = new Map<string, JsonObject>();
+      for (const value of await this.outbox.retained()) {
+        if (!(value instanceof JsonObject)) continue;
+        const key = value.get('source_key');
+        if (typeof key === 'string' && !byKey.has(key)) byKey.set(key, value);
+      }
+      this.byKey = byKey;
+    }
+    return byKey.get(sourceKey);
+  }
+
+  /** Remember an event spooled this pass so later lookups never re-read. */
+  add(sourceKey: string, value: JsonObject): void {
+    if (this.byKey !== null) this.byKey.set(sourceKey, value);
+  }
+}
+
+/**
  * `runtime.state_event(..., "remote publication acknowledged")`: spool one
  * durable `job-state` record for the acknowledged transition and record its
  * id under `backfill_state_events`, keyed by the payload digest so a replay
@@ -543,6 +577,7 @@ function itemsOf(queue: JsonObject): readonly JsonValue[] {
 async function spoolAcknowledgedEvent(
   effects: PublishRunEffects,
   services: Services,
+  retained: RetainedBySourceKey,
   queue: JsonObject,
   item: JsonObject,
   review: JsonObject,
@@ -574,16 +609,11 @@ async function spoolAcknowledgedEvent(
   if (saved !== undefined && saved !== null && saved !== false && saved !== '') return queue;
   // Reuse an already-retained record with the same source key; otherwise mint
   // the canonical event (validate + derive id like Python's ledger.event).
-  let value: JsonObject | undefined;
-  for (const retained of await services.outbox.retained()) {
-    if (retained instanceof JsonObject && retained.get('source_key') === sourceKey) {
-      value = retained;
-      break;
-    }
-  }
+  let value = await retained.find(sourceKey);
   if (value === undefined) {
     value = ledgerEvent('job-state', sourceKey, occurredAt, payload);
     await services.outbox.spool(value);
+    retained.add(sourceKey, value);
   }
   const kept = byKey.entries.filter(([key]) => key !== sourceKey);
   kept.push([sourceKey, value.get('id') ?? '']);
@@ -653,6 +683,10 @@ async function reconcileQueue(
   }
   let queue = parseQueueBytes(await effects.readQueue());
   if (!(queue instanceof JsonObject)) throw integrity('queue must be an object');
+  // One retained source-key index per merge pass: the outbox is read on the
+  // first lookup, not once per newly acknowledged item; a retry pass builds a
+  // fresh index, so records retained before a failed queue write are reused.
+  const retainedIndex = new RetainedBySourceKey(services.outbox);
   for (const candidate of itemsOf(queue)) {
     if (!(candidate instanceof JsonObject)) continue;
     const ident = candidate.get('publication_event_id');
@@ -675,7 +709,14 @@ async function reconcileQueue(
       // Python's state_event: spool the durable "remote publication
       // acknowledged" job-state transition and record its id at queue level,
       // keyed so a replay never spools twice.
-      queue = await spoolAcknowledgedEvent(effects, services, queue, updated.item, value);
+      queue = await spoolAcknowledgedEvent(
+        effects,
+        services,
+        retainedIndex,
+        queue,
+        updated.item,
+        value,
+      );
     }
   }
   queue = setKeys(queue, [['review_ledger_head', head]]);
