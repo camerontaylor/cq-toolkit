@@ -436,7 +436,7 @@ def freeze_source(forge, *, repo, base):
     if total != ceiling:
         raise ReconcileRefused("ceiling/count mismatch; repository universe not proven")
     if ceiling > MAX_REPOSITORY_NUMBER:
-        raise ReconcileRefused("repository number cap exceeded; operator partition required")
+        raise ReconcileRefused(f"repository number ceiling {ceiling} exceeds the repository-wide cap {MAX_REPOSITORY_NUMBER}")
     return {"version": 1, "method": "all-number-slots-v1", "repo": repo, "base": base,
             "repository_id": repository["id"], "ceiling": ceiling, "window": NUMBER_WINDOW}
 
