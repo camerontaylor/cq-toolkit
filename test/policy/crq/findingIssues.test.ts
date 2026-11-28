@@ -9,6 +9,7 @@
 import { describe, expect, test } from 'vitest';
 import {
   FindingIssueError,
+  SEARCH_LIMIT,
   GhSpawnError,
   GhTimeoutError,
   fileFindingIssue,
@@ -286,3 +287,61 @@ for (const family of ['enabled', 'title', 'body', 'file_issue'] as const) {
     }
   });
 }
+
+describe('full in-title search page without an exact title', () => {
+  const base = cases.find(
+    (candidate) =>
+      candidate.family === 'file_issue' && candidate.name === 'create-passes-body-stdin',
+  );
+
+  const fullPage = (size: number): GhStep => ({
+    kind: 'success',
+    returncode: 0,
+    stdout: JSON.stringify(
+      Array.from({ length: size }, (_, index) => ({
+        number: index + 1,
+        title: `near match ${index}`,
+        url: `https://github.com/camerontaylor/infra/issues/${index + 1}`,
+      })),
+    ),
+    stderr: '',
+  });
+
+  async function run(step: GhStep): Promise<{ outcome: Outcome; calls: readonly GhCall[] }> {
+    if (base === undefined) throw new Error('create-passes-body-stdin vector missing');
+    const gh = new ScriptedGh([]);
+    (gh as unknown as { script: GhStep[] }).script.push(step, {
+      kind: 'success',
+      returncode: 0,
+      stdout: 'https://github.com/camerontaylor/infra/issues/99\n',
+      stderr: '',
+    });
+    const outcome = await capture(() =>
+      fileFindingIssue({
+        repoConfig: inputValue(base, 'repo_cfg'),
+        base: inputValue(base, 'base'),
+        head: inputValue(base, 'head'),
+        meta: inputValue(base, 'meta'),
+        severityCounts: inputValue(base, 'severity_counts'),
+        findingsMarkdown: inputValue(base, 'findings_md'),
+        gh: gh.call,
+      }),
+    );
+    return { outcome, calls: gh.calls };
+  }
+
+  test('fails closed with FindingIssueRuntimeError and never runs gh issue create', async () => {
+    const { outcome, calls } = await run(fullPage(SEARCH_LIMIT));
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error).toBe('RuntimeError');
+    expect(outcome.message).toContain(`filled its --limit ${SEARCH_LIMIT} page`);
+    expect(calls.map((call) => call.argv.slice(0, 3))).toEqual([['gh', 'issue', 'list']]);
+  });
+
+  test('a page one short of the limit still creates the issue', async () => {
+    const { outcome, calls } = await run(fullPage(SEARCH_LIMIT - 1));
+    expect(outcome.ok).toBe(true);
+    expect(calls.map((call) => call.argv[2])).toEqual(['list', 'create']);
+  });
+});
