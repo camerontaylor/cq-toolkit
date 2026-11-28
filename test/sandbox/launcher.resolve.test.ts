@@ -4,7 +4,7 @@
  * mid-resolution).  Before the fix the first such candidate ended the search
  * and the launcher resolved to `undefined` although a later entry was fine.
  */
-import { chmodSync, mkdtempSync, rmSync, writeFileSync, realpathSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
@@ -54,6 +54,22 @@ describe('resolveLauncher PATH search', () => {
     const only = realpathSync(mkdtempSync(join(tmpdir(), 'cq-launch-c-')));
     dirs.push(only);
     failRealpathFor.add(exe(only, 'tool'));
+    expect(resolveLauncher('tool', { PATH: only })).toBeUndefined();
+  });
+
+  test('skips a directory named like the launcher and keeps searching PATH', () => {
+    const first = realpathSync(mkdtempSync(join(tmpdir(), 'cq-launch-d-')));
+    const second = realpathSync(mkdtempSync(join(tmpdir(), 'cq-launch-e-')));
+    dirs.push(first, second);
+    mkdirSync(join(first, 'tool'), { mode: 0o755 });
+    const good = exe(second, 'tool');
+    expect(resolveLauncher('tool', { PATH: [first, second].join(':') })).toBe(good);
+  });
+
+  test('is undefined when the only match is a directory', () => {
+    const only = realpathSync(mkdtempSync(join(tmpdir(), 'cq-launch-f-')));
+    dirs.push(only);
+    mkdirSync(join(only, 'tool'), { mode: 0o755 });
     expect(resolveLauncher('tool', { PATH: only })).toBeUndefined();
   });
 });
