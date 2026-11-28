@@ -138,10 +138,13 @@ construction-time schema — the request rides `OpInvocation.outputSchema`
   per-deployment price tables inject here; an `undefined` lookup keeps
   `costUSD` absent.
 
-Isolation contract (I6): no `sessionRef` → fresh temp workspace +
-fresh empty session record (`harness.tempWorkspace` + `SessionStore.create`);
-`sessionRef` → `SessionStore.load` resumes the recorded messages AND
-workspace; unknown sessionRef throws. Session turns persist in our
+Isolation contract (I6): no `sessionRef` → fresh empty session record
+(`SessionStore.create`); with no `workspace` binding it lands in a fresh
+temp workspace (`harness.tempWorkspace`); a bound `workspace` instead
+becomes the fresh record's workspace (the tools bind in
+`realpath(workspace.path)`). The record itself is always stored in
+`sessionsDir`, which must be outside the workspace; `sessionRef` → `SessionStore.load` resumes the recorded messages
+AND workspace; unknown sessionRef throws. Session turns persist in our
 `SessionMessage` vocabulary only — never vendor message shapes.
 
 Tool loop: harness `buildTools` descriptors adapted to the SDK tool format;
