@@ -1305,10 +1305,22 @@ class MatrixHarnessCheckTests(unittest.TestCase):
             checks["matrix-restart-drained_journal_metadata_fence"])
         self.assertTrue(problems)
 
-    def test_observe_timer_must_be_inactive(self):
+    def test_observe_active_timer_is_accepted_behind_the_mask(self):
+        # An enabled timer can restart with the user manager across the
+        # boundary while the service stays masked; the mask is the durable
+        # fence, so the recorded active timer must not fail the observe.
         phases_value, restarts, reboots, _ = self._checks()
-        phases_value["matrix-restart-drained-observe"]["fence"]["timer"][
-            "ActiveState"] = "active"
+        phases_value["matrix-restart-drained-observe"]["fence"]["timer"] = {
+            "ActiveState": "active", "LoadState": "loaded"}
+        checks, problems = harness.build_checks(phases_value, restarts,
+                                                reboots, "matrix")
+        self.assertTrue(
+            checks["matrix-restart-drained_journal_metadata_fence"])
+
+    def test_observe_unexpected_timer_state_fails(self):
+        phases_value, restarts, reboots, _ = self._checks()
+        phases_value["matrix-restart-drained-observe"]["fence"]["timer"] = {
+            "ActiveState": "activating", "LoadState": "loaded"}
         checks, problems = harness.build_checks(phases_value, restarts,
                                                 reboots, "matrix")
         self.assertFalse(

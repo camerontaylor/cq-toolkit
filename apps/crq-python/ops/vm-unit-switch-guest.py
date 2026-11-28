@@ -1803,8 +1803,19 @@ def matrix_observe_phase(args):
             args.phase + " changed retained path bytes or metadata")
     service, direct = _observe_masked_service(args.phase)
     timer = show(TIMER, ["ActiveState", "LoadState"])
-    require(timer["ActiveState"] in ("inactive", "failed"),
-            args.phase + " left the timer activator active after the boundary")
+    # A manager restart or reboot can restart the enabled timer through
+    # timers.target while the service stays masked. The durable fence is the
+    # service mask, so the timer may be active only while the service above is
+    # proven masked and refused a direct start; the completion counts below
+    # prove that no work ran behind it, and recovery re-establishes the
+    # snapshot timer state.
+    require(timer["ActiveState"] in ("inactive", "failed")
+            or (timer["ActiveState"] == "active"
+                and timer["LoadState"] == "loaded"
+                and service["LoadState"] == "masked"
+                and direct["rc"] not in (0, None)),
+            args.phase + " left an active timer whose service can run work "
+            "after the boundary")
     staged = _assert_staged(spec, args.phase)
     require(staged == boundary["staged"],
             args.phase + " changed the staged service across the boundary")

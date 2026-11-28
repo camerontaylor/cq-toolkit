@@ -757,6 +757,26 @@ def _reset_preserved(phase):
         and (phase.get("timer") or {}).get("UnitFileState") == "enabled")
 
 
+def _observe_timer_ok(observe):
+    """The observe timer may be active only behind the proven service mask.
+
+    An enabled timer can restart with the user manager across a restart or
+    reboot while the service stays masked; the mask is the durable fence, so
+    an active timer is accepted only when the recorded fence proves the
+    masked service cannot run work.
+    """
+    timer = (observe.get("fence") or {}).get("timer") or {}
+    if timer.get("ActiveState") in ("inactive", "failed"):
+        return True
+    fence = observe.get("fence") or {}
+    return (
+        timer.get("ActiveState") == "active"
+        and timer.get("LoadState") == "loaded"
+        and (fence.get("service") or {}).get("LoadState") == "masked"
+        and (fence.get("direct_start") or {}).get("rc") not in (0, None)
+        and "masked" in _direct_text(observe))
+
+
 def _matrix_checks(phases, restarts, reboots, prepared, problems):
     checks = {}
     case_no_work = {}
@@ -914,8 +934,7 @@ def _matrix_checks(phases, restarts, reboots, prepared, problems):
             and observe.get("metadata_match") is True
             and (observe.get("fence") or {}).get("service", {}).get("LoadState")
             == "masked"
-            and (observe.get("fence") or {}).get("timer", {}).get(
-                "ActiveState") in ("inactive", "failed")
+            and _observe_timer_ok(observe)
             and (observe.get("fence") or {}).get("service", {}).get("FragmentPath")
             == service_path
             and (observe.get("fence") or {}).get("direct_start", {}).get("rc")
