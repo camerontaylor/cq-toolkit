@@ -444,6 +444,11 @@ describe('CLI contract', () => {
     expect(machine.exitCode).toBe(0);
     expect(machine.stderr).toBe('');
     expect(machine.stdout).toBe(plain.stdout);
+    // The `-json` alias (the dispatcher's rawNarrationMode accepts both).
+    const alias = await runCli(['health', '-json'], roots, FIXED_NOW);
+    expect(alias.exitCode).toBe(0);
+    expect(alias.stderr).toBe('');
+    expect(alias.stdout).toBe(plain.stdout);
 
     // An operational failure is still exactly one JSON artifact: the
     // classified refusal becomes the machine-mode error object on stdout.
@@ -463,7 +468,9 @@ describe('CLI contract', () => {
     // Usage failures write the exit-2 usage artifact; stderr stays empty.
     for (const argv of [
       ['nope', '--json'],
+      ['nope', '-json'],
       ['summary-core', '--wat', '--json'],
+      ['summary-core', '--wat', '-json'],
     ] as const) {
       const result = await runCli(argv, empty, FIXED_NOW);
       expect(result.exitCode, argv.join(' ')).toBe(2);

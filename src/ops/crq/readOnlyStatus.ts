@@ -213,7 +213,7 @@ export async function readClientHealth(
  * The read-only CLI route. Errors are returned, never thrown, so the adapter
  * can write them to stdio without a process-level handler.
  *
- * `--json` is machine mode (doctrine I1): stderr stays EMPTY on every path,
+ * `--json` (or its `-json` alias) is machine mode (doctrine I1): stderr stays EMPTY on every path,
  * and an error that has no result artifact writes ONE
  * `{ "error": { "kind", "subcommand", "message", "exitCode" } }` JSON
  * document to stdout instead, so stdout is still exactly one machine-readable
@@ -225,8 +225,8 @@ export async function runReadOnlyStatus(
 ): Promise<CommandResult> {
   // Usage errors are detected before (or while) the flags parse, so the
   // machine-mode decision scans the raw argv (the dispatcher's
-  // rawNarrationMode pattern).
-  const machine = argv.includes('--json');
+  // rawNarrationMode pattern: both `--json` and its `-json` alias).
+  const machine = argv.includes('--json') || argv.includes('-json');
   const [command, ...rest] = argv;
   if (command === undefined) return usageError('missing subcommand', machine, null);
   if (command === 'help' || command === '--help' || command === '-h') {
@@ -243,7 +243,7 @@ export async function runReadOnlyStatus(
       pretty = true;
       continue;
     }
-    if (argument === '--json') {
+    if (argument === '--json' || argument === '-json') {
       continue; // machine mode, decided by the raw argv scan above
     }
     return usageError(`unknown option ${argument} for ${command}`, machine, command);
