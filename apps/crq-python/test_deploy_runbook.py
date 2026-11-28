@@ -1250,7 +1250,19 @@ class DeployTests(DeployFixture, unittest.TestCase):
             2, health=lambda: {"healthy": False, "observations": ["bad"]})
         self._assert_recorded_recovery(code, error, run)
 
-    def test_health_failure_keeps_hold_when_rollback_is_disabled(self):
+    def test_switch_dirtied_queue_refuses_before_health_when_rollback_is_disabled(self):
+        # A switch that dirties the shared queue is refused by the
+        # post-switch verification while the hold is still owned, before
+        # admission is released and before the health window runs. The
+        # dirtied queue also lost rollback permission, so the rollback
+        # fails into recovery_required and the health callback is never
+        # invoked.
+        health_calls = []
+
+        def health():
+            health_calls.append(1)
+            return {"healthy": False, "reason": "no advancing tick"}
+
         real_switch = host.switch
 
         def dirtying_switch(root, overlay, raw, target, tag=None, rollback_config=None):
@@ -1264,11 +1276,13 @@ class DeployTests(DeployFixture, unittest.TestCase):
         helper.root_check = host.root_check
         helper.verify_target = host.verify_target
         helper.switch = dirtying_switch
-        run = self.build(helper=helper, health=lambda: {
-            "healthy": False, "reason": "no advancing tick"})
+        run = self.build(helper=helper, health=health)
         with self.assertRaisesRegex(rb.RecoveryRequired,
                                     "automatic rollback is disabled"):
             run.run()
+        self.assertEqual(health_calls, [])
+        self.assertIn("shared queue state changed during the switch",
+                      self.record(run)["reason"])
         self.assertTrue(self.marker().exists())
         self.assertEqual(self.head(), self.target)
         self.assertEqual(self.record(run)["outcome"], "recovery_required")
