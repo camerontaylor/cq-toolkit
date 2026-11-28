@@ -61,6 +61,7 @@ interface Harness {
     locked: boolean;
     busy: boolean;
     events: JsonObject[];
+    receiptReads: number;
   };
   callRaw(frameText: string): Promise<JsonObject>;
   call(body: unknown, overrides?: { policy?: unknown; principal?: string }): Promise<JsonObject>;
@@ -74,6 +75,7 @@ function harness(options: { queue?: JsonObject; receipt?: Uint8Array } = {}): Ha
     locked: false,
     busy: false,
     events: [] as JsonObject[],
+    receiptReads: 0,
   };
   const gitCalls: string[][] = [];
   const receipts = new Map<string, Uint8Array>();
@@ -97,6 +99,7 @@ function harness(options: { queue?: JsonObject; receipt?: Uint8Array } = {}): Ha
       }
     },
     readReceipt: async (receiptId) => {
+      state.receiptReads += 1;
       const bytes = receipts.get(receiptId);
       if (bytes === undefined) throw Object.assign(new Error('missing'), { code: 'ENOENT' });
       return bytes;
@@ -481,5 +484,52 @@ describe('review-v1 pure handler', () => {
     const error = result.get('error') as JsonObject;
     expect(error.get('code')).toBe('invalid-input');
     expect(error.get('retryable')).toBe(false);
+  });
+});
+
+// An explicit repeat never reaches receipt verification, so submit must not
+// preload (read) retained receipts for it; a plain submit still does.
+describe('repeat submit receipt preload', () => {
+  test('explicit repeat performs no receipt reads; non-repeat still reads', async () => {
+    const receipt = Buffer.from(
+      receiptJsonText(
+        object({
+          v: 1,
+          kind: 'review',
+          identity: 'x',
+          identity_inputs: { repo: REPO },
+          scope_adequate: true,
+          outcome: 'clean',
+          generated_at: '2026-11-13T00:00:00Z',
+        }),
+      ),
+      'utf8',
+    );
+    const h = harness({ receipt });
+    const created = await h.call(frame());
+    expect(created.get('action')).toBe('created');
+    const itemId = created.get('item');
+    // Mark the item done with a receipt id on disk: a preload would read it.
+    const items = (h.state.queue.get('items') as JsonObject[]).map((item) =>
+      item.get('id') === itemId
+        ? withObjectKeys(item, [
+            ['state', 'done'],
+            ['outcome', 'clean'],
+            ['receipt_id', sha256Hex(receipt)],
+          ])
+        : item,
+    );
+    h.state.queue = withObjectKeys(h.state.queue, [['items', items]]);
+    expect(h.state.receiptReads).toBe(0);
+
+    const repeat = await h.call(frame({ request_id: 'req-2', repeat: true }));
+    expect(repeat.get('action')).toBe('created');
+    expect(repeat.get('item')).not.toBe(itemId);
+    expect(h.state.receiptReads).toBe(0);
+
+    // Control: a non-repeat submit for the same head does verify receipts.
+    const plain = await h.call(frame({ request_id: 'req-3' }));
+    expect(h.state.receiptReads).toBeGreaterThan(0);
+    expect(plain.get('action')).toBe('joined');
   });
 });
