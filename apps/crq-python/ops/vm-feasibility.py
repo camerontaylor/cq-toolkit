@@ -578,23 +578,30 @@ def tool(name: str, directory: pathlib.Path | None) -> str:
 # ------------------------------------------------------------- lifecycle
 
 
+_MACHINE_MODE = False  # set by main(): --json keeps stderr empty (doctrine I1)
+
+
 def discard(part: pathlib.Path | str, exc: BaseException | None = None) -> None:
     """Best-effort removal of a temporary file; never masks the error in flight.
 
     An unlink failure becomes a note on ``exc`` -- the primary error in flight
     -- instead of a direct stderr print, so machine mode (``--json``) keeps
     stderr empty: ``main`` serializes the note into the one error artifact and
-    narrates it only outside machine mode. With no exception to carry it, the
-    warning still goes to stderr for humans.
+    narrates it only outside machine mode. With no exception to carry it (or
+    one that refuses notes), the warning goes to stderr, but never in machine
+    mode, where it is dropped rather than break the one-artifact contract.
     """
     try:
         pathlib.Path(part).unlink(missing_ok=True)
     except OSError as cleanup_error:
         message = "warning: could not remove %s: %s" % (part, cleanup_error)
-        primary = exc if exc is not None else sys.exc_info()[1]
-        if primary is not None and primary is not cleanup_error:
-            primary.add_note(message)
-        else:
+        if exc is not None and exc is not cleanup_error:
+            try:
+                exc.add_note(message)
+                return
+            except Exception:  # noqa: BLE001 - cleanup must never replace exc
+                pass
+        if not _MACHINE_MODE:
             print(message, file=sys.stderr)
 
 
@@ -1774,6 +1781,8 @@ def main(argv=None) -> int:
     # Machine mode is needed before the parse, because a usage error is the
     # one failure that never produces a namespace to read --json from.
     parser.json_mode = "--json" in argv
+    global _MACHINE_MODE
+    _MACHINE_MODE = parser.json_mode
     parser.add_argument("--state-dir", default=str(DEFAULT_STATE))
     parser.add_argument("--tools", type=pathlib.Path,
                         help="directory holding qemu, qemu-img and cloud-localds")
