@@ -104,9 +104,11 @@ final ``fence`` as step 24. The host process survives every guest boundary.
 
 15. ``matrix-restart-drained``: Python-to-Node switch killed at ``install``;
     real ``systemctl restart user@$(id -u).service``; observe the retained
-    ``drained`` record, ``/dev/null`` mask, missing staged target, inactive
-    timer and no owned work; recovery rolls back to Python; repeated recovery
-    refuses.
+    ``drained`` record, ``/dev/null`` mask, missing staged target and no owned
+    work. The recorded timer may be active: an enabled timer can restart with
+    the user manager while the service stays masked, and the mask is what
+    fences work; recovery re-establishes the snapshot timer state. Recovery
+    rolls back to Python; repeated recovery refuses.
 16. ``matrix-restart-restore-staged``: Python-to-Node switch killed at
     ``install``, then recovery killed at ``restore_staged``; real user-manager
     restart; observe the ``drained`` record, mask, staged prior Python service
