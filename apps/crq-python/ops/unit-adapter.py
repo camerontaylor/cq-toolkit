@@ -486,6 +486,23 @@ def declared_inventory(root: Path, source_sha: str) -> dict:
             service_timeout = None
         else:
             service_timeout = 90
+        # systemd parses booleans case-insensitively across these spellings; an
+        # absent assignment keeps the RemainAfterExit=no default.
+        remain = _single_value(
+            _section_values(service_text, "Service", "RemainAfterExit"),
+            "service RemainAfterExit")
+        if remain is None:
+            service_remain_after_exit = False
+        else:
+            value = remain.lower()
+            if value in ("yes", "true", "on", "1"):
+                service_remain_after_exit = True
+            elif value in ("no", "false", "off", "0"):
+                service_remain_after_exit = False
+            else:
+                raise ValueError(
+                    "service template has an unsupported RemainAfterExit: "
+                    + unit)
         stem = unit[:-len(".service")]
         timer = stem + ".timer"
         path_unit = stem + ".path"
@@ -537,6 +554,7 @@ def declared_inventory(root: Path, source_sha: str) -> dict:
             "timer_wants": timer_wants,
             "path_wants": path_wants,
             "service_type": service_type,
+            "service_remain_after_exit": service_remain_after_exit,
             "service_timeout_seconds": service_timeout,
             "timer_bound_seconds": timer_bound,
             "timer_repeat_seconds": timer_repeat,
@@ -1335,10 +1353,12 @@ class ProductionUnitAdapter:
         The controller requires two strictly advancing completions after one
         ``start``. The first is produced by the started service; the second is
         produced by the restored timer. An inactive timer cannot produce it
-        without spawning unrecorded work. A calendar schedule whose worst-case
-        interval exceeds the fixed supported maximum is refused before
-        mutation. A repeat-after-active/inactive timer instead derives its
-        finite maximum from its own declared bound.
+        without spawning unrecorded work. A target service that stays active
+        after the first completion (``RemainAfterExit=yes``) is not restarted
+        by the restored timer either, so it is refused. A calendar schedule
+        whose worst-case interval exceeds the fixed supported maximum is
+        refused before mutation. A repeat-after-active/inactive timer instead
+        derives its finite maximum from its own declared bound.
         """
         timer = inventory[unit]["timer"]
         if timer is None:
@@ -1352,6 +1372,11 @@ class ProductionUnitAdapter:
         if inventory[unit]["service_type"] == "simple":
             self.refuse("simple service completion has no declared execution "
                         "bound; preflight refuses this topology")
+        if inventory[unit]["service_remain_after_exit"]:
+            self.refuse("service remains active after the first completion; "
+                        "the restored timer does not restart an active "
+                        "service, so no second distinct completion is "
+                        "available")
         service_timeout = inventory[unit]["service_timeout_seconds"]
         if type(service_timeout) is not int or service_timeout <= 0:
             self.refuse("declared service start timeout is not bounded")
