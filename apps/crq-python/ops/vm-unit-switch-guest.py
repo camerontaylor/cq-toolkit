@@ -977,10 +977,17 @@ def drain_refuse_phase(args):
             "drain refusal target must differ from the installed runtime")
     saved_queue = queue_bytes()
     before_paths = [str(path) for path in records()]
-    seeded = seed_drain_work(kind)
-    unrelated, unrelated_state = spawn_detached("crq-drain-unrelated")
+    # Both drain fixtures are acquired inside the cleanup scope: if the owned
+    # seed succeeds but the unrelated process fails to launch, the finally
+    # still stops the live seed child and removes its run metadata instead of
+    # leaking them past the phase. Unacquired fixtures stop as harmless no-ops
+    # (stop_process(None)), and the queue/run restores stay idempotent.
     cleanup = []
+    seeded = {"process": None}
+    unrelated = None
     try:
+        seeded = seed_drain_work(kind)
+        unrelated, unrelated_state = spawn_detached("crq-drain-unrelated")
         seed_queue([seeded["item"],
                     {"id": "drain-terminal", "state": "done"}])
         seeded_sha = sha256_file(STATE / "queue.json")
@@ -1079,10 +1086,16 @@ def drain_harvest_phase(args):
     saved = baseline()
     saved_queue = queue_bytes()
     before_paths = [str(path) for path in records()]
-    seeded = seed_drain_work("harvest")
-    unrelated, unrelated_state = spawn_detached("crq-drain-unrelated")
+    # Both drain fixtures are acquired inside the cleanup scope: if the owned
+    # seed succeeds but the unrelated process fails to launch, the finally
+    # still restores the queue and removes the seeded run metadata (whose
+    # child has already exited) instead of leaking them past the phase.
     cleanup = []
+    seeded = {"process": None}
+    unrelated = None
     try:
+        seeded = seed_drain_work("harvest")
+        unrelated, unrelated_state = spawn_detached("crq-drain-unrelated")
         seed_queue([seeded["item"],
                     {"id": "drain-terminal", "state": "done"}])
         seeded_sha = sha256_file(STATE / "queue.json")
@@ -1204,10 +1217,17 @@ def recover_drain_refuse_phase(args):
     record = json.loads(record_path.read_text())
     require(record["outcome"] == "pending" and record["phase"] == "drained",
             "recovery drain proof requires a retained drained intent")
-    seeded = seed_drain_work("alive")
-    unrelated, unrelated_state = spawn_detached("crq-drain-unrelated")
+    # Both drain fixtures are acquired inside the cleanup scope: if the owned
+    # seed succeeds but the unrelated process fails to launch, the finally
+    # still stops the live seed child and removes its run metadata instead of
+    # leaking them past the phase. Unacquired fixtures stop as harmless no-ops
+    # (stop_process(None)), and the queue/run restores stay idempotent.
     cleanup = []
+    seeded = {"process": None}
+    unrelated = None
     try:
+        seeded = seed_drain_work("alive")
+        unrelated, unrelated_state = spawn_detached("crq-drain-unrelated")
         seed_queue([seeded["item"],
                     {"id": "drain-terminal", "state": "done"}])
         seeded_sha = sha256_file(STATE / "queue.json")
