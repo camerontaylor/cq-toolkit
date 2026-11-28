@@ -300,6 +300,16 @@ class StopOwnedProcessTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     vm.load_run(pathlib.Path(tmp), bad, require_process=False)
 
+    def test_load_run_rejects_non_object_run_metadata(self):
+        # `[]` decodes fine but has no `port`; refusing it keeps machine mode
+        # on the JSON error artifact instead of an uncaught AttributeError.
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = pathlib.Path(tmp) / "runs" / "r1"
+            run_dir.mkdir(parents=True)
+            (run_dir / "run.json").write_text("[]")
+            with self.assertRaises(ValueError):
+                vm.load_run(pathlib.Path(tmp), "r1", require_process=False)
+
 class LegacyScopeTests(unittest.TestCase):
     """Interrupted launches from before the scope name bound the run directory."""
 
