@@ -212,8 +212,12 @@ test('a vanished journal directory ends the terminal attempt without quarantine'
         await rm(reportDir, { recursive: true, force: true });
         expect(ownershipModule.deferAddressTerminalAttempt(binding, attempt)).toBe(true);
         const outcome = await ownershipModule.addressCancelledResult(lease);
-        expect(outcome.status).toBe('needs-human');
-        expect(outcome.report).toBe(report);
+        expect(outcome).toMatchObject({ status: 'needs-human' });
+        if (outcome.status !== 'needs-human') throw new Error('expected needs-human');
+        // No report reached disk, so neither the path nor the report object
+        // may be advertised.
+        expect(outcome.reason).toBe('parent cancelled; no report written');
+        expect(outcome.report).toBeUndefined();
         return outcome;
       },
     );
