@@ -77,6 +77,12 @@ class NumericSourceTests(unittest.TestCase):
         self.assertEqual(run("other", "2026-10-02T00:00:00.5Z")["records"], [])
         self.assertEqual(run("merge-queue", None)["records"], [])
 
+    def test_repository_number_ceiling_is_capped_repository_wide(self):
+        self.assertEqual(self.source(mr.MAX_REPOSITORY_NUMBER)["ceiling"], 20000)
+        with self.assertRaises(mr.ReconcileRefused) as refused:
+            self.source(mr.MAX_REPOSITORY_NUMBER + 1)
+        self.assertIn("repository number ceiling 20001 exceeds the repository-wide cap 20000", str(refused.exception))
+
     def test_ceiling_requires_all_state_counts_and_inventory_growth_is_capped(self):
         for fields in (
             {"issues": {"nodes": []}, "pullRequests": {"nodes": [{"number": 1}]}},
