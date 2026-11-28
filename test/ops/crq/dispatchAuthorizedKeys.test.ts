@@ -46,6 +46,9 @@ describe('dispatch authorized_keys line check', () => {
     '203012312359utc',
     '20301231235960',
     '20301231235961',
+    '19700101000001',
+    '197001010001Z',
+    '19700102',
   ])('accepts expiry-time %s', (value) => {
     const result = checkDispatchAuthorizedKeysLine(
       line(queueCommand(), `restrict,expiry-time="${value}"`),
@@ -133,6 +136,20 @@ describe('dispatch authorized_keys line check', () => {
       `expiry-time ${v} that OpenSSH rejects`,
       line(queueCommand(), `restrict,expiry-time="${v}"`),
       'expiry-time must be YYYYMMDD[HHMM[SS]] with an optional Z or UTC suffix',
+    ]),
+    ...[
+      '00000101Z',
+      '19000229UTC',
+      '19691231',
+      '19691231235959Z',
+      '19700101',
+      '197001010000Z',
+      '19700101000000',
+      '19700101000000utc',
+    ].map((v) => [
+      `expiry-time ${v} at or before the epoch`,
+      line(queueCommand(), `restrict,expiry-time="${v}"`),
+      'expiry-time must be after 1970-01-01T00:00:00Z (OpenSSH rejects it)',
     ]),
     [
       'unquoted expiry-time',
