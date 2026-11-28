@@ -2,19 +2,6 @@
   "version": 1,
   "repo": "camerontaylor/cq-toolkit",
   "prs": {
-    "2477": {
-      "tuple": {
-        "head": "1fa9126977840d8a930781e0032c2efc549a1404",
-        "base": "c6e265fc9c9818cad6cdc4bb2b4e3c4da155a2a8",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-28T06:08:12.475Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
     "2479": {
       "tuple": {
         "head": "393404164754ce11c278f8995167019ec45ddee9",
@@ -31,19 +18,6 @@
     "2480": {
       "tuple": {
         "head": "bb60f29f503e1673dd42676ff4c89f876f669572",
-        "base": "24c0f2dccff3f5e1445f8fea66f6246032049787",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-28T06:49:21.624Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "2481": {
-      "tuple": {
-        "head": "7c7be8fc7473a7e79d786e008de1fc24d37e7233",
         "base": "24c0f2dccff3f5e1445f8fea66f6246032049787",
         "forcePushEpoch": 0
       },
@@ -115,6 +89,19 @@
       "observations": [
         {
           "observedAt": "2026-11-28T07:07:51.281Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
+    },
+    "2488": {
+      "tuple": {
+        "head": "8e232848537c7c4f1dba05ea958215aa02eb30fb",
+        "base": "9aa39d6b92eb22da10498452696b86fce1880ee1",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-11-28T07:08:28.814Z",
           "by": "self-merge-prs:observe"
         }
       ]
