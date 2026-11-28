@@ -301,8 +301,21 @@ def _id_before(anchor: Dict[str, Any], prefix: str) -> Dict[str, Any]:
     raise AssertionError("could not construct an id before " + anchor["id"])
 
 
+def _oversized_record() -> Dict[str, Any]:
+    # UTF-8 bytes, not JavaScript characters: the UTF-16 length stays below
+    # the 1 MiB bound while the canonical UTF-8 bytes cross it.
+    return _job_event(job_id="fixture:oversized", reason="a" * 1_000_000 + "雪" * 20_000)
+
+
 def outbox_vectors() -> Dict[str, Any]:
     record = _job_event(job_id="fixture:replay")
+
+    def oversize_refusal() -> Dict[str, Any]:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            outbox = RecordingOutbox(root / "publication", OracleArtifacts(root / "artifacts"))
+            outbox.spool(_oversized_record())
+            return {}
 
     def spool_replay() -> Dict[str, Any]:
         with tempfile.TemporaryDirectory() as directory:
@@ -378,6 +391,9 @@ def outbox_vectors() -> Dict[str, Any]:
         _case("spool-verifies-artifact", "review_ledger.Outbox.spool",
               {"value": _import(ident="artifact-refused")},
               error="IntegrityError", message="missing or corrupt retained artifact"),
+        _case("spool-refuses-oversized", "review_ledger.Outbox.spool",
+              {"value": _oversized_record()},
+              error="IntegrityError", message="ledger record exceeds validation bound"),
         _case("acknowledge-requires-remote", "review_ledger.Outbox.acknowledge",
               {"value": record, "remote": []},
               error="IntegrityError",
@@ -389,8 +405,8 @@ def outbox_vectors() -> Dict[str, Any]:
               value=semantic_replay()),
     ]
     # Capture failures for the effect cases, keeping their partial state.
-    for case, action in ((cases[1], spool_conflict), (cases[2], artifact_refusal),
-                         (cases[3], ack_requires_remote)):
+    for case, action in ((cases[1], spool_conflict), (cases[2], artifact_refusal), (cases[3], oversize_refusal),
+                         (cases[4], ack_requires_remote)):
         try:
             action()
         except ledger.IntegrityError as exc:  # the vector records the oracle's refusal
@@ -480,10 +496,7 @@ def publish_vectors() -> Dict[str, Any]:
     mid_import = _import(ident="midstream", artifact=ARTIFACT_BAD,
                          result="credited", review_id=mid_review["id"])
 
-    # UTF-8 bytes, not JavaScript characters: the UTF-16 length stays below
-    # the 1 MiB bound while the canonical UTF-8 bytes cross it.
-    oversized = _job_event(job_id="fixture:oversized",
-                           reason="a" * 1_000_000 + "雪" * 20_000)
+    oversized = _oversized_record()
 
     invalid_a = _job_event(job_id="fixture:invalid-a", source_key="fixed-conflict",
                            state="pending")

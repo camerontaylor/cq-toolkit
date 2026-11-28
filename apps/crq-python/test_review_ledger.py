@@ -107,6 +107,17 @@ class LedgerTest(unittest.TestCase):
         with self.assertRaises(ledger.IntegrityError):
             out.spool(review([self.ref], "run-2"))
 
+    def test_spool_refuses_oversized_record_and_writes_nothing(self):
+        out = ledger.Outbox(self.root / "outbox", self.store)
+        value = review([self.ref])
+        value["payload"]["paths"][0]["reason"] = "r" * (ledger.RECORD_BYTES + 1)
+        value = rehash(value)
+        self.assertGreater(len(ledger.canonical(value)), ledger.RECORD_BYTES)
+        with self.assertRaisesRegex(ledger.IntegrityError, "exceeds validation bound"):
+            out.spool(value)
+        self.assertEqual(out.pending(), [])
+        self.assertEqual(list((self.root / "outbox" / "pending").glob("*.json")), [])
+
     def test_finding_predecessors_and_fixed_evidence(self):
         finding = {"id": "e" * 64, "severity": "major", "source_id": None, "path": "src/a.ts", "blob": SHA,
                    "intervals": [[1, 1]], "title": "Issue", "body": "Details", "status": "untriaged", "anchor_status": "verified"}
