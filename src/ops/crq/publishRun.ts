@@ -550,7 +550,8 @@ class RetainedBySourceKey {
     if (byKey === null) {
       byKey = new Map<string, JsonObject>();
       for (const value of await this.outbox.retained()) {
-        const key = value instanceof JsonObject ? value.get('source_key') : undefined;
+        if (!(value instanceof JsonObject)) continue;
+        const key = value.get('source_key');
         if (typeof key === 'string' && !byKey.has(key)) byKey.set(key, value);
       }
       this.byKey = byKey;
