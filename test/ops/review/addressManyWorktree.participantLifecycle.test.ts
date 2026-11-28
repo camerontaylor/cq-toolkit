@@ -213,7 +213,10 @@ test('a vanished journal directory ends the terminal attempt without quarantine'
         expect(ownershipModule.deferAddressTerminalAttempt(binding, attempt)).toBe(true);
         const outcome = await ownershipModule.addressCancelledResult(lease);
         expect(outcome.status).toBe('needs-human');
-        expect(outcome.report).toBe(report);
+        // No report reached disk, so neither the path nor the report object
+        // may be advertised.
+        expect(outcome.reason).toBe('parent cancelled; no report written');
+        expect(outcome.report).toBeUndefined();
         return outcome;
       },
     );

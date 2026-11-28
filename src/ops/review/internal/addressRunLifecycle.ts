@@ -623,11 +623,13 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
     // result here means the write either succeeded or was intentionally
     // skipped (the journal directory vanished). Advertise the path only when
     // the report exists on disk.
+    // An unwritten report is withheld entirely: its reportPath names a file
+    // that does not exist, so returning it would advertise a dangling path.
+    if (!participant.reportPersisted)
+      return { status: 'needs-human', reason: 'parent cancelled; no report written' };
     return {
       status: 'needs-human',
-      reason: participant.reportPersisted
-        ? `parent cancelled; report: ${participant.report.reportPath}`
-        : 'parent cancelled; no report written',
+      reason: `parent cancelled; report: ${participant.report.reportPath}`,
       report: participant.report,
     };
   }
