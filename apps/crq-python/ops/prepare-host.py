@@ -455,7 +455,8 @@ def exec_start_directives(lines):
     around the assignment ``=``, so ``ExecStart =`` names the same directive
     as ``ExecStart=``. Physical lines ending in an odd run of backslashes
     (an even run is escaped) join into one logical directive, and comment
-    lines inside a join neither end it nor start a directive; replacing only
+    lines, whether or not a join is pending, neither end a join, start one
+    (a comment's trailing backslash is not a continuation) nor start a directive; replacing only
     the first physical line would leave a stale fragment of the old command.
     Each span is the half-open range ``[start, end)`` of physical lines, so
     one parser serves validation (the count), replacement (the span) and
@@ -469,7 +470,7 @@ def exec_start_directives(lines):
     pending = False
     is_exec = False
     for i, line in enumerate(lines):
-        if pending and line.lstrip().startswith(('#', ';')):
+        if line.lstrip().startswith(('#', ';')):
             continue
         begins = not pending
         pending = continues(line)
