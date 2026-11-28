@@ -609,44 +609,55 @@ export async function assertAddressDependencyMetadata(
   ])
     await compare(path);
 
-  const patterns: string[] = [];
+  // Each declaration is applied by only its own package manager (pnpm ignores
+  // `package.json` workspaces entirely), so exclusions must scope to their own
+  // declaration: a shared exclusion list would let one declaration hide a
+  // member another declaration installs, and a change to that member's
+  // dependencies would pass validation against a prepared tree that still
+  // installs it. Each declaration's member set is enumerated with its own
+  // includes and excludes, then the sets combine.
   const pkg = DependencyManifest.parse(
     JSON.parse((await read(root, 'package.json')) ?? '{}') as unknown,
   );
+  const workspace = await read(root, 'pnpm-workspace.yaml');
+  const declarations: string[][] = [];
   if (pkg.workspaces)
-    patterns.push(
-      ...z
+    declarations.push(
+      z
         .array(z.string())
         .parse(Array.isArray(pkg.workspaces) ? pkg.workspaces : pkg.workspaces.packages),
     );
-  const workspace = await read(root, 'pnpm-workspace.yaml');
   if (workspace !== null) {
     const parsed = z
       .object({ packages: z.array(z.string()).optional() })
       .parse(parseYaml(workspace) as unknown);
-    patterns.push(...(parsed.packages ?? []));
+    declarations.push(parsed.packages ?? []);
   }
-  for (const entry of patterns) {
-    const pattern = entry.startsWith('!') ? entry.slice(1) : entry;
-    if (!pattern || isAbsolute(pattern) || pattern.split(/[\\/]/).includes('..'))
-      throw new Error('workspace pattern escapes checkout or is ambiguous');
-  }
-  const include = patterns.filter((p) => !p.startsWith('!')).map((p) => `${p}/package.json`);
-  const exclude = [
-    '**/node_modules/**',
-    '**/.git/**',
-    ...patterns.filter((p) => p.startsWith('!')).map((p) => `${p.slice(1)}/package.json`),
-  ];
   const members = new Set<string>();
-  if (include.length)
+  const enumerated = new Map<string, number>();
+  for (const patterns of declarations) {
+    for (const entry of patterns) {
+      const pattern = entry.startsWith('!') ? entry.slice(1) : entry;
+      if (!pattern || isAbsolute(pattern) || pattern.split(/[\\/]/).includes('..'))
+        throw new Error('workspace pattern escapes checkout or is ambiguous');
+    }
+    const include = patterns.filter((p) => !p.startsWith('!')).map((p) => `${p}/package.json`);
+    const exclude = [
+      '**/node_modules/**',
+      '**/.git/**',
+      ...patterns.filter((p) => p.startsWith('!')).map((p) => `${p.slice(1)}/package.json`),
+    ];
+    if (!include.length) continue;
     for (const cwd of [root, caller]) {
-      let count = 0;
       for await (const path of glob(include, { cwd, exclude })) {
         admit();
-        if (++count > 1000) throw new Error('workspace metadata enumeration cap exceeded');
+        const count = (enumerated.get(cwd) ?? 0) + 1;
+        if (count > 1000) throw new Error('workspace metadata enumeration cap exceeded');
+        enumerated.set(cwd, count);
         members.add(path);
       }
     }
+  }
   for (const path of [...members].sort()) {
     await compare(path, true);
     // A member lockfile (pnpm without a shared workspace lockfile, or a nested

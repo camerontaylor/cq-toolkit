@@ -6,6 +6,7 @@ import { realTmpDir } from '../../helpers/tmp-dir.js';
 import { expect, test } from 'vitest';
 import {
   assertAddressDependenciesIsolated,
+  assertAddressDependencyMetadata,
   snapshotAddressDependencies,
 } from '../../../src/ops/review/internal/addressDependencies.js';
 
@@ -129,3 +130,28 @@ test.skipIf(process.platform === 'win32')(
     }
   },
 );
+
+test('workspace exclusion in package.json does not hide a pnpm-workspace.yaml member', async () => {
+  const root = await realTmpDir('cq-dependency-workspace-scope-');
+  try {
+    const manifest = (script: string) =>
+      JSON.stringify({ name: 'lib', scripts: { postinstall: script } });
+    const pr = join(root, 'pr');
+    const caller = join(root, 'caller');
+    for (const tree of [pr, caller]) {
+      await mkdir(join(tree, 'packages/skip'), { recursive: true });
+      await writeFile(
+        join(tree, 'package.json'),
+        JSON.stringify({ workspaces: ['packages/*', '!packages/skip'] }),
+      );
+      await writeFile(join(tree, 'pnpm-workspace.yaml'), 'packages:\n  - "packages/*"\n');
+    }
+    await writeFile(join(pr, 'packages/skip/package.json'), manifest('original install'));
+    await writeFile(join(caller, 'packages/skip/package.json'), manifest('different install'));
+    await expect(assertAddressDependencyMetadata(pr, caller, () => {})).rejects.toThrow(
+      'manifests/locks differ',
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
