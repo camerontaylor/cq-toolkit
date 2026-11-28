@@ -7,6 +7,7 @@ recorded separately by the harness and is not part of the unit suite.
 import importlib.util
 import json
 import os
+import re
 import pathlib
 import subprocess
 import sys
@@ -1437,6 +1438,312 @@ class LifecycleTests(unittest.TestCase):
                             recorder, None, {"kvm_writable": True})
             self.assertFalse((run / "qemu.pid").exists())
             self.assertFalse((run / "process.json").exists())
+
+    def _boot_with(self, run_dir, run, ports, held, popen=None):
+        """Drive vm.boot with free_port/port_held stubbed; returns (result, popen)."""
+        class Exited:
+            pid = 4321
+
+            def poll(self):
+                return 1
+
+        launcher = popen or mock.Mock(side_effect=lambda *a, **k: Exited())
+        recorder = vm.Recorder(run_dir)
+        with mock.patch.object(vm, "require_memory"), \
+             mock.patch.object(vm, "tool", return_value="/bin/true"), \
+             mock.patch.object(vm, "free_port", side_effect=ports), \
+             mock.patch.object(vm, "port_held", side_effect=held), \
+             mock.patch.object(vm.subprocess, "Popen", launcher):
+            try:
+                outcome = vm.boot(run, recorder, None, {"kvm_writable": True})
+            except RuntimeError as error:
+                outcome = error
+        return outcome, launcher
+
+    def test_boot_bounds_retries_by_launches_not_distinct_ports(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = pathlib.Path(temporary) / "r1"
+            run_dir.mkdir()
+            run = {"run_id": "r1", "path": str(run_dir), "port": None}
+            outcome, popen = self._boot_with(
+                run_dir, run, [2222] * 100, lambda port: True)
+            self.assertIsInstance(outcome, RuntimeError)
+            self.assertEqual(popen.call_count, vm.PORT_ATTEMPTS)
+            self.assertIn("%d launches" % vm.PORT_ATTEMPTS, str(outcome))
+
+    def test_boot_retries_a_lost_bind_on_a_fresh_port_and_keeps_first_log(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = pathlib.Path(temporary) / "r1"
+            run_dir.mkdir()
+            run = {"run_id": "r1", "path": str(run_dir), "port": None}
+            ports = iter([2222, 2223])
+            # The True is the lost bind on 2222 that sends boot to the retry
+            # path; readiness on 2223 is the owner check, stubbed below.
+            held = iter([True])
+
+            class Process:
+                pid = 4321
+
+                def __init__(self, ok):
+                    self.ok = ok
+
+                def poll(self):
+                    return None if self.ok else 1
+
+            launches = []
+
+            def popen(argv, cwd, stdout, stderr, start_new_session):
+                launches.append(argv)
+                stdout.write(b"launch %d\n" % len(launches))
+                if len(launches) == 2:
+                    (run_dir / "qemu.pid").write_text("4321\n")
+                return Process(len(launches) == 2)
+
+            recorder = vm.Recorder(run_dir)
+            with mock.patch.object(vm, "require_memory"), \
+                 mock.patch.object(vm, "tool", return_value="/bin/true"), \
+                 mock.patch.object(vm, "free_port", side_effect=lambda: next(ports)), \
+                 mock.patch.object(vm, "port_held", side_effect=lambda p: next(held)), \
+                 mock.patch.object(vm, "port_listener_pid",
+                                   side_effect=lambda pid, p: p == 2223), \
+                 mock.patch.object(vm, "process_starttime", return_value="9"), \
+                 mock.patch.object(vm.subprocess, "Popen", side_effect=popen):
+                result = vm.boot(run, recorder, None, {"kvm_writable": True})
+            self.assertEqual(len(launches), 2)
+            self.assertEqual(result["port"], 2223)
+            self.assertIn("2223-:22", " ".join(launches[1]))
+            self.assertEqual(json.loads((run_dir / "run.json").read_text())["port"], 2223)
+            self.assertEqual((run_dir / "qemu.log").read_bytes(), b"launch 1\n")
+            self.assertEqual((run_dir / "qemu.log.1").read_bytes(), b"launch 2\n")
+
+    def test_boot_propagates_an_interrupt_without_retrying(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = pathlib.Path(temporary) / "r1"
+            run_dir.mkdir()
+            run = {"run_id": "r1", "path": str(run_dir), "port": 2222}
+
+            class Interrupted:
+                pid = 4321
+                fired = False
+
+                def poll(self):
+                    if not Interrupted.fired:
+                        Interrupted.fired = True
+                        raise KeyboardInterrupt
+                    return 1
+
+            popen = mock.Mock(side_effect=lambda *a, **k: Interrupted())
+            recorder = vm.Recorder(run_dir)
+            with mock.patch.object(vm, "require_memory"), \
+                 mock.patch.object(vm, "tool", return_value="/bin/true"), \
+                 mock.patch.object(vm, "free_port", return_value=2223), \
+                 mock.patch.object(vm, "port_held", return_value=True), \
+                 mock.patch.object(vm.subprocess, "Popen", popen):
+                with self.assertRaises(KeyboardInterrupt):
+                    vm.boot(run, recorder, None, {"kvm_writable": True})
+            self.assertEqual(popen.call_count, 1)
+
+    def test_pid_file_error_names_the_attempt_log(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = pathlib.Path(temporary) / "r1"
+            run_dir.mkdir()
+            run = {"run_id": "r1", "path": str(run_dir), "port": 2222}
+            outcome, _ = self._boot_with(run_dir, run, [], lambda port: False)
+            self.assertIn("see qemu.log", str(outcome))
+            run = {"run_id": "r1", "path": str(run_dir), "port": 2222}
+            held = iter([True, True, False])
+            outcome, _ = self._boot_with(
+                run_dir, run, [2223, 2224], lambda port: next(held))
+            self.assertIsInstance(outcome, RuntimeError)
+            self.assertIn("qemu.log.2", str(outcome.__cause__))
+
+    def test_first_boot_keeps_the_prepared_run_metadata(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = pathlib.Path(temporary)
+            run_dir = state / "runs" / "r1"
+            run_dir.mkdir(parents=True)
+            prepared = {"run_id": "r1", "path": str(run_dir), "port": None,
+                        "image": {"path": "/img", "sha256": "ab"},
+                        "started_at": "2026-11-28T00:00:00Z"}
+            vm.save_json(run_dir / "run.json", prepared)
+            run = vm.load_run(state, "r1", require_process=False)
+
+            class Process:
+                pid = 4321
+
+                def poll(self):
+                    return None
+
+            def popen(argv, **kwargs):
+                (run_dir / "qemu.pid").write_text("4321\n")
+                return Process()
+
+            with mock.patch.object(vm, "require_memory"), \
+                 mock.patch.object(vm, "tool", return_value="/bin/true"), \
+                 mock.patch.object(vm, "free_port", return_value=2224), \
+                 mock.patch.object(vm, "port_listener_pid", return_value=True), \
+                 mock.patch.object(vm, "process_starttime", return_value="9"), \
+                 mock.patch.object(vm.subprocess, "Popen", side_effect=popen):
+                vm.boot(run, vm.Recorder(run_dir), None, {"kvm_writable": True})
+            saved = json.loads((run_dir / "run.json").read_text())
+            self.assertEqual(saved, {**prepared, "port": 2224})
+
+    def _real_child_boot(self, behaviours, prepared_held):
+        """Run vm.boot with Popen replaced by real stand-in children.
+
+        behaviours[i] is the i-th launch's child: "bind" (listens on its own
+        port, writes the pidfile, stays up) or "exit" (writes the pidfile,
+        sleeps, exits 1 without binding). Returns (result, ports_launched,
+        children, run_dir).
+        """
+        import socket
+        import sys
+        real_popen = vm.subprocess.Popen
+        script = (
+            "import socket, sys, time\n"
+            "mode, pidfile, port, delay = sys.argv[1:5]\n"
+            "if mode == 'bind':\n"
+            "    s = socket.socket(); s.bind(('127.0.0.1', int(port))); s.listen(1)\n"
+            "open(pidfile, 'w').write('%d\\n' % __import__('os').getpid())\n"
+            "time.sleep(float(delay))\n"
+            "sys.exit(0 if mode == 'bind' else 1)\n")
+        launched = []
+        children = []
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        run_dir = pathlib.Path(temporary.name) / "r1"
+        run_dir.mkdir()
+        holder = socket.socket()
+        self.addCleanup(holder.close)
+        holder.bind(("127.0.0.1", 0))
+        holder.listen(1)
+        held_port = holder.getsockname()[1]
+        spare = []
+        for _ in behaviours:
+            probe = socket.socket()
+            probe.bind(("127.0.0.1", 0))
+            spare.append(probe.getsockname()[1])
+            probe.close()
+        fresh = iter(spare)
+
+        def popen(argv, cwd, stdout, stderr, start_new_session):
+            port = int(re.search(r"hostfwd=tcp:127.0.0.1:(\d+)-:22",
+                                 " ".join(argv)).group(1))
+            mode = behaviours[len(launched)]
+            launched.append(port)
+            child = real_popen(
+                [sys.executable, "-c", script, mode, str(run_dir / "qemu.pid"),
+                 str(port), "0.8" if mode == "exit" else "30"],
+                stdout=stdout, stderr=stderr)
+            children.append(child)
+            self.addCleanup(lambda: (child.kill(), child.wait()))
+            return child
+
+        run = {"run_id": "r1", "path": str(run_dir),
+               "port": held_port if prepared_held else None}
+        with mock.patch.object(vm, "require_memory"), \
+             mock.patch.object(vm, "tool", return_value="/bin/true"), \
+             mock.patch.object(vm, "free_port", side_effect=lambda: next(fresh)), \
+             mock.patch.object(vm, "bounded_scope_argv", side_effect=lambda q, u: q), \
+             mock.patch.object(vm.subprocess, "Popen", side_effect=popen):
+            try:
+                result = vm.boot(run, vm.Recorder(run_dir), None,
+                                 {"kvm_writable": True})
+            except RuntimeError as error:
+                result = error
+        return result, launched, held_port, spare, children
+
+    def test_boot_rejects_a_port_held_by_an_unrelated_listener(self):
+        # The stand-in writes its pidfile and exits after 0.8s without ever
+        # binding; an unrelated listener (this test) holds the prepared port.
+        result, launched, held_port, spare, _ = self._real_child_boot(
+            ["exit", "bind"], prepared_held=True)
+        self.assertIsInstance(result, dict, result)
+        self.assertEqual(launched, [held_port, spare[0]])
+        self.assertEqual(result["port"], spare[0])
+
+    def test_boot_accepts_a_child_that_binds_the_port_itself_promptly(self):
+        import time as clock
+        start = clock.monotonic()
+        result, launched, _, spare, _ = self._real_child_boot(
+            ["bind"], prepared_held=False)
+        self.assertIsInstance(result, dict, result)
+        self.assertEqual(launched, [spare[0]])
+        self.assertEqual(result["port"], spare[0])
+        self.assertLess(clock.monotonic() - start, 5)
+
+    def test_port_listener_pid_matches_only_the_owning_process(self):
+        import socket
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            sock.listen(1)
+            port = sock.getsockname()[1]
+            self.assertTrue(vm.port_listener_pid(os.getpid(), port))
+            self.assertFalse(vm.port_listener_pid(os.getppid(), port))
+            self.assertFalse(vm.port_listener_pid(2 ** 22 + 1, port))
+
+    def test_boot_persists_its_port_over_a_newer_on_disk_value(self):
+        # Invocation A loaded port 2222 before the lock; B then booted on 2223
+        # and stopped, leaving run.json at 2223. A boots on 2222 and must
+        # record that, not skip the write because 2222 equals its snapshot.
+        with tempfile.TemporaryDirectory() as temporary:
+            state = pathlib.Path(temporary)
+            run_dir = state / "runs" / "r1"
+            run_dir.mkdir(parents=True)
+            prepared = {"run_id": "r1", "path": str(run_dir), "port": 2222,
+                        "image": {"path": "/img"}, "started_at": "t"}
+            vm.save_json(run_dir / "run.json", prepared)
+            run = vm.load_run(state, "r1", require_process=False)
+            vm.save_json(run_dir / "run.json", {**prepared, "port": 2223})
+
+            class Process:
+                pid = 4321
+
+                def poll(self):
+                    return None
+
+            def popen(argv, **kwargs):
+                (run_dir / "qemu.pid").write_text("4321\n")
+                return Process()
+
+            with mock.patch.object(vm, "require_memory"), \
+                 mock.patch.object(vm, "tool", return_value="/bin/true"), \
+                 mock.patch.object(vm, "port_listener_pid", return_value=True), \
+                 mock.patch.object(vm, "process_starttime", return_value="9"), \
+                 mock.patch.object(vm.subprocess, "Popen", side_effect=popen):
+                vm.boot(run, vm.Recorder(run_dir), None, {"kvm_writable": True})
+            saved = json.loads((run_dir / "run.json").read_text())
+            self.assertEqual(saved, {**prepared, "port": 2222})
+
+    def test_boot_does_not_retry_when_the_port_is_free(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = pathlib.Path(temporary) / "r1"
+            run_dir.mkdir()
+            run = {"run_id": "r1", "path": str(run_dir), "port": 2222}
+            outcome, popen = self._boot_with(
+                run_dir, run, [], lambda port: False)
+            self.assertIsInstance(outcome, RuntimeError)
+            self.assertEqual(popen.call_count, 1)
+            self.assertFalse((run_dir / "run.json").exists())
+
+    def test_boot_keeps_a_prepared_port_without_persisting(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = pathlib.Path(temporary) / "r1"
+            run_dir.mkdir()
+            run = {"run_id": "r1", "path": str(run_dir), "port": 2250}
+            with mock.patch.object(vm, "free_port") as chooser:
+                outcome, popen = self._boot_with(
+                    run_dir, run, [], lambda port: False)
+            chooser.assert_not_called()
+            self.assertIn("2250-:22", " ".join(popen.call_args[0][0]))
+
+    def test_port_held_reports_both_outcomes(self):
+        import socket
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+            self.assertTrue(vm.port_held(port))
+        self.assertFalse(vm.port_held(port))
 
     def test_timeout_output_is_text_and_json_safe(self):
         with tempfile.TemporaryDirectory() as temporary:
