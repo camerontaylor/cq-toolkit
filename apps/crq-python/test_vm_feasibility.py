@@ -595,8 +595,11 @@ class FetchImageTests(unittest.TestCase):
             state = pathlib.Path(temporary)
             images = state / "images"
             images.mkdir()
+            # The stale checksum matches the downloaded bytes, so a fetch that
+            # skips the refresh and trusts this manifest would promote the
+            # image instead of failing.
             (images / vm.SUMS_NAME).write_text(
-                "%s  %s\n" % ("2" * 64, vm.IMAGE_NAME))
+                "%s  %s\n" % (vm.sha256_bytes(b"unexpected"), vm.IMAGE_NAME))
             calls = []
             with mock.patch.object(
                     vm, "download",
