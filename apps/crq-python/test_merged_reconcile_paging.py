@@ -28,6 +28,17 @@ class PagingTests(unittest.TestCase):
         self.assertEqual(result["summary"]["unsupported"], 0)
         self.assertEqual(len(forge.calls), total // page_size + 1)
 
+    def test_page_refuses_a_lone_surrogate_cursor_that_cannot_be_utf8_encoded(self):
+        page = {"records": [], "has_next_page": True, "next_cursor": "\ud800"}
+        with self.assertRaises(mr.ReconcileRefused):
+            mr._page(page, None, [])
+
+    def test_reconcile_refuses_a_lone_surrogate_cursor_from_the_forge(self):
+        page = {"records": [], "has_next_page": True, "next_cursor": "\ud800"}
+        with self.assertRaises(mr.ReconcileRefused):
+            mr.reconcile(None, lambda cursor: page, repo="org/repo", after=A, before=B,
+                         page_budget=1)
+
     def test_page_budget_stops_honestly_incomplete_with_next_cursor(self):
         pages = {None: cursor_page([pr(1, "2026-10-02T00:00:00Z"),
                                     pr(2, "2026-10-03T00:00:00Z")], "c1"),
