@@ -418,7 +418,7 @@ describe('CLI contract', () => {
     const help = await runCli(['--help'], roots, FIXED_NOW);
     expect(help).toEqual({
       exitCode: 0,
-      stdout: 'usage: crq read-only-status <summary-core|health> [--pretty]\n',
+      stdout: '{"usage":"usage: crq read-only-status <summary-core|health> [--pretty] [--json]"}\n',
       stderr: '',
     });
 
@@ -427,6 +427,51 @@ describe('CLI contract', () => {
       expect(result.exitCode, argv.join(' ')).toBe(2);
       expect(result.stdout).toBe('');
       expect(result.stderr).toContain('usage:');
+    }
+  });
+
+  test('machine mode --json keeps stderr empty and returns one JSON artifact on every path', async () => {
+    const roots = await makeRoots();
+    await writeState(roots, {
+      queue: new JsonObject([['items', []]]),
+      config: DEFAULT_CONFIG,
+      events: [],
+    });
+
+    // Success: the artifact is byte-identical to human mode; stderr stays empty.
+    const plain = await runCli(['health'], roots, FIXED_NOW);
+    const machine = await runCli(['health', '--json'], roots, FIXED_NOW);
+    expect(machine.exitCode).toBe(0);
+    expect(machine.stderr).toBe('');
+    expect(machine.stdout).toBe(plain.stdout);
+
+    // An operational failure is still exactly one JSON artifact: the
+    // classified refusal becomes the machine-mode error object on stdout.
+    const empty = await makeRoots();
+    const failed = await runCli(['health', '--json'], empty, FIXED_NOW);
+    expect(failed.exitCode).toBe(1);
+    expect(failed.stderr).toBe('');
+    expect(toPlainJson(parseOutput(failed.stdout))).toEqual({
+      error: {
+        kind: 'thrown',
+        subcommand: 'health',
+        message: expect.stringMatching(/^queue-invalid: queue\.json unavailable:/u),
+        exitCode: 1,
+      },
+    });
+
+    // Usage failures write the exit-2 usage artifact; stderr stays empty.
+    for (const argv of [['nope', '--json'], ['summary-core', '--wat', '--json']] as const) {
+      const result = await runCli(argv, empty, FIXED_NOW);
+      expect(result.exitCode, argv.join(' ')).toBe(2);
+      expect(result.stderr, argv.join(' ')).toBe('');
+      const artifact = toPlainJson(parseOutput(result.stdout)) as {
+        error: { kind: string; subcommand: string | null; message: string; exitCode: number };
+      };
+      expect(artifact.error.kind, argv.join(' ')).toBe('usage');
+      expect(artifact.error.subcommand, argv.join(' ')).toBe(argv[0]);
+      expect(artifact.error.exitCode, argv.join(' ')).toBe(2);
+      expect(artifact.error.message, argv.join(' ')).toMatch(/unknown (subcommand|option)/u);
     }
   });
 
