@@ -182,6 +182,8 @@ describe('recordClientHealth: opening the advisory issue', () => {
       'o/r',
       '--state',
       'all',
+      '--search',
+      `"${HEALTH_TITLE}" in:title`,
       '--limit',
       '100',
       '--json',
@@ -253,6 +255,44 @@ describe('recordClientHealth: opening the advisory issue', () => {
       'health advisory: opening marker unresolved; confirming list found no issue, marker cleared',
     ]);
     expect(healthOf(result.queue)).toMatchObject({ opening: false, issue_number: null });
+  });
+
+  it('retains a stale opening marker when the bounded search is truncated', async () => {
+    const h = harness((args) =>
+      args[0] === 'issue'
+        ? Array.from({ length: 100 }, (_, i) => ({
+            number: i + 1,
+            title: HEALTH_TITLE,
+            body: 'no marker',
+          }))
+        : {},
+    );
+    const start = queueOf({ incomplete_ticks: 0, opening: true });
+    const result = await recordClientHealth(start, true, h.effects);
+    expect(h.calls).toHaveLength(1); // the search alone: no duplicate create
+    expect(result.log).toEqual([
+      'health advisory: opening marker unresolved; list truncated, marker retained',
+    ]);
+    expect(healthOf(result.queue)).toMatchObject({ opening: true, issue_number: null });
+  });
+
+  it('defers creation behind the opening marker when the search is truncated', async () => {
+    const h = harness((args) =>
+      args[0] === 'issue'
+        ? Array.from({ length: 100 }, (_, i) => ({
+            number: i + 1,
+            title: HEALTH_TITLE,
+            body: 'no marker',
+          }))
+        : {},
+    );
+    const result = await recordClientHealth(atThreshold(), true, h.effects);
+    expect(h.calls).toHaveLength(1); // the search alone: creation is deferred, not duplicated
+    expect(h.saves.map((s) => healthOf(s).opening)).toEqual([true]);
+    expect(result.log).toEqual([
+      'health advisory: list truncated; absence unproven, opening marker set for the next tick',
+    ]);
+    expect(healthOf(result.queue)).toMatchObject({ opening: true, issue_number: null });
   });
 
   it('honours a configured threshold and ignores an out-of-range one', async () => {
