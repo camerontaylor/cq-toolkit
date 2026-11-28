@@ -210,6 +210,9 @@ async function advisory(box: QueueBox, effects: ClientHealthEffects, log: string
   const repo = effects.repo;
 
   let number: JsonValue = box.health().get('issue_number') ?? null;
+  // A plain (non-search-index) listing, newest first: an advisory created by an
+  // earlier ambiguous attempt is among the most recent issues, so a full page with
+  // no match still proves it absent and can never wedge creation.
   if (number === null) {
     const rows = await forge([
       'issue',
