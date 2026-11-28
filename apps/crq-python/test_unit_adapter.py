@@ -638,6 +638,32 @@ class InventoryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "multiple RemainAfterExit"):
             self._remain("RemainAfterExit=no\nRemainAfterExit=yes\n")
 
+    def _timeouts(self, lines):
+        path = self.template("crq-tick.service")
+        text = path.read_text()
+        self.assertIn("TimeoutStartSec=10min\n", text)
+        path.write_text(text.replace("TimeoutStartSec=10min\n", lines, 1))
+        sha = self.commit()
+        return adapter_mod.declared_inventory(
+            self.root, sha)["crq-tick.service"]["service_timeout_seconds"]
+
+    def test_timeout_sec_alone_sets_the_start_timeout(self):
+        self.assertEqual(self._timeouts("TimeoutSec=5min\n"), 300)
+
+    def test_last_timeout_assignment_in_file_order_wins(self):
+        self.assertEqual(
+            self._timeouts("TimeoutStartSec=30s\nTimeoutSec=5min\n"), 300)
+        self.setUp()
+        self.assertEqual(
+            self._timeouts("TimeoutSec=5min\nTimeoutStartSec=30s\n"), 30)
+
+    def test_unusable_timeout_sec_refuses(self):
+        for value in ("0", "", "infinity", "bogus"):
+            with self.subTest(value=value):
+                self.setUp()
+                with self.assertRaisesRegex(ValueError, "invalid TimeoutSec"):
+                    self._timeouts("TimeoutSec=%s\n" % value)
+
     def test_undeclared_template_refuses(self):
         (self.template("crq-extra.service")).write_text(
             "[Service]\nExecStart=/bin/true\n")

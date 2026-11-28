@@ -495,14 +495,21 @@ def declared_inventory(root: Path, source_sha: str) -> dict:
             "service Type", "simple")
         if service_type not in {"oneshot", "simple"}:
             raise ValueError("service template has an unsupported Type: " + unit)
-        explicit_timeout = _section_values(
-            service_text, "Service", "TimeoutStartSec")
-        if explicit_timeout:
-            service_timeout = _duration_seconds(_single_value(
-                explicit_timeout, "service TimeoutStartSec"))
-            if service_timeout is None:
-                raise ValueError(
-                    "service template has an invalid TimeoutStartSec: " + unit)
+        # ``TimeoutSec=`` also sets the start timeout, and systemd applies both
+        # keys in file order, so the last assignment names the effective bound:
+        # ``TimeoutStartSec=30s`` followed by ``TimeoutSec=5min`` starts with
+        # the five-minute timeout, not the 30-second one. A template with only
+        # ``TimeoutStartSec=`` keeps its declared bound, and an unparseable
+        # assignment still refuses.
+        timeouts = _section_assignments(
+            service_text, "Service", ("TimeoutStartSec", "TimeoutSec"))
+        if timeouts:
+            service_timeout = None
+            for key, raw in timeouts:
+                service_timeout = _duration_seconds(raw)
+                if service_timeout is None:
+                    raise ValueError(
+                        "service template has an invalid " + key + ": " + unit)
         elif service_type == "oneshot":
             # systemd disables the start timeout for oneshot by default, so the
             # declared topology does not bound completion for these units.
