@@ -299,6 +299,20 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
                         'u', '[Service]\n' + comment + 'ExecStart=A\nExecStart=B\n',
                         '/r', 'NEW')
 
+    def test_exec_start_with_whitespace_before_equals_is_recognized(self):
+        for head in ('ExecStart =', 'ExecStart  =', 'ExecStart\t='):
+            with self.subTest(head=head, case='single'):
+                self.assertEqual(
+                    host.render_service_text(
+                        'u', '[Service]\n' + head + '/old\nRestart=always\n',
+                        '/r', 'NEW'),
+                    '[Service]\nExecStart=NEW\nRestart=always\n')
+            with self.subTest(head=head, case='double'):
+                with self.assertRaisesRegex(ValueError, 'exactly one ExecStart'):
+                    host.render_service_text(
+                        'u', '[Service]\n' + head + '/a\n' + head + '/b\n',
+                        '/r', 'NEW')
+
     def test_single_unit_render_matches_render_units_for_all_services(self):
         sha = 'a' * 40
         artifact = self._node_artifact(sha)
