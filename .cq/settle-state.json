@@ -43,13 +43,13 @@
     },
     "2443": {
       "tuple": {
-        "head": "e46b743a6d749fb20577a6050f1a55e09b991125",
-        "base": "8edcb9e2110f1d86413d238c439624fd16749647",
+        "head": "1ed59b8d80bc55cdb62d155e40c36d5b38e5a420",
+        "base": "0c09f04dbdba064b8fdd427c50a60a403ad01936",
         "forcePushEpoch": 0
       },
       "observations": [
         {
-          "observedAt": "2026-11-28T01:37:31.353Z",
+          "observedAt": "2026-11-28T02:03:28.869Z",
           "by": "self-merge-prs:observe"
         }
       ]
