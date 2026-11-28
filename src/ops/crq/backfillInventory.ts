@@ -179,8 +179,15 @@ export function rolloutSettings(value: unknown): {
     invalid();
   }
   if (typeof key !== 'string' || key.trim() === '' || /[\n\r\0]/.test(key)) invalid();
+  const durableArtifactRoot = recordGet(value, 'durable_artifact_root');
+  if (typeof durableArtifactRoot !== 'string' || durableArtifactRoot.trim() === '') {
+    throw new BackfillRouteError(
+      'invalid',
+      'backfill rollout durable_artifact_root incomplete or invalid',
+    );
+  }
   return {
-    durableArtifactRoot: recordGet(value, 'durable_artifact_root') as string,
+    durableArtifactRoot,
     enabled: recordGet(value, 'enabled') === true,
   };
 }
@@ -215,7 +222,7 @@ function artifactReference(value: unknown): BackfillArtifactReference {
 /** Decode a canonical JSON document; a malformed file is a refusal, not a guess. */
 function parseCanonical(text: string, what: string): unknown {
   try {
-    return parseJsonValue(text);
+    return parseJsonValue(text, { duplicates: 'error' });
   } catch (error) {
     throw new BackfillRouteError(
       'invalid',

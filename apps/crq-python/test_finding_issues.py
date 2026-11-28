@@ -133,6 +133,40 @@ class FileIssueTests(unittest.TestCase):
         self.assertEqual(fake.calls[0]["argv"], SEARCH_ARGV)
         self.assertIsNone(fake.calls[0]["input_text"])
 
+    def test_exact_title_beyond_the_first_twenty_results_leaves_delivery_pending(self):
+        """A full page of nonidentical in:title matches may hide the issue past --limit.
+
+        Creating here would duplicate an issue sitting beyond the cap (doctrine
+        I11: truncated data must not read as complete), so delivery stays pending.
+        """
+        page = [{"number": n, "title": f"{TITLE} (stale {n})",
+                 "url": f"https://github.com/{REPO}/issues/{n}"} for n in range(100, 120)]
+        fake = FakeGh(ok(json.dumps(page)))
+        with self.assertRaises(RuntimeError) as caught:
+            finding_issues.file_issue(CFG, base=BASE, head=HEAD, meta=META,
+                                       severity_counts=COUNTS, findings_md=MD, gh=fake)
+        self.assertIn("incomplete", str(caught.exception))
+        self.assertEqual([c["argv"] for c in fake.calls], [SEARCH_ARGV])
+
+    def test_exact_title_on_a_full_page_is_still_reused(self):
+        stale = [{"number": n, "title": f"{TITLE} (stale {n})",
+                  "url": f"https://github.com/{REPO}/issues/{n}"} for n in range(100, 119)]
+        fake = FakeGh(ok(json.dumps(stale + [EXISTING])))
+        result = finding_issues.file_issue(CFG, base=BASE, head=HEAD, meta=META,
+                                           severity_counts=COUNTS, findings_md=MD, gh=fake)
+        self.assertEqual(result, {"issue_url": EXISTING["url"], "issue_number": 7, "created": False})
+        self.assertEqual([c["argv"] for c in fake.calls], [SEARCH_ARGV])
+
+    def test_page_short_of_the_cap_without_exact_title_still_creates(self):
+        stale = [{"number": n, "title": f"{TITLE} (stale {n})",
+                  "url": f"https://github.com/{REPO}/issues/{n}"} for n in range(100, 119)]
+        fake = FakeGh(ok(json.dumps(stale)), ok(f"https://github.com/{REPO}/issues/9\n"))
+        result = finding_issues.file_issue(CFG, base=BASE, head=HEAD, meta=META,
+                                           severity_counts=COUNTS, findings_md=MD, gh=fake)
+        self.assertEqual(result, {"issue_url": f"https://github.com/{REPO}/issues/9",
+                                  "issue_number": 9, "created": True})
+        self.assertEqual([c["argv"] for c in fake.calls], [SEARCH_ARGV, CREATE_ARGV])
+
     def test_title_match_is_case_sensitive(self):
         other = dict(EXISTING, title=TITLE.upper())
         fake = FakeGh(ok(json.dumps([other])), ok(f"https://github.com/{REPO}/issues/9\n"))

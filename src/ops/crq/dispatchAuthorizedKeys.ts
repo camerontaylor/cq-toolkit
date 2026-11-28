@@ -183,6 +183,7 @@ export function checkDispatchAuthorizedKeysLine(
     problems.push('a public key (type and blob) must follow the options');
 
   let command: string | null = null;
+  let commandSeen = false;
   let restrict = false;
   for (const part of parts) {
     const eq = part.indexOf('=');
@@ -193,6 +194,10 @@ export function checkDispatchAuthorizedKeysLine(
     }
     if (name === 'restrict') restrict = true;
     if (name === 'command') {
+      // OpenSSH rejects a second `command` clause outright, so such a line
+      // can never authenticate even when the final command checks out.
+      if (commandSeen) problems.push('at most one command option is allowed');
+      commandSeen = true;
       const raw = part.slice(eq + 1);
       if (!/^".*"$/.test(raw)) problems.push('command must be a double-quoted string');
       else command = raw.slice(1, -1);

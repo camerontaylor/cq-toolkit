@@ -255,6 +255,39 @@ describe('recordClientHealth: opening the advisory issue', () => {
     expect(healthOf(result.queue)).toMatchObject({ opening: false, issue_number: null });
   });
 
+  it('adopts the ambiguously created issue from a non-search listing without a second create', async () => {
+    const h = harness((args) =>
+      args[0] === 'issue' ? [{ number: 77, title: HEALTH_TITLE, body: HEALTH_MARKER }] : {},
+    );
+    const start = queueOf({ incomplete_ticks: 5, opening: true });
+    const result = await recordClientHealth(start, true, h.effects);
+    expect(h.calls[0]).not.toContain('--search');
+    expect(h.calls.some((c) => c[0] === 'api' && c[1] === 'repos/o/r/issues')).toBe(false);
+    expect(healthOf(result.queue)).toMatchObject({ opening: false, issue_number: 77 });
+  });
+
+  const fullPage = (marked?: number) =>
+    Array.from({ length: 100 }, (_, i) => ({
+      number: i + 1,
+      title: HEALTH_TITLE,
+      body: marked === i + 1 ? HEALTH_MARKER : 'no marker',
+    }));
+
+  it('creates exactly once when a full 100-row page holds no advisory', async () => {
+    const h = harness((args) => (args[0] === 'issue' ? fullPage() : { number: 9 }));
+    const result = await recordClientHealth(atThreshold(), true, h.effects);
+    expect(h.calls.filter((c) => c[0] === 'api' && c[1] === 'repos/o/r/issues')).toHaveLength(1);
+    expect(healthOf(result.queue)).toMatchObject({ opening: false, issue_number: 9 });
+  });
+
+  it('adopts the marked advisory from a full page without a second create', async () => {
+    const h = harness((args) => (args[0] === 'issue' ? fullPage(40) : {}));
+    const start = queueOf({ incomplete_ticks: 5, opening: true });
+    const result = await recordClientHealth(start, true, h.effects);
+    expect(h.calls.some((c) => c[1] === 'repos/o/r/issues')).toBe(false);
+    expect(healthOf(result.queue)).toMatchObject({ opening: false, issue_number: 40 });
+  });
+
   it('honours a configured threshold and ignores an out-of-range one', async () => {
     const low = harness(() => [], { threshold: JsonNumber.int(1) });
     await recordClientHealth(queueOf({ incomplete_ticks: 0 }), true, low.effects);

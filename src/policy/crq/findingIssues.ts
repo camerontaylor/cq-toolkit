@@ -49,6 +49,8 @@ export const MAX_BODY = 65536;
 /** `finding_issues.TRUNCATED`, appended when the findings section is cut. */
 export const TRUNCATED =
   "\n\n_… findings truncated to fit GitHub's issue body limit; see the receipt for the full list._";
+/** `finding_issues.SEARCH_LIMIT`: in-title matches fetched per lookup. */
+export const SEARCH_LIMIT = 20;
 
 /** A Python exception class the differential compares. */
 export class FindingIssueError extends Error {
@@ -317,7 +319,13 @@ export async function fileFindingIssue(input: FileFindingIssueInput): Promise<Fi
 
 type GhOutcome = { readonly number: JsonValue; readonly url: JsonValue };
 
-/** `finding_issues._existing`: exact-title (case-sensitive) reuse. */
+/**
+ * `finding_issues._existing`: exact-title (case-sensitive) reuse. The in:title
+ * search also returns near matches, so `--limit` alone does not make the
+ * lookup exhaustive: a full `SEARCH_LIMIT` page without the exact title may be
+ * hiding the wanted issue beyond the cap, and that raises (the caller leaves
+ * delivery pending) instead of creating a duplicate.
+ */
 async function existingIssue(
   gh: GhPort,
   repo: string,
@@ -332,7 +340,7 @@ async function existingIssue(
     '--state',
     'all',
     '--limit',
-    '20',
+    String(SEARCH_LIMIT),
     '--json',
     'number,title,url',
     '--search',
@@ -372,6 +380,13 @@ async function existingIssue(
     ) {
       return { number, url };
     }
+  }
+  if (rows.length >= SEARCH_LIMIT) {
+    throw new FindingIssueRuntimeError(
+      `gh issue list filled its --limit ${SEARCH_LIMIT} page without an ` +
+        'exact-title match; the lookup is incomplete, so delivery is left ' +
+        'pending instead of risking a duplicate',
+    );
   }
   return undefined;
 }
