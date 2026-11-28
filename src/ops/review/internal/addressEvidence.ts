@@ -921,7 +921,9 @@ export async function settleAddressTerminalEvidence(
       while (cursor < tracked.length) {
         const end = tracked.indexOf('\0', cursor);
         if (end < 0) throw new Error('terminal index output incomplete');
-        const entry = /^(100644|100755|120000|160000) ([a-f0-9]{40,64}) 0\t(.+)$/.exec(
+        // Filenames are NUL-delimited, so a tracked name may contain line
+        // breaks; the dotAll flag keeps `.` matching across them.
+        const entry = /^(100644|100755|120000|160000) ([a-f0-9]{40,64}) 0\t(.+)$/s.exec(
           tracked.slice(cursor, end),
         );
         if (!entry) throw new Error('terminal foreign index entry unsupported');
