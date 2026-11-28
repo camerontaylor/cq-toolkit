@@ -1,4 +1,8 @@
-import { describe, expect, test } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, test } from 'vitest';
 import { JsonNumber, JsonObject, parseJsonValue } from '../../../../src/policy/crq/jsonValue.js';
 import {
   CalledProcessError,
@@ -325,11 +329,15 @@ function sw(
   const script: Script = {
     'rev-parse --show-toplevel': '/d\n',
     'rev-parse --abbrev-ref HEAD': 'HEAD\n',
+    'rev-parse --symbolic-full-name HEAD': 'HEAD\n',
     'rev-parse HEAD': `${'a'.repeat(40)}\n`,
     ...targetScript({ [`show ${T}:${CFG}`]: COMMITTED_CFG }),
     [`show HEAD:${CFG}`]: COMMITTED_CFG,
     [`restore -- ${CFG}`]: '',
-    [`checkout --detach ${T}`]: state.failCheckout ? new CalledProcessError(1, '') : '',
+    [`checkout --no-overwrite-ignore --detach ${T}`]: state.failCheckout
+      ? new CalledProcessError(1, '')
+      : '',
+    [`checkout --no-overwrite-ignore --detach ${'a'.repeat(40)}`]: '',
     ...over,
   };
   const g = fakeGit(script, log);
@@ -397,7 +405,7 @@ describe('switchCheckout', () => {
         `record switch-before [["target","${T}"],["tag",null]]`,
         `git restore -- ${CFG}`,
         'git status',
-        `git checkout --detach ${T}`,
+        `git checkout --no-overwrite-ignore --detach ${T}`,
         `record switch-render [["previous_sha","${'a'.repeat(40)}"],["tag",null]]`,
         'writeConfig',
         'git status',
@@ -428,7 +436,10 @@ describe('switchCheckout', () => {
     const prior = 'b'.repeat(40);
     const measured = bytes('{"clone":"/measured"}\n');
     const s = sw(
-      { [`cat-file -e ${prior}^{commit}`]: '', [`checkout --detach ${prior}`]: '' },
+      {
+        [`cat-file -e ${prior}^{commit}`]: '',
+        [`checkout --no-overwrite-ignore --detach ${prior}`]: '',
+      },
       { live: bytes('{"clone":"/live"}\n') },
     );
     wireStatus(s);
@@ -478,6 +489,204 @@ describe('switchCheckout', () => {
     const s = sw({ 'rev-parse --show-toplevel': '/d/sub\n' });
     await expect(switchCheckout(s.fx, '/d', OVERLAY, T)).rejects.toThrow('full monorepo checkout');
     expect(s.log.every((l) => !l.includes('merge-base'))).toBe(true);
+  });
+});
+
+describe('switchCheckout against a real repository', () => {
+  const roots: string[] = [];
+  afterEach(() => {
+    for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true });
+  });
+  const LIVE = 'live-host-bytes\n';
+  const DEST = 'destination-bytes\n';
+  function repo() {
+    const root = mkdtempSync(join(tmpdir(), 'switch-real-'));
+    roots.push(root);
+    const run = (...args: string[]): string =>
+      execFileSync('git', ['-C', root, ...args], {
+        encoding: 'utf8',
+        env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' },
+      }).trim();
+    run('init', '-q', '-b', 'main');
+    run('config', 'user.email', 't@example.invalid');
+    run('config', 'user.name', 't');
+    run('config', 'commit.gpgsign', 'false');
+    execFileSync('mkdir', ['-p', join(root, 'apps/crq-python')]);
+    writeFileSync(join(root, CFG), 'prior-committed\n');
+    writeFileSync(join(root, '.gitignore'), 'host-local.txt\n');
+    run('add', '.');
+    run('commit', '-q', '-m', 'prior');
+    const prior = run('rev-parse', 'HEAD');
+    writeFileSync(join(root, CFG), 'target-committed\n');
+    writeFileSync(join(root, 'target-source.txt'), 'only at target\n');
+    writeFileSync(join(root, 'host-local.txt'), 'tracked at target\n');
+    run('add', '.');
+    run('add', '-f', 'host-local.txt');
+    run('commit', '-q', '-m', 'target');
+    const target = run('rev-parse', 'HEAD');
+    run('checkout', '-q', 'main');
+    run('reset', '-q', '--hard', prior);
+    writeFileSync(join(root, CFG), LIVE);
+    const calls: string[] = [];
+    const hooks: {
+      git?: (args: readonly string[]) => Promise<void>;
+      writeConfig?: (() => Promise<void>) | undefined;
+    } = {};
+    const fx: SwitchEffectsLike = {
+      resolve: (p) => p,
+      git: async (args) => {
+        calls.push(args.join(' '));
+        await hooks.git?.(args);
+        try {
+          return Buffer.from(
+            execFileSync('git', ['-C', root, ...args], { stdio: ['ignore', 'pipe', 'pipe'] }),
+          );
+        } catch {
+          throw new CalledProcessError(1, '');
+        }
+      },
+      unitFiles: async () => [],
+      systemctl: async () => ({ code: 0, stdout: '', stderr: '' }),
+      withTickLock: (fn) => fn(),
+      readConfig: async () => readFileSync(join(root, CFG)),
+      writeConfig: async (d) => {
+        const hook = hooks.writeConfig;
+        hooks.writeConfig = undefined; // fires once: the rollback's own write must succeed
+        await hook?.();
+        writeFileSync(join(root, CFG), d);
+      },
+      record: async () => undefined,
+    };
+    const overlay = obj({ deploy_root: root, record_dir: '/rec', config: { clone: '/c' } });
+    const rootRealpath = run('rev-parse', '--show-toplevel');
+    const sw = () =>
+      switchCheckout(
+        { ...fx, resolve: () => rootRealpath },
+        rootRealpath,
+        overlay,
+        target,
+        null,
+        bytes(DEST),
+      );
+    return { root, run, prior, target, hooks, calls, sw };
+  }
+  type SwitchEffectsLike = Parameters<typeof switchCheckout>[0];
+  const live = (root: string): string => readFileSync(join(root, CFG), 'utf8');
+
+  test('a successful forward switch leaves the target detached with the destination config', async () => {
+    const r = repo();
+    await r.sw();
+    expect(r.run('rev-parse', 'HEAD')).toBe(r.target);
+    expect(() => r.run('symbolic-ref', '-q', 'HEAD')).toThrow();
+    expect(live(r.root)).toBe(DEST);
+  });
+
+  test('an interruption right after the first restore replaced the config reinstalls the original bytes', async () => {
+    const r = repo();
+    r.hooks.git = async (args) => {
+      if (args[0] !== 'restore' || r.calls.filter((c) => c.startsWith('restore')).length !== 1)
+        return;
+      // The restore lands, then the process is interrupted before it can return.
+      r.run(...args);
+      throw new Error('interrupted after first restore');
+    };
+    await expect(r.sw()).rejects.toThrow('interrupted after first restore');
+    expect(live(r.root)).toBe(LIVE);
+    expect(r.run('rev-parse', 'HEAD')).toBe(r.prior);
+    expect(r.run('symbolic-ref', 'HEAD')).toBe('refs/heads/main');
+  });
+
+  test('a failed checkout that never moved HEAD still attempts the rollback and refuses to reinstall config', async () => {
+    // git checkout writes the index and worktree before it moves HEAD, so HEAD == previous
+    // after a failure proves nothing: with HEAD.lock held the rollback checkout fails too and
+    // the switch must report an unrecovered rollback, not reinstall config over target source.
+    const r = repo();
+    writeFileSync(join(r.root, '.git/HEAD.lock'), '');
+    const err = await r.sw().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ValueError);
+    expect((err as Error).message).toContain('failed; live config left unrecovered');
+    expect(r.calls.filter((c) => c.endsWith(`--detach ${r.prior}`))).toHaveLength(1);
+    expect(r.run('rev-parse', 'HEAD')).toBe(r.prior);
+    // The failed checkout wrote target source into the tree: the config was not reinstalled.
+    expect(existsSync(join(r.root, 'target-source.txt'))).toBe(true);
+    expect(live(r.root)).not.toBe(LIVE);
+  });
+
+  test('an ignored host-local file at a path the target tracks aborts the switch and survives', async () => {
+    const r = repo();
+    writeFileSync(join(r.root, 'host-local.txt'), 'host edits\n');
+    const err = await r.sw().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CalledProcessError);
+    expect(readFileSync(join(r.root, 'host-local.txt'), 'utf8')).toBe('host edits\n');
+    expect(r.run('rev-parse', 'HEAD')).toBe(r.prior);
+    expect(r.run('symbolic-ref', 'HEAD')).toBe('refs/heads/main');
+    expect(live(r.root)).toBe(LIVE);
+  });
+
+  test('a failed switch reattaches the original branch while it still names the saved commit', async () => {
+    const r = repo();
+    r.hooks.writeConfig = async () => {
+      throw new Error('audit volume full');
+    };
+    await expect(r.sw()).rejects.toThrow('audit volume full');
+    expect(r.run('symbolic-ref', 'HEAD')).toBe('refs/heads/main');
+    expect(r.run('rev-parse', 'HEAD')).toBe(r.prior);
+    expect(live(r.root)).toBe(LIVE);
+  });
+
+  test('an originally detached checkout stays detached after a failed switch', async () => {
+    const r = repo();
+    r.run('checkout', '-q', '--detach', r.prior);
+    r.hooks.writeConfig = async () => {
+      throw new Error('audit volume full');
+    };
+    await expect(r.sw()).rejects.toThrow('audit volume full');
+    expect(() => r.run('symbolic-ref', '-q', 'HEAD')).toThrow();
+    expect(r.run('rev-parse', 'HEAD')).toBe(r.prior);
+    expect(live(r.root)).toBe(LIVE);
+  });
+
+  test('a branch that moved during the switch is not reattached', async () => {
+    const r = repo();
+    r.hooks.writeConfig = async () => {
+      r.run('update-ref', 'refs/heads/main', r.target);
+      throw new Error('audit volume full');
+    };
+    await expect(r.sw()).rejects.toThrow('audit volume full');
+    expect(() => r.run('symbolic-ref', '-q', 'HEAD')).toThrow();
+    expect(r.run('rev-parse', 'HEAD')).toBe(r.prior);
+    expect(r.run('rev-parse', 'refs/heads/main')).toBe(r.target);
+    expect(live(r.root)).toBe(LIVE);
+  });
+
+  test('a branch deleted during the switch is not reattached', async () => {
+    const r = repo();
+    r.hooks.writeConfig = async () => {
+      r.run('update-ref', '-d', 'refs/heads/main');
+      throw new Error('audit volume full');
+    };
+    await expect(r.sw()).rejects.toThrow('audit volume full');
+    expect(() => r.run('symbolic-ref', '-q', 'HEAD')).toThrow();
+    expect(r.run('rev-parse', 'HEAD')).toBe(r.prior);
+    expect(live(r.root)).toBe(LIVE);
+  });
+
+  test('an unreversible checkout reports recovery required and leaves the live bytes untouched', async () => {
+    const r = repo();
+    r.hooks.writeConfig = async () => {
+      throw new Error('audit volume full');
+    };
+    r.hooks.git = async (args) => {
+      if (args[0] === 'checkout' && args.at(-1) === r.prior) throw new CalledProcessError(1, '');
+    };
+    const err = await r.sw().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ValueError);
+    expect((err as Error).message).toContain(`rollback to ${r.prior} failed`);
+    expect((err as Error).message).toContain('live config left unrecovered');
+    expect((err as Error).message).toContain('audit volume full');
+    // The target is still checked out, so the previous rendering must not be installed over it.
+    expect(r.run('rev-parse', 'HEAD')).toBe(r.target);
+    expect(live(r.root)).not.toBe(LIVE);
   });
 });
 
