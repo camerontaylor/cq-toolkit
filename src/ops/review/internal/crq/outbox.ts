@@ -12,6 +12,7 @@
  * layout); `ArtifactVerifier` is the separately provisioned durable store.
  */
 import { JsonObject, type JsonValue } from '../../../../policy/crq/jsonValue.js';
+import { PUBLICATION_RECORD_BYTES } from '../../../../policy/crq/publication.js';
 import {
   LedgerIntegrityError,
   ledgerCanonicalBytes,
@@ -82,6 +83,12 @@ export class Outbox {
   async spool(value: JsonValue): Promise<string> {
     ledgerValidate(value);
     for (const reference of artifactsOf(value)) await this.artifacts.verify(reference);
+    // Admission applies the same per-record bound publish() enforces, on the
+    // canonical UTF-8 bytes, so a spooled record is always publishable.
+    const encoded = ledgerCanonicalBytes(value);
+    if (encoded.byteLength > PUBLICATION_RECORD_BYTES) {
+      throw new LedgerIntegrityError('ledger record exceeds validation bound');
+    }
     const id = idOf(value);
     return this.files.withLock(async () => {
       const existing = await this.files.readPending(id);
@@ -92,7 +99,7 @@ export class Outbox {
         if (!ledgerValueEqual(saved, value))
           throw new LedgerIntegrityError('outbox replay conflict');
       }
-      await this.files.writePending(id, ledgerCanonicalBytes(value));
+      await this.files.writePending(id, encoded);
       return id;
     });
   }

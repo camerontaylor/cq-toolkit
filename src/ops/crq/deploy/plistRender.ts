@@ -13,6 +13,8 @@ export interface PlistEffects {
   /** `str(Path(overlay_path).resolve())` and `str(Path.home())`. */
   overlayPath(): string;
   home(): string;
+  /** `os.environ.get('XDG_STATE_HOME', str(Path.home() / '.local/state'))`. */
+  xdgStateHome(): string;
 }
 
 export async function renderPlists(effects: PlistEffects, root: string): Promise<void> {
@@ -21,6 +23,7 @@ export async function renderPlists(effects: PlistEffects, root: string): Promise
     ['@CRQ_ROOT@', posixStr(`${root}/apps/crq-python`)],
     ['@OVERLAY@', effects.overlayPath()],
     ['@HOME@', effects.home()],
+    ['@XDG_STATE_HOME@', effects.xdgStateHome()],
   ];
   const replace = (value: PlistValue): PlistValue => {
     if (typeof value === 'string')

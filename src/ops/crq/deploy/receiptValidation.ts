@@ -358,11 +358,9 @@ export function schemaProblem(value: JsonValue, rule: JsonValue, at = ''): strin
     )
   ) {
     const names = Array.isArray(expected) ? expected : [expected];
-    const allowed = names.map((name) => {
-      if (!isStr(name) || !SCHEMA_TYPES.has(name))
-        throw new PythonError('KeyError', JSON.stringify(name));
-      return name;
-    });
+    if (names.some((name) => !isStr(name) || !SCHEMA_TYPES.has(name)))
+      return `${where}: unsupported schema type`;
+    const allowed = names as string[];
     if (!allowed.includes(kindOf(value))) return `${where}: type mismatch`;
   }
   const constant = rule.get('const');

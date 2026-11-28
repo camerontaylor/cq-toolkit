@@ -62,7 +62,10 @@ const publishCases = vectors.filter((entry) => entry.family === 'publish');
 function plan(caseEntry: PublisherVectorCase) {
   // `Outbox.pending()` lists retained ids in lexicographic filename order; the
   // vector input records the spool order, which is not the planning order.
-  const pending = [...arrayAt(caseEntry.input, 'pending')].sort((left, right) => {
+  const pending = [
+    ...arrayAt(caseEntry.input, 'pending'),
+    ...arrayAt(caseEntry.input, 'direct'),
+  ].sort((left, right) => {
     const leftId = recordId(left);
     const rightId = recordId(right);
     return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
@@ -150,7 +153,7 @@ describe('publication plan against the Python oracle', () => {
       throw new Error('missing partial-ack vectors');
     }
     const ack = at(arrayAt(ackCase.input, 'ledger'), 0);
-    const oversize = at(arrayAt(oversizeCase.input, 'pending'), 0);
+    const oversize = at(arrayAt(oversizeCase.input, 'direct'), 0);
     let caught: unknown;
     try {
       planPublication({ ledgerValues: [ack], pending: [ack, oversize] });
@@ -200,7 +203,7 @@ describe('publication plan against the Python oracle', () => {
   test('the 1 MiB bound counts canonical UTF-8 bytes, not UTF-16 units', () => {
     const caseEntry = publishCases.find((entry) => entry.name === 'record-over-limit-utf8');
     if (caseEntry === undefined) throw new Error('missing oversized vector');
-    const record = at(arrayAt(caseEntry.input, 'pending'), 0);
+    const record = at(arrayAt(caseEntry.input, 'direct'), 0);
     expect(ledgerCanonicalBytes(record).byteLength).toBeGreaterThan(PUBLICATION_RECORD_BYTES);
     // The same record is below the bound in JavaScript's UTF-16 units, so a
     // string-length port would wrongly accept it.

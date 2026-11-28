@@ -92,6 +92,12 @@ export interface Participant {
   reportTarget?: string;
   reportDirectory?: Identity;
   reportAncestor?: { path: string; identity: Identity };
+  /**
+   * Set once this participant's report bytes actually reached disk. A
+   * persistence failure throws instead, so an unset flag here means terminal
+   * cleanup intentionally skipped the write (journal directory absent).
+   */
+  reportPersisted?: boolean;
   started: number;
   attempts: AddressTerminalAttempt[];
   opaqueDispatched: boolean;
@@ -542,6 +548,7 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
                   participant.report,
                   directory,
                 );
+                participant.reportPersisted = true;
               } catch (error) {
                 persistFailure ??= { error };
               }
@@ -571,6 +578,7 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
                   report,
                   participant.reportDirectory!,
                 );
+                participant.reportPersisted = true;
               } catch (error) {
                 persistFailure ??= { error };
               }
@@ -611,6 +619,14 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
     if (!participant?.report || !this.participants.has(participant))
       throw new Error('address terminal: missing report association');
     await this.arrive(participant);
+    // arrive() awaited terminal cleanup: a persistence failure rejects, so a
+    // result here means the write either succeeded or was intentionally
+    // skipped (the journal directory vanished). Advertise the path only when
+    // the report exists on disk.
+    // An unwritten report is withheld entirely: its reportPath names a file
+    // that does not exist, so returning it would advertise a dangling path.
+    if (!participant.reportPersisted)
+      return { status: 'needs-human', reason: 'parent cancelled; no report written' };
     return {
       status: 'needs-human',
       reason: `parent cancelled; report: ${participant.report.reportPath}`,

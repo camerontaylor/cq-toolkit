@@ -1803,8 +1803,19 @@ def matrix_observe_phase(args):
             args.phase + " changed retained path bytes or metadata")
     service, direct = _observe_masked_service(args.phase)
     timer = show(TIMER, ["ActiveState", "LoadState"])
-    require(timer["ActiveState"] in ("inactive", "failed"),
-            args.phase + " left the timer activator active after the boundary")
+    # A manager restart or reboot can restart the enabled timer through
+    # timers.target while the service stays masked. The durable fence is the
+    # service mask, so the timer may be active only while the service above is
+    # proven masked and refused a direct start; the completion counts below
+    # prove that no work ran behind it, and recovery re-establishes the
+    # snapshot timer state.
+    require(timer["ActiveState"] in ("inactive", "failed")
+            or (timer["ActiveState"] == "active"
+                and timer["LoadState"] == "loaded"
+                and service["LoadState"] == "masked"
+                and direct["rc"] not in (0, None)),
+            args.phase + " left an active timer whose service can run work "
+            "after the boundary")
     staged = _assert_staged(spec, args.phase)
     require(staged == boundary["staged"],
             args.phase + " changed the staged service across the boundary")
@@ -2529,29 +2540,15 @@ def activators_fence(args):
             "paused switch record names another runtime")
     require(record.get("prior_runtime") == PYTHON_RUNTIME,
             "paused switch record names another prior runtime")
-    completions = record.get("completions") or []
-    require(len(completions) == 2,
-            "paused switch record does not retain two completions")
-    require(len({item.get("invocation") for item in completions}) == 2,
-            "paused switch completions share an invocation")
-    baseline = max((item.get("sequence", 0) for item in completions_before),
-                   default=0)
-    require(all(type(item.get("sequence")) is int
-                and item["sequence"] > baseline for item in completions),
-            "paused switch completions do not advance past the baseline")
-    after_by_invocation = {item.get("invocation"): item
-                           for item in completions_after}
-    baseline_invocations = {item.get("invocation")
-                            for item in completions_before}
+    completions = validate_completed(
+        record, NODE_RUNTIME, PYTHON_RUNTIME,
+        completion_baseline(completions_before), completions_after,
+        unit=REPAIR_UNIT)
     during_invocations = {item.get("invocation")
                           for item in (cli["during"] or {}).get(
                               "completions", [])}
-    for item in completions:
-        require(item.get("invocation") in after_by_invocation,
-                "paused switch completion is absent from the final log")
-        require(item.get("invocation") not in baseline_invocations,
-                "paused switch completion was attributed to pre-switch work")
-        require(item.get("invocation") not in during_invocations,
+    for item in completions["invocations"]:
+        require(item not in during_invocations,
                 "paused switch completion was attributed to pre-release work")
     require(len(records_after) == len(records_before) + 1,
             "paused switch did not retain exactly one new record")

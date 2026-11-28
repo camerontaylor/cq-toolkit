@@ -758,9 +758,13 @@ def boot(run: dict, recorder: Recorder, tools: pathlib.Path | None,
     log = (run_dir / "qemu.log").open("wb")
     process = subprocess.Popen(argv, cwd=run_dir, stdout=log, stderr=subprocess.STDOUT,
                                start_new_session=True)
-    recorder.append({"at": utc_now(), "argv": argv, "spawned_pid": process.pid,
-                     "scope_unit": scope_unit})
     try:
+        # The launch record is written inside the guarded block so a failure
+        # here cannot skip the cleanup below: the spawned child is terminated
+        # and reaped before the run lock is released, before it can start
+        # QEMU after this process exits.
+        recorder.append({"at": utc_now(), "argv": argv, "spawned_pid": process.pid,
+                         "scope_unit": scope_unit})
         deadline = time.time() + 30
         pid_path = run_dir / "qemu.pid"
         while time.time() < deadline and not pid_path.exists():

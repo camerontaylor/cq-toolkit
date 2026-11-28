@@ -413,6 +413,8 @@ export function hostBundle(
       atomicWrite: (name, data) => atomicBytes(`${posixStr(dir)}/${name}`, data),
       overlayPath: () => pyResolve(overlayPath),
       home: env.home,
+      xdgStateHome: () =>
+        currentEntryEnv().XDG_STATE_HOME ?? posix.join(env.home(), '.local/state'),
     }),
   };
 }
