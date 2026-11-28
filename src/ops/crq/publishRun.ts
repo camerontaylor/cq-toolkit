@@ -330,7 +330,9 @@ async function workerServices(effects: PublishRunEffects, config: JsonObject): P
  * integer domain).
  */
 export function parseQueueBytes(bytes: Uint8Array): JsonValue {
-  return parseJsonValue(new TextDecoder().decode(bytes), {
+  // Python `bytes.decode('utf-8')` is strict: malformed bytes refuse instead
+  // of silently becoming U+FFFD; valid UTF-8 (an intentional U+FFFD) decodes.
+  return parseJsonValue(new TextDecoder('utf-8', { fatal: true }).decode(bytes), {
     objectPairs: (pairs) => {
       const seen = new Set<string>();
       for (const [key] of pairs) {

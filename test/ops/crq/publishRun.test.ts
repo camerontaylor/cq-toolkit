@@ -9,6 +9,7 @@ import {
 } from '../../../src/adapters/crq/ledgerGit.js';
 import {
   jsonEqual,
+  parseQueueBytes,
   runPublish,
   PublishRolloutDisabled,
   type PublishRunEffects,
@@ -2306,3 +2307,14 @@ function verifiableReview(options: {
 
 void stringAt;
 void requireObject;
+
+describe('parseQueueBytes UTF-8 strictness (Python bytes.decode)', () => {
+  const enc = new TextEncoder();
+  test('refuses a queue whose string value holds an invalid UTF-8 byte', () => {
+    const bytes = Uint8Array.from([...enc.encode('{"k":"a'), 0xff, ...enc.encode('b"}')]);
+    expect(() => parseQueueBytes(bytes)).toThrow();
+  });
+  test('accepts an intentional U+FFFD encoded as valid UTF-8', () => {
+    expect(() => parseQueueBytes(enc.encode('{"k":"a�b"}'))).not.toThrow();
+  });
+});

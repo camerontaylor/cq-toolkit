@@ -266,6 +266,32 @@ class BuildRunnerTests(unittest.TestCase):
                 with self.assertRaises(ProcessLookupError):
                     os.kill(descendant, 0)
 
+    def test_run_command_success_kills_background_writer_before_lock_release(self):
+        # A command that exits 0 after starting a background writer with
+        # redirected streams lets communicate() return while the writer lives.
+        # It must be dead before run_command returns, i.e. while the lock is
+        # still held.
+        repo = self.base / 'real'
+        subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+        record = self.base / 'writer.pid'
+        command = ['sh', '-c',
+                   'sleep 30 >/dev/null 2>&1 </dev/null & echo $! > '
+                   + shlex.quote(str(record))]
+        with build_runner._exclusive_checkout(repo):
+            result = build_runner.run_command(command, cwd=repo, timeout=20)
+            self.assertEqual(result.returncode, 0)
+            writer = int(record.read_text())
+            if sys.platform == 'linux':
+                try:
+                    stat = Path(f'/proc/{writer}/stat').read_bytes()
+                except (FileNotFoundError, ProcessLookupError):
+                    pass
+                else:
+                    self.assertIn(stat.rsplit(b') ', 1)[1].split()[0], (b'Z', b'X'))
+            else:
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(writer, 0)
+
     def test_run_command_interrupt_cleans_up_then_propagates(self):
         process = mock.MagicMock()
         interruption = KeyboardInterrupt()

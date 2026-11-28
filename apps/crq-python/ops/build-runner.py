@@ -88,14 +88,17 @@ def _linux_group_has_live_members(pgid):
 
 
 def _kill_process_group(process):
-    """Kill a failed command and its process group, confirming they exited.
+    """Kill a command and its process group, confirming they exited.
 
     run_command starts each command in its own session, so SIGKILL to the
     process group reaches the children and grandchildren pnpm forks. A caller
     holding an advisory lock must not release it while a killed process may
     still write to the guarded tree, so poll until every group member is
     confirmed exited before returning. Linux zombies have already exited,
-    even if PID 1 has yet to reap them.
+    even if PID 1 has yet to reap them. run_command also calls this after
+    normal communicate() completion: a command may exit while a background
+    writer it started stays alive, and that survivor must not outlive the
+    checkout lock.
     """
     try:
         os.killpg(process.pid, signal.SIGKILL)
@@ -133,6 +136,11 @@ def run_command(argv, cwd, env=None, timeout=COMMAND_TIMEOUT):
         except BaseException:
             _kill_process_group(process)
             raise
+        # communicate() waits only for the leader: a command that starts a
+        # background writer with redirected streams and then exits leaves it
+        # alive. Finalize the whole group (SIGKILL is a no-op once the group
+        # is gone) so no survivor can write after the lock is released.
+        _kill_process_group(process)
     if process.returncode != 0:
         detail = ['command failed (' + str(process.returncode) + '): ' + shlex.join(argv)]
         if stdout:
