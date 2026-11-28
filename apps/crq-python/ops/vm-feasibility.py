@@ -807,7 +807,6 @@ def boot(run: dict, recorder: Recorder, tools: pathlib.Path | None,
     # (every launch counts, even one that reuses a port). port_held() cannot
     # tell a lost bind from an unrelated QEMU failure, so qemu.log keeps the
     # first launch's output and each retry writes qemu.log.<n>.
-    chosen = run["port"]
     attempted: set[int] = set()
     launches = 0
     while True:
@@ -907,16 +906,18 @@ def boot(run: dict, recorder: Recorder, tools: pathlib.Path | None,
             raise
         finally:
             log.close()
-    if run["port"] != chosen:
-        # load_run() hands boot() only three keys, so merge the port into the
-        # on-disk metadata instead of replacing it (image, started_at, ...).
-        meta_path = run_dir / "run.json"
-        try:
-            meta = json.loads(meta_path.read_text())
-        except FileNotFoundError:
-            meta = dict(run)
-        meta["port"] = run["port"]
-        save_json(meta_path, meta)
+    # Always merge the port into the current on-disk metadata: cmd_boot loads
+    # its snapshot before taking the run lock, so another invocation may have
+    # written a different port since, and comparing against the snapshot would
+    # skip the write. load_run() also hands boot() only three keys, so merging
+    # (not replacing) keeps image, started_at, ...
+    meta_path = run_dir / "run.json"
+    try:
+        meta = json.loads(meta_path.read_text())
+    except FileNotFoundError:
+        meta = dict(run)
+    meta["port"] = run["port"]
+    save_json(meta_path, meta)
     return {"pid": pid, "starttime": starttime, "scope_unit": scope_unit,
             "spawned_pid": process.pid, "qemu": argv, "port": run["port"]}
 

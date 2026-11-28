@@ -1591,6 +1591,39 @@ class LifecycleTests(unittest.TestCase):
             self.assertFalse(vm.port_listener_pid(os.getppid(), port))
             self.assertFalse(vm.port_listener_pid(2 ** 22 + 1, port))
 
+    def test_boot_persists_its_port_over_a_newer_on_disk_value(self):
+        # Invocation A loaded port 2222 before the lock; B then booted on 2223
+        # and stopped, leaving run.json at 2223. A boots on 2222 and must
+        # record that, not skip the write because 2222 equals its snapshot.
+        with tempfile.TemporaryDirectory() as temporary:
+            state = pathlib.Path(temporary)
+            run_dir = state / "runs" / "r1"
+            run_dir.mkdir(parents=True)
+            prepared = {"run_id": "r1", "path": str(run_dir), "port": 2222,
+                        "image": {"path": "/img"}, "started_at": "t"}
+            vm.save_json(run_dir / "run.json", prepared)
+            run = vm.load_run(state, "r1", require_process=False)
+            vm.save_json(run_dir / "run.json", {**prepared, "port": 2223})
+
+            class Process:
+                pid = 4321
+
+                def poll(self):
+                    return None
+
+            def popen(argv, **kwargs):
+                (run_dir / "qemu.pid").write_text("4321\n")
+                return Process()
+
+            with mock.patch.object(vm, "require_memory"), \
+                 mock.patch.object(vm, "tool", return_value="/bin/true"), \
+                 mock.patch.object(vm, "port_listener_pid", return_value=True), \
+                 mock.patch.object(vm, "process_starttime", return_value="9"), \
+                 mock.patch.object(vm.subprocess, "Popen", side_effect=popen):
+                vm.boot(run, vm.Recorder(run_dir), None, {"kvm_writable": True})
+            saved = json.loads((run_dir / "run.json").read_text())
+            self.assertEqual(saved, {**prepared, "port": 2222})
+
     def test_boot_does_not_retry_when_the_port_is_free(self):
         with tempfile.TemporaryDirectory() as temporary:
             run_dir = pathlib.Path(temporary) / "r1"
