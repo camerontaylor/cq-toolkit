@@ -77,20 +77,11 @@ def advisory(c, q, health, budget, log):
                           "--limit", "100", "--json", "number,title,body"])
             matches = [r for r in rows if r.get("title") == TITLE and MARKER in (r.get("body") or "")]
             number = matches[0]["number"] if matches else None
-            # A full page proves nothing about issues past the cap: never treat it as absence.
-            truncated = len(rows) >= 100
             if health.get("opening"):
                 if number is None:
-                    log.append("health advisory: opening marker unresolved; list truncated, marker retained"
-                               if truncated else
-                               "health advisory: opening marker unresolved; confirming list found no issue, marker cleared")
-                if number is not None or not truncated:
-                    health.update(opening=False, issue_number=number)
-                    c.save_queue(q)
-            elif number is None and truncated:
-                health["opening"] = True
-                c.save_queue(q)  # absence is unproven; defer the create behind the marker
-                log.append("health advisory: list truncated; absence unproven, opening marker set for the next tick")
+                    log.append("health advisory: opening marker unresolved; confirming list found no issue, marker cleared")
+                health.update(opening=False, issue_number=number)
+                c.save_queue(q)
         body = MARKER + "\nDiscovery incomplete for " + str(health["incomplete_ticks"]) + " ticks. Advisory only."
         if desired:
             if number is None:

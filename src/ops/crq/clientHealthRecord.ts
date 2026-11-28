@@ -26,8 +26,6 @@ export const ADVISORY_BUDGET_REQUESTS = 3;
 export const ADVISORY_BUDGET_SECONDS = 10;
 const STREAK_CAP = 1_000_000;
 const DEFAULT_THRESHOLD = 3;
-/** `issue list --limit`; a result this large may be truncated. */
-const ADVISORY_LOOKUP_LIMIT = 100;
 
 /** A Python exception raised by the advisory itself or by the forge effect. */
 export class HealthAdvisoryError extends Error {
@@ -212,11 +210,9 @@ async function advisory(box: QueueBox, effects: ClientHealthEffects, log: string
   const repo = effects.repo;
 
   let number: JsonValue = box.health().get('issue_number') ?? null;
-  // The lookup is a plain (non-search-index) listing so a just-created advisory is
-  // visible to the confirming call. It proves the advisory absent only when it is not truncated:
-  // a full page says nothing about issues past the cap, so a truncated result is
-  // never treated as "no advisory".
-  let lookupTruncated = false;
+  // A plain (non-search-index) listing, newest first: an advisory created by an
+  // earlier ambiguous attempt is among the most recent issues, so a full page with
+  // no match still proves it absent and can never wedge creation.
   if (number === null) {
     const rows = await forge([
       'issue',
@@ -226,42 +222,27 @@ async function advisory(box: QueueBox, effects: ClientHealthEffects, log: string
       '--state',
       'all',
       '--limit',
-      String(ADVISORY_LOOKUP_LIMIT),
+      '100',
       '--json',
       'number,title,body',
     ]);
-    const seen = iterate(rows).length;
     number = firstMarkedIssue(rows);
-    lookupTruncated = seen >= ADVISORY_LOOKUP_LIMIT;
     if (pyTruthy(box.health().get('opening'))) {
       if (number === null) {
         log.push(
-          lookupTruncated
-            ? 'health advisory: opening marker unresolved; list truncated, marker retained'
-            : 'health advisory: opening marker unresolved; confirming list found no issue, marker cleared',
+          'health advisory: opening marker unresolved; confirming list found no issue, marker cleared',
         );
       }
-      if (number !== null || !lookupTruncated) {
-        box.update([
-          ['opening', false],
-          ['issue_number', number],
-        ]);
-        await save();
-      }
-    } else if (number === null && lookupTruncated) {
-      box.update([['opening', true]]);
-      await save(); // absence is unproven; defer the create behind the marker
-      log.push(
-        'health advisory: list truncated; absence unproven, opening marker set for the next tick',
-      );
+      box.update([
+        ['opening', false],
+        ['issue_number', number],
+      ]);
+      await save();
     }
   }
-  // An unresolved opening marker with no issue found must not turn into a
-  // duplicate create; a later tick's search settles the ambiguity.
-  const retainOpeningMarker = number === null && pyTruthy(box.health().get('opening'));
   const body = `${HEALTH_MARKER}\nDiscovery incomplete for ${pyStr(ticks)} ticks. Advisory only.`;
   if (desired) {
-    if (number === null && !retainOpeningMarker) {
+    if (number === null) {
       box.update([['opening', true]]);
       await save(); // persist intent before an ambiguous create response
       let result: JsonValue;
@@ -280,7 +261,7 @@ async function advisory(box: QueueBox, effects: ClientHealthEffects, log: string
       number = subscriptNumber(result);
       box.update([['issue_number', number]]);
       await save();
-    } else if (number !== null) {
+    } else {
       await forge([
         'api',
         `repos/${repo}/issues/${pyStr(number)}`,
@@ -312,13 +293,10 @@ async function advisory(box: QueueBox, effects: ClientHealthEffects, log: string
       'state=closed',
     ]);
   }
-  const openingSettled: ReadonlyArray<readonly [string, JsonValue]> = retainOpeningMarker
-    ? []
-    : [['opening', false]];
   box.update([
     ['issue_open', desired],
     ['issue_number', number],
-    ...openingSettled,
+    ['opening', false],
     ['issue_ticks', ticks],
   ]);
 }

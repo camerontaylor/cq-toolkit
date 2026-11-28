@@ -424,8 +424,7 @@ produce a tick log line. Before create, a durable opening marker is saved; a
 definite non-zero create exit clears the marker so later ticks can retry.
 Timeouts and other ambiguous outcomes retain it and log `opening marker unresolved`.
 The next attempt makes one bounded, non-search-index confirming issue-list call:
-if it finds the marker it adopts that issue; a full (truncated) page proves nothing
-and retains the marker; otherwise it clears the opening
+if it finds the marker it adopts that issue; otherwise it clears the opening
 marker and may create within the remaining budget. If discovery has recovered,
 absence clears the marker without creating an issue. Failed confirmation retains
 the marker and logs the unresolved state. This remains advisory and never blocks dispatch.
