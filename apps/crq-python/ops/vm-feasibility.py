@@ -1330,6 +1330,12 @@ def _cleanup_diagnostic(args, prefix: str, cleanup_error: Exception,
     return message
 
 
+# _stop_partial_boot_note: a partial boot can leave a live guest with no
+# recorded identity. Stop it while the boot lock is still held: once the lock
+# is released another invocation can boot a replacement first, and an
+# unguarded stop would kill that one. stop_owned_process would re-take the run
+# lock the caller already holds, so callers use _stop_owned_process directly.
+
 def cmd_boot(args) -> int:
     state = pathlib.Path(args.state_dir).expanduser().resolve()
     run = load_run(state, args.run_id, require_process=False)
@@ -1344,15 +1350,28 @@ def cmd_boot(args) -> int:
         with run_lock(pathlib.Path(run["path"])):
             refuse_live_run(run)
             entered_boot = True
-            info = boot(run, recorder, args.tools, stamp)
+            try:
+                info = boot(run, recorder, args.tools, stamp)
+            except BaseException as boot_exc:
+                # Partial boot: stop it under the boot lock (see
+                # _stop_partial_boot_note). boot has no --keep, so a failed
+                # boot is always stopped here.
+                try:
+                    _stop_owned_process(run, purge=False)
+                except Exception as cleanup_error:
+                    _cleanup_diagnostic(args, "cleanup after failed boot",
+                                        cleanup_error, boot_exc)
+                raise
         # The lock is released here: later cleanup must stop only this launch.
         launched = {"pid": info["pid"], "starttime": info["starttime"]}
         info["ssh"] = wait_ssh(run, recorder)
         upload_guest_probe(run, recorder)
     except BaseException as exc:
         # A boot rejected because another invocation holds run.lock owns no
-        # guest; cleaning up would stop that invocation's live guest.
-        if entered_boot:
+        # guest; cleaning up would stop that invocation's live guest. A
+        # partial boot was already stopped under the boot lock above, so only
+        # a boot that returned reaches this guarded stop.
+        if entered_boot and launched is not None:
             try:
                 stop_owned_process(run, purge=False, launched=launched)
             except Exception as cleanup_error:
@@ -1454,7 +1473,20 @@ def cmd_run(args) -> int:
         with run_lock(pathlib.Path(run["path"])):
             refuse_live_run(run)
             skip_cleanup = False
-            boot_info = boot(run, recorder, args.tools, stamp)
+            try:
+                boot_info = boot(run, recorder, args.tools, stamp)
+            except BaseException as boot_exc:
+                # Partial boot: stop it under the boot lock (see
+                # _stop_partial_boot_note). Unlike cmd_boot, --keep means the
+                # operator asked to inspect the guest, so skip the stop.
+                if not args.keep:
+                    try:
+                        _stop_owned_process(run, purge=False)
+                    except Exception as cleanup_error:
+                        _cleanup_diagnostic(args, "cleanup after failed run",
+                                            cleanup_error, boot_exc)
+                skip_cleanup = True
+                raise
         launched = {"pid": boot_info["pid"], "starttime": boot_info["starttime"]}
         boot_info["ssh"] = wait_ssh(run, recorder)
         upload = upload_guest_probe(run, recorder, source=guest_bytes)
@@ -1479,7 +1511,9 @@ def cmd_run(args) -> int:
         problems = report_problems(report, require_evidence=True)
     except BaseException as exc:
         # A refused or lock-rejected boot owns no guest; cleaning up would stop
-        # the VM another invocation owns.
+        # the VM another invocation owns. A partial boot was already stopped
+        # under the boot lock above, which re-arms skip_cleanup, so its
+        # failure never reaches this stop.
         if not skip_cleanup and not args.keep:
             try:
                 stop_owned_process(run, purge=False, launched=launched)
