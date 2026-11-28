@@ -557,10 +557,20 @@ class BoundedRepairTest(unittest.TestCase):
         with mock.patch.object(repair_tick, 'finding_inbox', return_value=inbox):
             repair_tick.harvest(self.c, self.queue, item)
         self.assertEqual(json.loads(row.read_text())['status'], 'needs-human')
+        # Recovery retains exactly one outcome for the sibling's finding.
+        outcomes = [v for v in out.retained() if v.get('event_type') == 'finding-event'
+                    and v['payload'].get('finding_id') == 'd' * 64]
+        self.assertEqual([v['payload']['action'] for v in outcomes], ['needs-human'])
+        event_id = outcomes[0]['id']
         # Replay is idempotent: one retained decision, no duplicate event.
         with mock.patch.object(repair_tick, 'finding_inbox', return_value=inbox):
             repair_tick.harvest(self.c, self.queue, item)
-        self.assertEqual(json.loads(row.read_text())['status'], 'needs-human')
+        replayed = [v for v in out.retained() if v.get('event_type') == 'finding-event'
+                    and v['payload'].get('finding_id') == 'd' * 64]
+        self.assertEqual([v['id'] for v in replayed], [event_id])
+        final = json.loads(row.read_text())
+        self.assertEqual(final['status'], 'needs-human')
+        self.assertEqual(final['previous_event_id'], event_id)
 
     def test_terminal_failure_attempts_every_sibling_write_back(self):
         job_id, job = self.prepare()
