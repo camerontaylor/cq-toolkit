@@ -610,6 +610,39 @@ class DeployTests(DeployFixture, unittest.TestCase):
         self.assertEqual(document["outcome"], "completed")
         self.assertEqual(seen, [{"deadline": 10.0, "clock": self.clock}])
 
+    def test_drain_poll_fails_closed_at_the_deadline_naming_unresolved_runs(self):
+        # End to end through the real drain_check: the first run's probe
+        # outlives the whole 10s deadline and answers "harvest", so the
+        # second run is never probed. The loop must refuse, keep the hold
+        # and name the unobserved run as unresolved, not accept a drain.
+        (self.runner / "state/queue.json").write_text(json.dumps({
+            "items": [{"id": "pr1", "run": {"run_id": "a" * 32}},
+                      {"id": "pr2", "run": {"run_id": "b" * 32}}],
+            "starts": []}) + "\n")
+        probed = []
+
+        def probe(rdir, item, run, has_exit, timeout=30):
+            probed.append((item["id"], timeout))
+            self.now[0] += 12.0
+            return "harvest"
+
+        run = self.build()
+        run.drain_fn = None
+        with mock.patch.object(dc, "_runner_liveness",
+                               return_value=probe):
+            with self.assertRaises(rb.RecoveryRequired) as caught:
+                run.run()
+        self.assertEqual(probed, [("pr1", 10.0)])
+        self.assertIn("drain expired", str(caught.exception))
+        self.assertIn("unresolved", str(caught.exception))
+        self.assertIn("b" * 32, str(caught.exception))
+        record = json.loads((Path(run.run_dir) / "drain.json").read_text())
+        self.assertFalse(record["drained"])
+        self.assertEqual(record["polls"][-1]["blocked"][0]["state"],
+                         "unresolved")
+        self.assertTrue(self.marker().exists())
+        self.assertEqual(self.units.started, [])
+
     def test_incompatible_queue_refuses_before_hold(self):
         state = self.runner / "state/queue.json"
         state.write_text('{"schema_version": 2, "items": []}\n')

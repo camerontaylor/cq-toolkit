@@ -218,6 +218,22 @@ class DrainTests(ControllerFixture):
              "reason": "drain deadline expired before its liveness probe "
                        "ran"}])
 
+    def test_runner_probe_clamps_its_subprocess_timeout_to_thirty_seconds(self):
+        # A 900s drain deadline hands the first poll a 900s budget; the
+        # runner probe must still never wait longer than its own 30s
+        # default on a hung liveness helper, and a smaller budget wins.
+        probe = dc._runner_liveness(self.effects)
+        done = mock.Mock(returncode=0, stdout='"harvest"')
+        with mock.patch.object(dc.subprocess, "run",
+                               return_value=done) as run:
+            self.assertEqual(probe(self.runner, {}, {}, False,
+                                   timeout=900.0), "harvest")
+            self.assertEqual(run.call_args.kwargs["timeout"], 30)
+            probe(self.runner, {}, {}, False, timeout=7.5)
+            self.assertEqual(run.call_args.kwargs["timeout"], 7.5)
+            probe(self.runner, {}, {}, False)
+            self.assertEqual(run.call_args.kwargs["timeout"], 30)
+
     def test_enforced_deadline_expires_before_any_probe_reports_unresolved(self):
         self.write_state("queue.json", {"items": [
             {"id": "pr1", "run": {"run_id": "a" * 32}}]})
