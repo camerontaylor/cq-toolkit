@@ -64,8 +64,10 @@ DURATION_UNITS = {
     "years": 31557600, "year": 31557600, "y": 31557600,
 }
 # Longest spelling first so ``min`` never matches as ``m`` and ``ms`` never as ``m``.
+# Blanks may sit between a magnitude and its unit: systemd parses both
+# ``TimeoutStartSec=5 min`` and ``TimeoutStartSec=5min`` as five minutes.
 DURATION_RE = re.compile(
-    r"(?P<value>\d+(?:\.\d+)?)(?P<unit>"
+    r"(?P<value>\d+(?:\.\d+)?)[ \t]*(?P<unit>"
     + "|".join(sorted(map(re.escape, DURATION_UNITS), key=len, reverse=True))
     + ")?")
 UNIT_FILE_STATES = {"enabled", "disabled", "static", "masked", "alias",
@@ -312,8 +314,9 @@ def _section_assignments(text: str, section: str, keys: tuple[str, ...]) -> list
 
 def _duration_seconds(text: str, zero_ok: bool = False) -> int | None:
     # systemd time spans join components with optional whitespace
-    # ("5min 20s", "20min30s"); every component must parse.
-    value = text.strip()
+    # ("5min 20s", "20min30s") and allow blanks between a magnitude and its
+    # unit ("5 min", "5min"); every component must parse.
+    value = text.strip(SYSTEMD_BLANKS)
     if not value:
         return None
     # systemd parses time spans in microseconds, truncating each component's
@@ -325,7 +328,7 @@ def _duration_seconds(text: str, zero_ok: bool = False) -> int | None:
         if match is None:
             return None
         position = match.end()
-        while position < len(value) and value[position].isspace():
+        while position < len(value) and value[position] in SYSTEMD_BLANKS:
             position += 1
         factor = DURATION_UNITS[match.group("unit") or "s"]
         try:
@@ -492,14 +495,21 @@ def declared_inventory(root: Path, source_sha: str) -> dict:
             "service Type", "simple")
         if service_type not in {"oneshot", "simple"}:
             raise ValueError("service template has an unsupported Type: " + unit)
-        explicit_timeout = _section_values(
-            service_text, "Service", "TimeoutStartSec")
-        if explicit_timeout:
-            service_timeout = _duration_seconds(_single_value(
-                explicit_timeout, "service TimeoutStartSec"))
-            if service_timeout is None:
-                raise ValueError(
-                    "service template has an invalid TimeoutStartSec: " + unit)
+        # ``TimeoutSec=`` also sets the start timeout, and systemd applies both
+        # keys in file order, so the last assignment names the effective bound:
+        # ``TimeoutStartSec=30s`` followed by ``TimeoutSec=5min`` starts with
+        # the five-minute timeout, not the 30-second one. A template with only
+        # ``TimeoutStartSec=`` keeps its declared bound, and an unparseable
+        # assignment still refuses.
+        timeouts = _section_assignments(
+            service_text, "Service", ("TimeoutStartSec", "TimeoutSec"))
+        if timeouts:
+            service_timeout = None
+            for key, raw in timeouts:
+                service_timeout = _duration_seconds(raw)
+                if service_timeout is None:
+                    raise ValueError(
+                        "service template has an invalid " + key + ": " + unit)
         elif service_type == "oneshot":
             # systemd disables the start timeout for oneshot by default, so the
             # declared topology does not bound completion for these units.

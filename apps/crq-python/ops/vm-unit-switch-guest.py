@@ -1303,8 +1303,8 @@ def interrupt_phase(args):
     before_paths = [str(path) for path in records()]
     before = snapshot()
     result = cli("switch", ["--runtime", NODE_RUNTIME], kill="install")
-    require(result["rc"] not in (0, None),
-            "interrupted switch unexpectedly returned success")
+    require(result["rc"] == -9,
+            "interrupted switch was not terminated by SIGKILL at the install hook")
     created = new_records(before_paths)
     require(len(created) == 1, "interrupted switch did not leave one journal record")
     record_path = created[0]
@@ -1479,8 +1479,8 @@ def rollback_fence_phase(args):
     before = snapshot()
     before_paths = [str(path) for path in records()]
     switched = cli("switch", ["--runtime", NODE_RUNTIME], kill="install")
-    require(switched["rc"] not in (0, None),
-            "rollback fence switch unexpectedly returned success")
+    require(switched["rc"] == -9,
+            "rollback fence switch was not terminated by SIGKILL at the install hook")
     created = new_records(before_paths)
     try:
         refusal = json.loads(switched.get("stdout") or "").get("refused")
@@ -1502,8 +1502,8 @@ def rollback_fence_phase(args):
     record_before = record_summary(record_path)
 
     killed = cli("recover", ["--record", str(record_path)], kill="restore_staged")
-    require(killed["rc"] not in (0, None),
-            "rollback fence recovery unexpectedly returned success")
+    require(killed["rc"] == -9,
+            "rollback fence recovery was not terminated by SIGKILL at the restore hook")
     record_after_kill = record_summary(record_path)
     require(record_after_kill["sha256"] == record_before["sha256"],
             "rollback fence kill changed the retained record")
@@ -1588,8 +1588,8 @@ def fence_phase(args):
     before = snapshot()
     before_paths = [str(path) for path in records()]
     result = cli("switch", ["--runtime", NODE_RUNTIME], kill="start")
-    require(result["rc"] not in (0, None),
-            "fence probe switch unexpectedly returned success")
+    require(result["rc"] == -9,
+            "fence probe switch was not terminated by SIGKILL at the start hook")
     created = new_records(before_paths)
     require(len(created) == 1, "fence probe did not leave one journal record")
     record_path = created[0]
@@ -1711,8 +1711,8 @@ def matrix_boundary_phase(args):
     kill_at = "start" if spec["boundary"] == "activation_pending" else "install"
     switched = cli("switch", ["--runtime", spec["runtime"]], kill=kill_at,
                    record_dir=record_dir)
-    require(switched["rc"] not in (0, None),
-            args.phase + " switch unexpectedly returned success")
+    require(switched["rc"] == -9,
+            args.phase + " switch was not terminated by SIGKILL at the hook")
     created = new_records(before_paths, record_dir)
     require(len(created) == 1,
             args.phase + " did not leave exactly one journal record")
@@ -1731,8 +1731,8 @@ def matrix_boundary_phase(args):
     if spec["boundary"] == "restore_staged":
         killed = cli("recover", ["--record", str(record_path)],
                      kill="restore_staged", record_dir=record_dir)
-        require(killed["rc"] not in (0, None),
-                args.phase + " restore unexpectedly returned success")
+        require(killed["rc"] == -9,
+                args.phase + " restore was not terminated by SIGKILL at the hook")
         record = json.loads(record_path.read_text())
         require(record["outcome"] == "pending"
                 and record["phase"] == "drained",
@@ -2705,7 +2705,8 @@ def activators_interrupt(args):
     after = repair_snapshot()
     records_after = [record_summary(path)
                      for path in records_in(REPAIR_RECORDS)]
-    require(cli["rc"] not in (0, None), "interrupt did not kill the switch")
+    require(cli["rc"] == -9,
+            "interrupt was not terminated by SIGKILL at the install hook")
     require(len(records_after) == len(records_before) + 1,
             "interrupt did not retain exactly one new record")
     pending = [item for item in records_after

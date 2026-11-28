@@ -638,6 +638,32 @@ class InventoryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "multiple RemainAfterExit"):
             self._remain("RemainAfterExit=no\nRemainAfterExit=yes\n")
 
+    def _timeouts(self, lines):
+        path = self.template("crq-tick.service")
+        text = path.read_text()
+        self.assertIn("TimeoutStartSec=10min\n", text)
+        path.write_text(text.replace("TimeoutStartSec=10min\n", lines, 1))
+        sha = self.commit()
+        return adapter_mod.declared_inventory(
+            self.root, sha)["crq-tick.service"]["service_timeout_seconds"]
+
+    def test_timeout_sec_alone_sets_the_start_timeout(self):
+        self.assertEqual(self._timeouts("TimeoutSec=5min\n"), 300)
+
+    def test_last_timeout_assignment_in_file_order_wins(self):
+        self.assertEqual(
+            self._timeouts("TimeoutStartSec=30s\nTimeoutSec=5min\n"), 300)
+        self.setUp()
+        self.assertEqual(
+            self._timeouts("TimeoutSec=5min\nTimeoutStartSec=30s\n"), 30)
+
+    def test_unusable_timeout_sec_refuses(self):
+        for value in ("0", "", "infinity", "bogus"):
+            with self.subTest(value=value):
+                self.setUp()
+                with self.assertRaisesRegex(ValueError, "invalid TimeoutSec"):
+                    self._timeouts("TimeoutSec=%s\n" % value)
+
     def test_undeclared_template_refuses(self):
         (self.template("crq-extra.service")).write_text(
             "[Service]\nExecStart=/bin/true\n")
@@ -1686,6 +1712,14 @@ class AdapterTests(AdapterFixture):
                 recovery.restore_activation("crq-tick.service", snapshot)
                 self.assertEqual(self.fake.active["crq-tick.service"], "active")
 
+    def test_unicode_blank_between_magnitude_and_unit_is_not_a_duration(self):
+        # systemd rejects NBSP between magnitude and unit and keeps the earlier value.
+        recovery, snapshot = self._recovery_with_timeout_line(
+            "TimeoutStartSec=20min\nTimeoutStartSec=1\u00a0min")
+        self.fake.service_start_delay = 700
+        recovery.restore_activation("crq-tick.service", snapshot)
+        self.assertEqual(self.fake.active["crq-tick.service"], "active")
+
     def test_last_timeout_assignment_wins_across_both_keys(self):
         for lines in ("TimeoutStartSec=5min\nTimeoutStartSec=20min",
                       "TimeoutStartSec=1min\nTimeoutSec=20min",
@@ -1798,6 +1832,12 @@ class AdapterTests(AdapterFixture):
         self.assertEqual(adapter_mod._duration_seconds("1h 30min"), 5400)
         self.assertIsNone(adapter_mod._duration_seconds("5min bogus"))
         self.assertIsNone(adapter_mod._duration_seconds(""))
+
+    def test_blank_between_magnitude_and_unit_is_accepted(self):
+        self.assertEqual(adapter_mod._duration_seconds("5min"), 300)
+        self.assertEqual(adapter_mod._duration_seconds("5 min"), 300)
+        self.assertEqual(adapter_mod._duration_seconds("5 min 20s"), 320)
+        self.assertIsNone(adapter_mod._duration_seconds("5 mins"))
 
     def test_forward_and_recovery_for_both_runtimes(self):
         cases = [
